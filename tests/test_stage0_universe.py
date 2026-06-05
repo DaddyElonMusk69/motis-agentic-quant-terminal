@@ -190,10 +190,8 @@ def test_build_stage0_universe_keeps_one_signal_pool_per_engine_asset():
         window_end="2026-05-30T23:59:59Z",
         train_start="2026-03-01",
         train_end="2026-04-30",
-        validation_start="2026-05-01",
-        validation_end="2026-05-24",
-        locked_oos_start="2026-05-25",
-        locked_oos_end="2026-05-30",
+        walk_forward_start="2026-05-01",
+        walk_forward_end="2026-05-30",
         forward_hours=36,
         trigger_rate_threshold_pct=85,
         signal_sets=signal_sets,
@@ -206,13 +204,11 @@ def test_build_stage0_universe_keeps_one_signal_pool_per_engine_asset():
         split_signal_counts_by_signal_set={
             "vegas_ema:AAVE:legacy-2026-AAVE": {
                 "train": 200,
-                "validation": 68,
-                "locked_oos": 0,
+                "walk_forward": 68,
             },
             "vegas_ema:AAVE:canonical": {
                 "train": 260,
-                "validation": 120,
-                "locked_oos": 40,
+                "walk_forward": 160,
             },
         },
         engine_ids=["vegas_ema"],
@@ -228,10 +224,8 @@ def test_build_stage0_universe_requires_packets_in_each_configured_split():
         window_end="2026-05-30T23:59:59Z",
         train_start="2026-03-01",
         train_end="2026-04-30",
-        validation_start="2026-05-01",
-        validation_end="2026-05-24",
-        locked_oos_start="2026-05-25",
-        locked_oos_end="2026-05-30",
+        walk_forward_start="2026-05-01",
+        walk_forward_end="2026-05-30",
         forward_hours=36,
         trigger_rate_threshold_pct=85,
         signal_sets=[
@@ -252,8 +246,7 @@ def test_build_stage0_universe_requires_packets_in_each_configured_split():
         split_signal_counts_by_signal_set={
             "vegas_ema:AAVE:canonical": {
                 "train": 200,
-                "validation": 68,
-                "locked_oos": 0,
+                "walk_forward": 0,
             }
         },
         engine_ids=["vegas_ema"],
@@ -263,17 +256,15 @@ def test_build_stage0_universe_requires_packets_in_each_configured_split():
     assert result["run"]["summary"]["total_candidates"] == 0
 
 
-def test_build_stage0_universe_allows_empty_oos_packets_when_scanned_coverage_exists():
+def test_build_stage0_universe_rejects_empty_walk_forward_split_even_when_scanned_coverage_exists():
     result = build_stage0_universe(
         universe_run_id="stage0-universe-scanned-empty-oos",
         window_start="2026-03-01T00:00:00Z",
         window_end="2026-05-30T23:59:59Z",
         train_start="2026-03-01",
         train_end="2026-04-30",
-        validation_start="2026-05-01",
-        validation_end="2026-05-24",
-        locked_oos_start="2026-05-25",
-        locked_oos_end="2026-05-30",
+        walk_forward_start="2026-05-01",
+        walk_forward_end="2026-05-30",
         forward_hours=36,
         trigger_rate_threshold_pct=85,
         signal_sets=[
@@ -296,15 +287,14 @@ def test_build_stage0_universe_allows_empty_oos_packets_when_scanned_coverage_ex
         split_signal_counts_by_signal_set={
             "vegas_ema:AAVE:canonical": {
                 "train": 200,
-                "validation": 68,
-                "locked_oos": 0,
+                "walk_forward": 0,
             }
         },
         engine_ids=["vegas_ema"],
     )
 
-    assert len(result["candidates"]) == 1
-    assert result["candidates"][0]["signal_set_key"] == "vegas_ema:AAVE:canonical"
+    assert result["candidates"] == []
+    assert result["run"]["summary"]["total_candidates"] == 0
 
 
 def test_build_stage0_universe_filters_by_selected_assets():
@@ -335,6 +325,10 @@ def test_build_stage0_universe_filters_by_selected_assets():
         universe_run_id="stage0-universe-filtered",
         window_start="2026-03-01T00:00:00Z",
         window_end="2026-05-30T11:55:00Z",
+        train_start="2026-03-01",
+        train_end="2026-04-30",
+        walk_forward_start="2026-05-01",
+        walk_forward_end="2026-05-30",
         forward_hours=36,
         trigger_rate_threshold_pct=85,
         signal_sets=signal_sets,
@@ -343,6 +337,16 @@ def test_build_stage0_universe_filters_by_selected_assets():
         signal_counts_by_signal_set={
             "vegas_ema:BTC:2026-BTC-2h-dedupe-vote2": 12,
             "vegas_ema:AAVE:2026-AAVE-2h-dedupe-vote2": 12,
+        },
+        split_signal_counts_by_signal_set={
+            "vegas_ema:BTC:2026-BTC-2h-dedupe-vote2": {
+                "train": 6,
+                "walk_forward": 6,
+            },
+            "vegas_ema:AAVE:2026-AAVE-2h-dedupe-vote2": {
+                "train": 6,
+                "walk_forward": 6,
+            },
         },
         engine_ids=["vegas_ema"],
         asset_symbols=["AAVE"],
@@ -359,10 +363,8 @@ def test_stage0_universe_config_hash_includes_batch_split_windows():
         "trigger_rate_threshold_pct": 85,
         "train_start": "2026-03-01",
         "train_end": "2026-04-30",
-        "validation_start": "2026-05-01",
-        "validation_end": "2026-05-24",
-        "locked_oos_start": "2026-05-25",
-        "locked_oos_end": "2026-05-31",
+        "walk_forward_start": "2026-05-01",
+        "walk_forward_end": "2026-05-31",
         "engine_ids": ["vegas_ema"],
         "asset_symbols": ["BTC"],
     }
@@ -372,7 +374,7 @@ def test_stage0_universe_config_hash_includes_batch_split_windows():
         **{
             **base,
             "train_end": "2026-04-20",
-            "validation_start": "2026-04-21",
+            "walk_forward_start": "2026-04-21",
         }
     )
 

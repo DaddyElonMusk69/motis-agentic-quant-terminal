@@ -18,10 +18,8 @@ class WalkForwardWindow:
     template_id: str
     train_start: date
     train_end: date
-    validation_start: date
-    validation_end: date
-    oos_start: date
-    oos_end: date
+    walk_forward_start: date
+    walk_forward_end: date
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,8 +27,7 @@ class WalkForwardTemplate:
     template_id: str
     retrain_cadence: str
     train_range: str
-    validation_range: str
-    oos_range: str
+    walk_forward_range: str
     embargo: str
     anchor: str = "rolling"
 
@@ -39,23 +36,18 @@ class WalkForwardTemplate:
             raise ValueError(f"Unsupported v1 walk-forward anchor: {self.anchor!r}")
 
         train_days = _parse_days(self.train_range)
-        validation_days = _parse_days(self.validation_range)
-        oos_days = _parse_days(self.oos_range)
+        walk_forward_days = _parse_days(self.walk_forward_range)
         embargo_days = _parse_days(self.embargo) if self.embargo != "0d" else 0
 
-        oos_start = as_of
-        oos_end = oos_start + timedelta(days=oos_days - 1)
-        validation_end = oos_start - timedelta(days=embargo_days + 1)
-        validation_start = validation_end - timedelta(days=validation_days - 1)
-        train_end = validation_start - timedelta(days=embargo_days + 1)
+        walk_forward_start = as_of
+        walk_forward_end = walk_forward_start + timedelta(days=walk_forward_days - 1)
+        train_end = walk_forward_start - timedelta(days=embargo_days + 1)
         train_start = train_end - timedelta(days=train_days - 1)
 
         return WalkForwardWindow(
             template_id=self.template_id,
             train_start=train_start,
             train_end=train_end,
-            validation_start=validation_start,
-            validation_end=validation_end,
-            oos_start=oos_start,
-            oos_end=oos_end,
+            walk_forward_start=walk_forward_start,
+            walk_forward_end=walk_forward_end,
         )

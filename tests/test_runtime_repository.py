@@ -1,6 +1,6 @@
-from sqlalchemy import create_engine, insert, select
+from sqlalchemy import create_engine, insert, select, update
 
-from quant_terminal_api.db.models import decisions, metadata, signal_sets, signals
+from quant_terminal_api.db.models import decisions, metadata, signal_sets, signals, stage1_research_sessions
 from quant_terminal_api.repositories.runtime import RuntimeRepository
 
 
@@ -186,10 +186,8 @@ def test_runtime_repository_persists_stage0_universe_runs_and_candidates():
         "window_end": "2026-05-30T11:55:00Z",
         "train_start": "2026-03-01",
         "train_end": "2026-04-30",
-        "validation_start": "2026-05-01",
-        "validation_end": "2026-05-24",
-        "locked_oos_start": "2026-05-25",
-        "locked_oos_end": "2026-05-30",
+        "walk_forward_start": "2026-05-25",
+        "walk_forward_end": "2026-05-30",
         "forward_hours": 36,
         "trigger_rate_threshold_pct": 85,
         "engine_filter": ["vegas_ema"],
@@ -222,10 +220,8 @@ def test_runtime_repository_persists_stage0_universe_runs_and_candidates():
     assert stored_run["universe_run_id"] == "universe-march-may"
     assert stored_run["train_start"].isoformat() == "2026-03-01"
     assert stored_run["train_end"].isoformat() == "2026-04-30"
-    assert stored_run["validation_start"].isoformat() == "2026-05-01"
-    assert stored_run["validation_end"].isoformat() == "2026-05-24"
-    assert stored_run["locked_oos_start"].isoformat() == "2026-05-25"
-    assert stored_run["locked_oos_end"].isoformat() == "2026-05-30"
+    assert stored_run["walk_forward_start"].isoformat() == "2026-05-25"
+    assert stored_run["walk_forward_end"].isoformat() == "2026-05-30"
     assert stored_run["summary"] == {"total_candidates": 1}
     assert stored_candidates[0]["acceptance_status"] == "accepted"
     assert stored_candidates[0]["last_error"] == {}
@@ -344,10 +340,8 @@ def test_runtime_repository_deletes_stage0_universe_with_linked_stage1_sessions(
             "strategy_version": "v0.1",
             "train_start": "2026-03-01",
             "train_end": "2026-04-30",
-            "validation_start": "2026-05-01",
-            "validation_end": "2026-05-24",
-            "locked_oos_start": "2026-05-25",
-            "locked_oos_end": "2026-05-31",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
             "artifact_root": "dev/training_sessions/btc-vegas-tunnel-v01/stage1-btc",
             "status": "draft",
             "manifest": {"session_id": "stage1-btc"},
@@ -463,13 +457,16 @@ def test_runtime_repository_canonicalizes_existing_signal_pools_and_references()
             "strategy_version": "v0.1",
             "train_start": "2026-03-01",
             "train_end": "2026-04-30",
-            "validation_start": "2026-05-01",
-            "validation_end": "2026-05-24",
-            "locked_oos_start": "2026-05-25",
-            "locked_oos_end": "2026-05-31",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
             "artifact_root": "dev/training_sessions/sol-vegas-tunnel-v01/stage1-sol",
             "status": "draft",
-            "manifest": {"session_id": "stage1-sol"},
+            "manifest": {
+                "session_id": "stage1-sol",
+                "signal_set_key": "vegas_ema:SOL:2026-SOL-2h-dedupe-vote2",
+                "signal_set_id": "2026-SOL-2h-dedupe-vote2",
+                "stage0_candidate_id": "candidate-sol-2026",
+            },
         }
     )
 
@@ -490,7 +487,28 @@ def test_runtime_repository_canonicalizes_existing_signal_pools_and_references()
     assert candidates[0]["signal_set_key"] == "vegas_ema:SOL:SOL-vegas_ema-canonical"
     session = repository.get_stage1_research_session("stage1-sol")
     assert session["signal_set_key"] == "vegas_ema:SOL:SOL-vegas_ema-canonical"
+    assert session["signal_set_id"] == "SOL-vegas_ema-canonical"
+    assert session["manifest"]["signal_set_key"] == "vegas_ema:SOL:SOL-vegas_ema-canonical"
+    assert session["manifest"]["signal_set_id"] == "SOL-vegas_ema-canonical"
     assert session["source_candidate_id"] == "candidate-sol-2026"
+
+    with engine.begin() as connection:
+        connection.execute(
+            update(stage1_research_sessions)
+            .where(stage1_research_sessions.c.session_id == "stage1-sol")
+            .values(
+                manifest={
+                    **session["manifest"],
+                    "signal_set_key": "vegas_ema:SOL:2026-SOL-2h-dedupe-vote2",
+                    "signal_set_id": "2026-SOL-2h-dedupe-vote2",
+                }
+            )
+        )
+    repository.canonicalize_signal_pools()
+    repaired_session = repository.get_stage1_research_session("stage1-sol")
+    assert repaired_session["signal_set_key"] == "vegas_ema:SOL:SOL-vegas_ema-canonical"
+    assert repaired_session["manifest"]["signal_set_key"] == "vegas_ema:SOL:SOL-vegas_ema-canonical"
+    assert repaired_session["manifest"]["signal_set_id"] == "SOL-vegas_ema-canonical"
 
 
 def test_runtime_repository_refreshes_stage0_summary_and_marks_complete_or_superseded():
@@ -609,10 +627,8 @@ def test_runtime_repository_creates_stage1_research_session():
         "strategy_version": "v0.1",
         "train_start": "2026-03-01",
         "train_end": "2026-04-30",
-        "validation_start": "2026-05-01",
-        "validation_end": "2026-05-24",
-        "locked_oos_start": "2026-05-25",
-        "locked_oos_end": "2026-05-31",
+        "walk_forward_start": "2026-05-25",
+        "walk_forward_end": "2026-05-31",
         "artifact_root": "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave-vegas-202606",
         "status": "draft",
         "manifest": {"stage": "stage1a_directional_agreement"},
@@ -646,10 +662,8 @@ def test_runtime_repository_existing_rnd_includes_stage1_sessions():
             "strategy_version": "v0.1",
             "train_start": "2026-03-01",
             "train_end": "2026-04-30",
-            "validation_start": "2026-05-01",
-            "validation_end": "2026-05-24",
-            "locked_oos_start": "2026-05-25",
-            "locked_oos_end": "2026-05-30",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-30",
             "artifact_root": "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave",
             "status": "draft",
             "manifest": {"stage": "stage1a_directional_agreement"},
@@ -686,10 +700,8 @@ def test_runtime_repository_resolves_latest_stage1_pair_seed(tmp_path):
         "strategy_version": "v0.1",
         "train_start": "2026-01-01",
         "train_end": "2026-02-28",
-        "validation_start": "2026-03-01",
-        "validation_end": "2026-03-15",
-        "locked_oos_start": "2026-03-16",
-        "locked_oos_end": "2026-03-31",
+        "walk_forward_start": "2026-03-01",
+        "walk_forward_end": "2026-03-31",
         "artifact_root": str(artifact_root),
         "status": "stage1a_frozen",
         "manifest": {"stage": "stage1a_directional_agreement"},

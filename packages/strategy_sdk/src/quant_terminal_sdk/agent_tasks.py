@@ -31,7 +31,7 @@ class AgentTaskBundle:
                 "Read these scoped context files:",
                 allowed,
                 "",
-                "Do not inspect forbidden validation or locked OOS data.",
+                "Do not inspect forbidden walk-forward data.",
                 f"Forbidden context paths are tracked by the platform ({forbidden_count} paths).",
                 "",
                 "Write an audit note, update only the strategy module if needed, add tests, "

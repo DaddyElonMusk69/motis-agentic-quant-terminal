@@ -105,7 +105,7 @@ def test_create_stage1_iteration_workspace_writes_handoff_sample_and_snapshot(tm
         workspace_root=tmp_path,
         session=session,
         signals=signals,
-        sample_method="recent_regime_train",
+        sample_method="training",
     )
 
     iteration_root = Path(result["iteration_root"])
@@ -121,7 +121,7 @@ def test_create_stage1_iteration_workspace_writes_handoff_sample_and_snapshot(tm
     assert (iteration_root / "source_artifacts/strategy_module_snapshot/strategy.py").exists()
     assert [item["signal_id"] for item in sample["signals"]] == ["sig-old", "sig-new", "sig-latest"]
     assert sample["signals"][0]["packet"] == {}
-    assert sample["sample_method"] == "recent_regime_train"
+    assert sample["sample_method"] == "training"
     assert sample["signal_count"] == 3
     assert "future_ground_truth" not in json.dumps(sample)
     assert "future_ground_truth" not in handoff
@@ -129,7 +129,7 @@ def test_create_stage1_iteration_workspace_writes_handoff_sample_and_snapshot(tm
     assert "Do not use future outcomes" in handoff
     assert "embedded `packet` JSON" in handoff
     assert "packet paths" not in handoff.lower()
-    assert "global packet folders" in handoff
+    assert "signal folder" in handoff
     assert "source_artifacts/strategy_module_snapshot" in prompt
     assert str(iteration_root / "signal_sample.json") in prompt
     assert "embedded packet JSON" in prompt
@@ -178,7 +178,7 @@ def test_create_stage1_iteration_workspace_dedupes_duplicate_signal_timestamps_a
         workspace_root=tmp_path,
         session=session,
         signals=signals,
-        sample_method="recent_regime_train",
+        sample_method="training",
     )
 
     sample = json.loads((Path(result["iteration_root"]) / "signal_sample.json").read_text())
@@ -212,7 +212,7 @@ def test_repair_stage1_iteration_bundle_rewrites_stale_samples_and_handoff(tmp_p
         )
     )
     (iteration_root / "manifest.json").write_text(
-        json.dumps({"iteration_id": "iter_001_v0.1", "sample_method": "recent_regime_train", "signal_count": 2})
+        json.dumps({"iteration_id": "iter_001_v0.1", "sample_method": "training", "signal_count": 2})
     )
     legacy_packet_dir = tmp_path / "dev/signals/vegas_ema/ZEC/2026-ZEC-2h-dedupe-vote2/packets"
     legacy_packet_dir.mkdir(parents=True)
@@ -221,7 +221,7 @@ def test_repair_stage1_iteration_bundle_rewrites_stale_samples_and_handoff(tmp_p
         json.dumps(
             {
                 "schema_version": "0.1",
-                "sample_method": "recent_regime_train",
+                "sample_method": "training",
                 "signal_count": 2,
                 "signals": [
                     {
@@ -320,7 +320,7 @@ def test_create_stage1_iteration_workspace_writes_builder_bundle_with_training_l
         workspace_root=tmp_path,
         session=session,
         signals=signals,
-        sample_method="recent_regime_train",
+        sample_method="training",
         bundle_role="strategy_builder",
     )
 
@@ -339,13 +339,13 @@ def test_create_stage1_iteration_workspace_writes_builder_bundle_with_training_l
     assert str(iteration_root / "builder_training_sample.json") in prompt
     assert "embedded training packet JSON" in prompt
     assert "training packet paths" not in prompt
-    assert "validation" in prompt.lower()
-    assert "locked OOS" in prompt
+    assert "walk-forward" in prompt.lower()
+    assert "walk-forward" in prompt
     assert evaluator_sample["signals"][0]["packet"]["schema_version"] == "signal_packet.v2"
     assert "natural_direction" not in json.dumps(evaluator_sample)
 
 
-def test_create_stage1_iteration_workspace_writes_final_refit_bundle_prompt(tmp_path: Path):
+def test_create_stage1_iteration_workspace_writes_training_builder_prompt(tmp_path: Path):
     artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave-vegas"
     stage0_root = tmp_path / "dev/stage0/universe/vegas_ema/AAVE/2026-AAVE-2h-dedupe-vote2"
     ground_truth_root = stage0_root / "scores" / "ground_truth"
@@ -377,16 +377,16 @@ def test_create_stage1_iteration_workspace_writes_final_refit_bundle_prompt(tmp_
         workspace_root=tmp_path,
         session=session,
         signals=signals,
-        sample_method="final_refit_ab",
+        sample_method="training",
         bundle_role="strategy_builder",
     )
 
     iteration_root = Path(result["iteration_root"])
     prompt = (iteration_root / "strategy_builder_prompt.md").read_text()
 
-    assert "Training + Forward Validation final refit" in prompt
-    assert "Locked OOS labels and packets remain hidden" in prompt
-    assert "After editing" in prompt and "create the locked OOS evaluator bundle" in prompt
+    assert "training-window natural_direction labels" in prompt
+    assert "Do not use walk-forward labels, packets, score files, or future candles" in prompt
+    assert "click Score on this iteration, then create the walk-forward test bundle" in prompt
 
 
 def test_list_stage1_iterations_reports_bundle_score_and_audit_state(tmp_path: Path):
@@ -400,7 +400,7 @@ def test_list_stage1_iterations_reports_bundle_score_and_audit_state(tmp_path: P
         json.dumps(
             {
                 "iteration_id": "iter_001_v0.1",
-                "sample_method": "recent_regime_train",
+                "sample_method": "training",
                 "signal_count": 3,
                 "status": "created",
             }
@@ -432,8 +432,8 @@ def test_list_stage1_iterations_reports_bundle_score_and_audit_state(tmp_path: P
 def test_build_stage1_gate_summary_blocks_until_all_slice_scores_pass(tmp_path: Path):
     artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
     for iteration_id, role, score_name, passes in (
-        ("iter_001_v0.1", "recent_regime_train", "stage1a_directional_scores.json", True),
-        ("iter_002_v0.1", "forward_validation", "stage1a_forward_validation_scores.json", False),
+        ("iter_001_v0.1", "training", "stage1a_directional_scores.json", True),
+        ("iter_002_v0.1", "walk_forward_test", "stage1a_walk_forward_scores.json", False),
     ):
         iteration_root = artifact_root / "iterations" / iteration_id
         (iteration_root / "scores").mkdir(parents=True)
@@ -462,21 +462,19 @@ def test_build_stage1_gate_summary_blocks_until_all_slice_scores_pass(tmp_path: 
     gate = build_stage1_gate_summary(workspace_root=tmp_path, session=session)
 
     assert gate["ready_to_freeze"] is False
-    assert gate["roles"]["recent_regime_train"]["status"] == "pass"
-    assert gate["roles"]["forward_validation"]["status"] == "fail"
-    assert gate["roles"]["locked_recent_oos"]["status"] == "missing"
-    assert "Locked OOS" in gate["blockers"][1]
-    assert gate["final_refit"]["exists"] is False
+    assert gate["roles"]["training"]["status"] == "pass"
+    assert gate["roles"]["walk_forward_test"]["status"] == "fail"
+    assert "Walk-Forward" in gate["blockers"][0]
 
 
-def test_build_stage1_gate_summary_reports_final_refit_checkpoint(tmp_path: Path):
+def test_build_stage1_gate_summary_reports_missing_walk_forward_checkpoint(tmp_path: Path):
     artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
     iteration_root = artifact_root / "iterations" / "iter_003_v0.1"
     (iteration_root / "scores").mkdir(parents=True)
     (iteration_root / "decisions").mkdir()
     (iteration_root / "summaries").mkdir()
     (iteration_root / "manifest.json").write_text(
-        json.dumps({"iteration_id": "iter_003_v0.1", "sample_method": "final_refit_ab", "signal_count": 12})
+        json.dumps({"iteration_id": "iter_003_v0.1", "sample_method": "training", "signal_count": 12})
     )
     (iteration_root / "signal_sample.json").write_text("{}")
     (iteration_root / "agent_prompt.md").write_text("prompt")
@@ -485,17 +483,16 @@ def test_build_stage1_gate_summary_reports_final_refit_checkpoint(tmp_path: Path
 
     gate = build_stage1_gate_summary(workspace_root=tmp_path, session=session)
 
-    assert gate["final_refit"]["exists"] is True
-    assert gate["final_refit"]["iteration_id"] == "iter_003_v0.1"
-    assert gate["final_refit"]["signal_count"] == 12
+    assert gate["ready_to_freeze"] is False
+    assert gate["roles"]["training"]["status"] == "missing"
+    assert gate["roles"]["walk_forward_test"]["status"] == "missing"
 
 
 def test_build_stage1_gate_summary_reports_canonical_complete(tmp_path: Path):
     artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
     role_files = {
-        "recent_regime_train": "stage1a_directional_scores.json",
-        "forward_validation": "stage1a_forward_validation_scores.json",
-        "locked_recent_oos": "stage1a_locked_oos_scores.json",
+        "training": "stage1a_directional_scores.json",
+        "walk_forward_test": "stage1a_walk_forward_scores.json",
     }
     for index, (role, score_name) in enumerate(role_files.items(), start=1):
         iteration_root = artifact_root / "iterations" / f"iter_{index:03d}_v0.1"
@@ -526,3 +523,111 @@ def test_build_stage1_gate_summary_reports_canonical_complete(tmp_path: Path):
     assert gate["ready_to_freeze"] is True
     assert gate["canonical_readout"]["exists"] is True
     assert gate["canonical_readout"]["match_count"] == 1
+    assert gate["stage2_capture"]["exists"] is False
+
+
+def test_build_stage1_gate_summary_reports_stage2_capture_complete(tmp_path: Path):
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
+    promotion_root = artifact_root / "promotion"
+    frozen_root = promotion_root / "frozen_stage1a_strategy_module"
+    frozen_root.mkdir(parents=True)
+    (promotion_root / "stage1a_canonical_full_cycle_decisions.json").write_text("{}")
+    (promotion_root / "stage1a_canonical_full_cycle_scores.json").write_text(
+        json.dumps({"metrics": {"matches": 1}, "slice_metrics": {}, "match_set": [{"signal_id": "sig"}]})
+    )
+    (frozen_root / "strategy.py").write_text("def decide(context): return {}")
+    (promotion_root / "stage2_capture_curve.json").write_text(
+        json.dumps({"metrics": {"total_match_signals": 1}, "results": {"1.0": {"full_cycle": {"rate": 100.0}}}})
+    )
+    (promotion_root / "stage2_capture_per_signal.json").write_text("[]")
+    (promotion_root / "stage2_summary.md").write_text("# Stage 2 Travel Capture\n")
+    session = {"session_id": "stage1-aave", "artifact_root": str(artifact_root), "status": "stage1a_frozen"}
+
+    gate = build_stage1_gate_summary(workspace_root=tmp_path, session=session)
+
+    assert gate["stage2_capture"]["exists"] is True
+    assert gate["stage2_capture"]["capture_curve_path"].endswith("promotion/stage2_capture_curve.json")
+    assert gate["stage2_capture"]["metrics"]["total_match_signals"] == 1
+    assert gate["stage3_grid"]["exists"] is False
+
+
+def test_build_stage1_gate_summary_reports_stage3_grid_complete(tmp_path: Path):
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
+    promotion_root = artifact_root / "promotion"
+    frozen_root = promotion_root / "frozen_stage1a_strategy_module"
+    frozen_root.mkdir(parents=True)
+    (promotion_root / "stage1a_canonical_full_cycle_decisions.json").write_text("{}")
+    (promotion_root / "stage1a_canonical_full_cycle_scores.json").write_text(
+        json.dumps({"metrics": {"matches": 1}, "slice_metrics": {}, "match_set": [{"signal_id": "sig"}]})
+    )
+    (frozen_root / "strategy.py").write_text("def decide(context): return {}")
+    (promotion_root / "stage2_capture_curve.json").write_text(json.dumps({"metrics": {"total_match_signals": 1}}))
+    (promotion_root / "stage2_capture_per_signal.json").write_text("[]")
+    (promotion_root / "stage2_summary.md").write_text("# Stage 2 Travel Capture\n")
+    (promotion_root / "stage3_grid_results.json").write_text(
+        json.dumps({"total_signals": 1, "optimal": {"best": {"tp": 2.5, "sl": 1.0}}})
+    )
+    (promotion_root / "stage3_optimal.json").write_text(json.dumps({"best": {"tp": 2.5, "sl": 1.0}}))
+    (promotion_root / "stage4_candidates.json").write_text(json.dumps({"candidates": [{"candidate_id": "market"}]}))
+    (promotion_root / "stage3_summary.md").write_text("# Stage 3 Grid Search\n")
+    session = {"session_id": "stage1-aave", "artifact_root": str(artifact_root), "status": "stage1a_frozen"}
+
+    gate = build_stage1_gate_summary(workspace_root=tmp_path, session=session)
+
+    assert gate["stage3_grid"]["exists"] is True
+    assert gate["stage3_grid"]["grid_results_path"].endswith("promotion/stage3_grid_results.json")
+    assert gate["stage3_grid"]["best"]["tp"] == 2.5
+    assert gate["stage3_pyramid"]["exists"] is False
+
+
+def test_build_stage1_gate_summary_reports_stage3_pyramid_complete(tmp_path: Path):
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
+    promotion_root = artifact_root / "promotion"
+    frozen_root = promotion_root / "frozen_stage1a_strategy_module"
+    frozen_root.mkdir(parents=True)
+    (promotion_root / "stage1a_canonical_full_cycle_decisions.json").write_text("{}")
+    (promotion_root / "stage1a_canonical_full_cycle_scores.json").write_text(
+        json.dumps({"metrics": {"matches": 1}, "slice_metrics": {}, "match_set": [{"signal_id": "sig"}]})
+    )
+    (frozen_root / "strategy.py").write_text("def decide(context): return {}")
+    (promotion_root / "stage2_capture_curve.json").write_text(json.dumps({"metrics": {"total_match_signals": 1}}))
+    (promotion_root / "stage2_capture_per_signal.json").write_text("[]")
+    (promotion_root / "stage2_summary.md").write_text("# Stage 2 Travel Capture\n")
+    (promotion_root / "stage3_grid_results.json").write_text(
+        json.dumps({"total_signals": 1, "optimal": {"best": {"tp": 2.5, "sl": 1.0}}})
+    )
+    (promotion_root / "stage3_optimal.json").write_text(json.dumps({"best": {"tp": 2.5, "sl": 1.0}}))
+    (promotion_root / "stage3_summary.md").write_text("# Stage 3 Grid Search\n")
+    (promotion_root / "stage3_pyramid_results.json").write_text(
+        json.dumps({"total_signals": 1, "tp_pct": 2.5, "sl_pct": 1.0, "baseline": {}, "results": []})
+    )
+    (promotion_root / "stage3_pyramid_optimal.json").write_text(json.dumps({"best": {"step_pct": 0.5, "pnl_pct": 12.0}}))
+    (promotion_root / "stage4_candidates.json").write_text(json.dumps({"candidates": [{"candidate_id": "pyramid"}]}))
+    (promotion_root / "stage3_pyramid_summary.md").write_text("# Stage 3 Pyramid\n")
+    session = {"session_id": "stage1-aave", "artifact_root": str(artifact_root), "status": "stage1a_frozen"}
+
+    gate = build_stage1_gate_summary(workspace_root=tmp_path, session=session)
+
+    assert gate["stage3_pyramid"]["exists"] is True
+    assert gate["stage3_pyramid"]["results_path"].endswith("promotion/stage3_pyramid_results.json")
+    assert gate["stage3_pyramid"]["best"]["step_pct"] == 0.5
+    assert gate["stage4_realized_expectancy"]["exists"] is False
+
+
+def test_build_stage1_gate_summary_reports_stage4_realized_expectancy_complete(tmp_path: Path):
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
+    promotion_root = artifact_root / "promotion"
+    promotion_root.mkdir(parents=True)
+    (promotion_root / "stage4_realized_expectancy.json").write_text(
+        json.dumps({"best_candidate_id": "market", "best_candidate": {"net_expectancy_pct": 1.2}, "candidates": []})
+    )
+    (promotion_root / "stage4_trade_ledger.json").write_text(json.dumps({"candidates": []}))
+    (promotion_root / "stage4_optimal.json").write_text(json.dumps({"best": {"candidate_id": "market", "net_expectancy_pct": 1.2}}))
+    (promotion_root / "stage4_summary.md").write_text("# Stage 4 Realized Expectancy\n")
+    session = {"session_id": "stage1-aave", "artifact_root": str(artifact_root), "status": "stage1a_frozen"}
+
+    gate = build_stage1_gate_summary(workspace_root=tmp_path, session=session)
+
+    assert gate["stage4_realized_expectancy"]["exists"] is True
+    assert gate["stage4_realized_expectancy"]["best_candidate_id"] == "market"
+    assert gate["stage4_realized_expectancy"]["best_candidate"]["net_expectancy_pct"] == 1.2

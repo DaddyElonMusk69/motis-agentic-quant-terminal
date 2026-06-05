@@ -334,6 +334,7 @@ class RuntimeRepository:
                     candidates_by_target.setdefault((candidate["universe_run_id"], canonical_key), []).append(candidate)
 
             deleted_candidate_ids: set[str] = set()
+            source_candidate_rewrites: dict[str, str] = {}
             for (universe_run_id, canonical_key), candidates in candidates_by_target.items():
                 if len(candidates) <= 1:
                     continue
@@ -355,6 +356,7 @@ class RuntimeRepository:
                             .where(stage1_research_sessions.c.source_candidate_id == candidate["candidate_id"])
                             .values(source_candidate_id=keep["candidate_id"])
                         )
+                        source_candidate_rewrites[candidate["candidate_id"]] = keep["candidate_id"]
                     connection.execute(
                         stage0_universe_candidates.delete().where(
                             stage0_universe_candidates.c.candidate_id == candidate["candidate_id"]
@@ -386,6 +388,12 @@ class RuntimeRepository:
                     .where(stage0_universe_candidates.c.signal_set_key == old_key)
                     .values(signal_set_key=canonical_key, signal_set_id=canonical_id)
                 )
+
+            self._repair_stage1_signal_pool_references(
+                connection=connection,
+                signal_set_rewrites=mapping,
+                source_candidate_rewrites=source_candidate_rewrites,
+            )
 
             canonical_key_set = {row["signal_set_key"] for row in canonical_rows}
             deduped_signal_row_count = 0
@@ -603,10 +611,8 @@ class RuntimeRepository:
             **session,
             "train_start": _coerce_date(session["train_start"]),
             "train_end": _coerce_date(session["train_end"]),
-            "validation_start": _coerce_date(session["validation_start"]),
-            "validation_end": _coerce_date(session["validation_end"]),
-            "locked_oos_start": _coerce_date(session["locked_oos_start"]),
-            "locked_oos_end": _coerce_date(session["locked_oos_end"]),
+            "walk_forward_start": _coerce_date(session["walk_forward_start"]),
+            "walk_forward_end": _coerce_date(session["walk_forward_end"]),
         }
         with self.engine.begin() as connection:
             connection.execute(self._insert_stage1_research_session_ignore_conflict(values))
@@ -675,6 +681,44 @@ class RuntimeRepository:
         with self.engine.begin() as connection:
             connection.execute(statement)
 
+    def _repair_stage1_signal_pool_references(
+        self,
+        *,
+        connection,
+        signal_set_rewrites: dict[str, str],
+        source_candidate_rewrites: dict[str, str],
+    ) -> None:
+        session_rows = [
+            dict(row)
+            for row in connection.execute(select(stage1_research_sessions)).mappings()
+        ]
+        for session in session_rows:
+            values: dict[str, Any] = {}
+            canonical_key = signal_set_rewrites.get(session["signal_set_key"])
+            if canonical_key:
+                values["signal_set_key"] = canonical_key
+                values["signal_set_id"] = canonical_key.split(":", 2)[2]
+            rewritten_candidate_id = source_candidate_rewrites.get(session["source_candidate_id"])
+            if rewritten_candidate_id:
+                values["source_candidate_id"] = rewritten_candidate_id
+
+            manifest = session.get("manifest") or {}
+            repaired_manifest = _repair_stage1_manifest_references(
+                manifest=manifest,
+                current_signal_set_key=values.get("signal_set_key", session["signal_set_key"]),
+                signal_set_rewrites=signal_set_rewrites,
+                source_candidate_rewrites=source_candidate_rewrites,
+            )
+            if repaired_manifest != manifest:
+                values["manifest"] = repaired_manifest
+
+            if values:
+                connection.execute(
+                    stage1_research_sessions.update()
+                    .where(stage1_research_sessions.c.session_id == session["session_id"])
+                    .values(**values)
+                )
+
     def get_stage0_universe_run_by_config_hash(self, config_hash: str) -> dict[str, Any] | None:
         statement = select(stage0_universe_runs).where(stage0_universe_runs.c.config_hash == config_hash)
         with self.engine.connect() as connection:
@@ -698,10 +742,8 @@ class RuntimeRepository:
             "window_end": _coerce_datetime(run["window_end"]),
             "train_start": _coerce_optional_date(run.get("train_start")),
             "train_end": _coerce_optional_date(run.get("train_end")),
-            "validation_start": _coerce_optional_date(run.get("validation_start")),
-            "validation_end": _coerce_optional_date(run.get("validation_end")),
-            "locked_oos_start": _coerce_optional_date(run.get("locked_oos_start")),
-            "locked_oos_end": _coerce_optional_date(run.get("locked_oos_end")),
+            "walk_forward_start": _coerce_optional_date(run.get("walk_forward_start")),
+            "walk_forward_end": _coerce_optional_date(run.get("walk_forward_end")),
         }
         with self.engine.begin() as connection:
             connection.execute(self._insert_stage0_universe_run_ignore_conflict(run_values))
@@ -878,16 +920,13 @@ class RuntimeRepository:
         *,
         train_start: str | None,
         train_end: str | None,
-        validation_start: str | None,
-        validation_end: str | None,
-        locked_oos_start: str | None,
-        locked_oos_end: str | None,
+        walk_forward_start: str | None,
+        walk_forward_end: str | None,
         engine_ids: list[str] | None = None,
     ) -> dict[str, dict[str, int]]:
         windows = {
             "train": (train_start, train_end),
-            "validation": (validation_start, validation_end),
-            "locked_oos": (locked_oos_start, locked_oos_end),
+            "walk_forward": (walk_forward_start, walk_forward_end),
         }
         counts: dict[str, dict[str, int]] = {}
         for split, (start, end) in windows.items():
@@ -995,6 +1034,56 @@ def _coerce_datetime(value: str | datetime) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _repair_stage1_manifest_references(
+    *,
+    manifest: dict[str, Any],
+    current_signal_set_key: str,
+    signal_set_rewrites: dict[str, str],
+    source_candidate_rewrites: dict[str, str],
+) -> dict[str, Any]:
+    repaired = dict(manifest)
+    manifest_signal_key = repaired.get("signal_set_key")
+    canonical_key = signal_set_rewrites.get(manifest_signal_key)
+    if canonical_key is None and _same_engine_asset_signal_pool(
+        old_key=manifest_signal_key,
+        canonical_key=current_signal_set_key,
+    ):
+        canonical_key = current_signal_set_key
+    if canonical_key:
+        repaired["signal_set_key"] = canonical_key
+        repaired["signal_set_id"] = canonical_key.split(":", 2)[2]
+
+    stage0_candidate_id = repaired.get("stage0_candidate_id")
+    rewritten_candidate_id = source_candidate_rewrites.get(stage0_candidate_id)
+    if rewritten_candidate_id:
+        repaired["stage0_candidate_id"] = rewritten_candidate_id
+
+    seed_strategy = repaired.get("seed_strategy")
+    if isinstance(seed_strategy, dict):
+        seed_candidate_id = seed_strategy.get("stage0_candidate_id")
+        rewritten_seed_candidate_id = source_candidate_rewrites.get(seed_candidate_id)
+        if rewritten_seed_candidate_id:
+            repaired["seed_strategy"] = {
+                **seed_strategy,
+                "stage0_candidate_id": rewritten_seed_candidate_id,
+            }
+
+    return repaired
+
+
+def _same_engine_asset_signal_pool(*, old_key: Any, canonical_key: str) -> bool:
+    if not isinstance(old_key, str) or old_key.count(":") < 2 or canonical_key.count(":") < 2:
+        return False
+    old_engine, old_asset, old_set_id = old_key.split(":", 2)
+    canonical_engine, canonical_asset, canonical_set_id = canonical_key.split(":", 2)
+    return (
+        old_engine == canonical_engine
+        and old_asset == canonical_asset
+        and old_set_id != canonical_set_id
+        and canonical_set_id == f"{canonical_asset}-{canonical_engine}-canonical"
+    )
 
 
 def _coerce_optional_datetime(value: str | datetime | None) -> datetime | None:

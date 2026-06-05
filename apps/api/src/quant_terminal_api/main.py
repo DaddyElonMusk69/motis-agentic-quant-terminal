@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import re
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from quant_terminal_api.services.market_data_catalog import (
     read_parquet_candles,
 )
 from quant_terminal_sdk.agent_tasks import AgentTaskBundle
+from quant_terminal_sdk.market_data_reader import MarketDataReader
 from quant_terminal_worker.adapters.okx import OKXAdapter, OKXCLIError
 from quant_terminal_worker.backtests.stage1 import run_stage1_backtest
 from quant_terminal_worker.ingestion.raw_candle_fill import fill_raw_candle_dataset
@@ -38,12 +40,15 @@ from quant_terminal_worker.stage1.scoring import run_stage1a_training_score
 from quant_terminal_worker.stage1.scoring import run_stage1a_score
 from quant_terminal_worker.stage1.scoring import run_stage1a_canonical_full_cycle
 from quant_terminal_worker.stage1.scoring import generate_stage1a_failure_audit
+from quant_terminal_worker.stage2.capture_curve import run_stage2_capture_curve
+from quant_terminal_worker.stage3.grid_search import run_stage3_grid_search
+from quant_terminal_worker.stage3.pyramid import run_stage3_pyramid
+from quant_terminal_worker.stage4.realized_expectancy import run_stage4_realized_expectancy
 
 
 STAGE1_ROLE_ACTIONS = {
-    "recent_regime_train": ("create_training_bundle", "Create Training Bundle"),
-    "forward_validation": ("create_forward_validation_bundle", "Create Forward Validation Bundle"),
-    "locked_recent_oos": ("create_locked_oos_bundle", "Create Locked OOS Bundle"),
+    "training": ("create_training_bundle", "Create Training Bundle"),
+    "walk_forward_test": ("create_walk_forward_bundle", "Create Walk-Forward Test Bundle"),
 }
 
 
@@ -103,14 +108,12 @@ class Stage1SessionCreateRequest(BaseModel):
     strategy_version: str
     train_start: str | None = None
     train_end: str | None = None
-    validation_start: str | None = None
-    validation_end: str | None = None
-    locked_oos_start: str | None = None
-    locked_oos_end: str | None = None
+    walk_forward_start: str | None = None
+    walk_forward_end: str | None = None
 
 
 class Stage1IterationCreateRequest(BaseModel):
-    sample_method: str = "recent_regime_train"
+    sample_method: str = "training"
     bundle_role: str = "strategy_builder"
 
 
@@ -134,14 +137,10 @@ class Stage0RunRequest(BaseModel):
 
 class Stage0UniverseRunRequest(BaseModel):
     universe_run_id: str
-    window_start: str
-    window_end: str
-    train_start: str | None = None
-    train_end: str | None = None
-    validation_start: str | None = None
-    validation_end: str | None = None
-    locked_oos_start: str | None = None
-    locked_oos_end: str | None = None
+    train_start: str
+    train_end: str
+    walk_forward_start: str
+    walk_forward_end: str
     forward_hours: int = 36
     trigger_rate_threshold_pct: float = 85
     engine_ids: list[str] = Field(default_factory=list)
@@ -162,8 +161,7 @@ DEFAULT_WALK_FORWARD_TEMPLATES: list[dict[str, Any]] = [
         "anchor": "rolling",
         "retrain_cadence": "7d",
         "train_range": "90d",
-        "validation_range": "14d",
-        "oos_range": "14d",
+        "walk_forward_range": "14d",
         "embargo": "0d",
     }
 ]
@@ -394,7 +392,7 @@ def create_app(
             strategy_id=request.strategy_id,
             asset=candidate["asset"],
             train_start=stage1_windows["train_start"],
-            locked_oos_end=stage1_windows["locked_oos_end"],
+            walk_forward_end=stage1_windows["walk_forward_end"],
             source_candidate_id=candidate["candidate_id"],
         )
         artifact_root = Path.cwd() / "dev" / "training_sessions" / request.strategy_id / session_id
@@ -419,8 +417,7 @@ def create_app(
             "stage0_candidate_id": candidate["candidate_id"],
             "stage0_artifact_root": candidate.get("metrics", {}).get("artifact_root"),
             "train_window": {"start": stage1_windows["train_start"], "end": stage1_windows["train_end"]},
-            "validation_window": {"start": stage1_windows["validation_start"], "end": stage1_windows["validation_end"]},
-            "locked_oos_window": {"start": stage1_windows["locked_oos_start"], "end": stage1_windows["locked_oos_end"]},
+            "walk_forward_window": {"start": stage1_windows["walk_forward_start"], "end": stage1_windows["walk_forward_end"]},
             "inputs": {},
             "outputs": {},
             "scoring": {},
@@ -439,10 +436,8 @@ def create_app(
             "strategy_version": request.strategy_version,
             "train_start": stage1_windows["train_start"],
             "train_end": stage1_windows["train_end"],
-            "validation_start": stage1_windows["validation_start"],
-            "validation_end": stage1_windows["validation_end"],
-            "locked_oos_start": stage1_windows["locked_oos_start"],
-            "locked_oos_end": stage1_windows["locked_oos_end"],
+            "walk_forward_start": stage1_windows["walk_forward_start"],
+            "walk_forward_end": stage1_windows["walk_forward_end"],
             "artifact_root": str(artifact_root),
             "status": "draft",
             "manifest": manifest,
@@ -468,6 +463,7 @@ def create_app(
         session = get_runtime_repository().get_stage1_research_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Stage 1 session not found")
+        _ensure_stage1_session_mutable(session)
         window_start, window_end = _stage1_sample_window(session, request.sample_method)
         signals = get_runtime_repository().list_signals_for_signal_set_window(
             signal_set_key=session["signal_set_key"],
@@ -476,10 +472,8 @@ def create_app(
         )
         if not signals:
             sample_label = {
-                "recent_regime_train": "training",
-                "forward_validation": "forward validation",
-                "final_refit_ab": "final refit",
-                "locked_recent_oos": "locked OOS",
+                "training": "training",
+                "walk_forward_test": "walk-forward test",
             }.get(request.sample_method, request.sample_method.replace("_", " "))
             raise HTTPException(
                 status_code=400,
@@ -492,10 +486,8 @@ def create_app(
                     **session,
                     "train_start": _date_string(session["train_start"]),
                     "train_end": _date_string(session["train_end"]),
-                    "validation_start": _date_string(session["validation_start"]),
-                    "validation_end": _date_string(session["validation_end"]),
-                    "locked_oos_start": _date_string(session["locked_oos_start"]),
-                    "locked_oos_end": _date_string(session["locked_oos_end"]),
+                    "walk_forward_start": _date_string(session["walk_forward_start"]),
+                    "walk_forward_end": _date_string(session["walk_forward_end"]),
                 },
                 signals=signals,
                 sample_method=request.sample_method,
@@ -520,6 +512,7 @@ def create_app(
         session = get_runtime_repository().get_stage1_research_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Stage 1 session not found")
+        _ensure_stage1_session_mutable(session)
         artifact_root = Path(session["artifact_root"])
         if not artifact_root.is_absolute():
             artifact_root = Path.cwd() / artifact_root
@@ -537,6 +530,7 @@ def create_app(
         session = get_runtime_repository().get_stage1_research_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Stage 1 session not found")
+        _ensure_stage1_session_mutable(session)
         artifact_root = Path(session["artifact_root"])
         if not artifact_root.is_absolute():
             artifact_root = Path.cwd() / artifact_root
@@ -572,7 +566,7 @@ def create_app(
 
     def _stage1_full_cycle_signals(session: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
         signals_by_role = {}
-        for sample_role in ("recent_regime_train", "forward_validation", "locked_recent_oos"):
+        for sample_role in ("training", "walk_forward_test"):
             window_start, window_end = _stage1_sample_window(session, sample_role)
             signals_by_role[sample_role] = get_runtime_repository().list_signals_for_signal_set_window(
                 signal_set_key=session["signal_set_key"],
@@ -591,7 +585,7 @@ def create_app(
             raise HTTPException(
                 status_code=400,
                 detail={
-                    "message": "Stage 1A canonical readout requires passing training, forward validation, and locked OOS scores.",
+                    "message": "Stage 1A canonical readout requires passing training and walk-forward test scores.",
                     "blockers": gate["blockers"],
                 },
             )
@@ -619,22 +613,121 @@ def create_app(
             ),
         }
 
+    @app.post("/api/v1/research/stage1-sessions/{session_id}/stage2/capture-curve")
+    def run_stage2_capture_readout(session_id: str) -> dict[str, Any]:
+        repository = get_runtime_repository()
+        session = repository.get_stage1_research_session(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Stage 1 session not found")
+        gate = build_stage1_gate_summary(workspace_root=Path.cwd(), session=session)
+        if session.get("status") != "stage1a_frozen" or not (gate.get("canonical_readout") or {}).get("exists"):
+            raise HTTPException(status_code=400, detail="Stage 2 requires a frozen canonical Stage 1A readout")
+        try:
+            result = run_stage2_capture_curve(
+                workspace_root=Path.cwd(),
+                session=session,
+                signal_rows=_flatten_signal_roles(_stage1_full_cycle_signals(session)),
+                candles=_stage2_raw_candles(session, repository=repository),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "stage2_capture": _relative_nested_paths(Path.cwd(), result),
+            "gate": _relative_nested_paths(
+                Path.cwd(),
+                build_stage1_gate_summary(workspace_root=Path.cwd(), session=session),
+            ),
+        }
+
+    @app.post("/api/v1/research/stage1-sessions/{session_id}/stage3/grid-search")
+    def run_stage3_grid_readout(session_id: str) -> dict[str, Any]:
+        repository = get_runtime_repository()
+        session = repository.get_stage1_research_session(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Stage 1 session not found")
+        gate = build_stage1_gate_summary(workspace_root=Path.cwd(), session=session)
+        if not (gate.get("stage2_capture") or {}).get("exists"):
+            raise HTTPException(status_code=400, detail="Stage 3 requires completed Stage 2 travel capture")
+        try:
+            result = run_stage3_grid_search(
+                workspace_root=Path.cwd(),
+                session=session,
+                candles=_stage2_raw_candles(session, repository=repository),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "stage3_grid": _relative_nested_paths(Path.cwd(), result),
+            "gate": _relative_nested_paths(
+                Path.cwd(),
+                build_stage1_gate_summary(workspace_root=Path.cwd(), session=session),
+            ),
+        }
+
+    @app.post("/api/v1/research/stage1-sessions/{session_id}/stage3/pyramid")
+    def run_stage3_pyramid_readout(session_id: str) -> dict[str, Any]:
+        repository = get_runtime_repository()
+        session = repository.get_stage1_research_session(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Stage 1 session not found")
+        gate = build_stage1_gate_summary(workspace_root=Path.cwd(), session=session)
+        if not (gate.get("stage3_grid") or {}).get("exists"):
+            raise HTTPException(status_code=400, detail="Stage 3 pyramid requires completed Stage 3 grid search")
+        try:
+            result = run_stage3_pyramid(
+                workspace_root=Path.cwd(),
+                session=session,
+                candles=_stage2_raw_candles(session, repository=repository),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "stage3_pyramid": _relative_nested_paths(Path.cwd(), result),
+            "gate": _relative_nested_paths(
+                Path.cwd(),
+                build_stage1_gate_summary(workspace_root=Path.cwd(), session=session),
+            ),
+        }
+
+    @app.post("/api/v1/research/stage1-sessions/{session_id}/stage4/realized-expectancy")
+    def run_stage4_realized_expectancy_readout(session_id: str) -> dict[str, Any]:
+        repository = get_runtime_repository()
+        session = repository.get_stage1_research_session(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Stage 1 session not found")
+        gate = build_stage1_gate_summary(workspace_root=Path.cwd(), session=session)
+        if not (gate.get("stage3_pyramid") or {}).get("exists"):
+            raise HTTPException(status_code=400, detail="Stage 4 requires completed Stage 3 pyramid")
+        try:
+            result = run_stage4_realized_expectancy(
+                workspace_root=Path.cwd(),
+                session=session,
+                signal_rows=_flatten_signal_roles(_stage1_full_cycle_signals(session)),
+                candles=_stage2_raw_candles(session, repository=repository),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "stage4_realized_expectancy": _relative_nested_paths(Path.cwd(), result),
+            "gate": _relative_nested_paths(
+                Path.cwd(),
+                build_stage1_gate_summary(workspace_root=Path.cwd(), session=session),
+            ),
+        }
+
     @app.post("/api/v1/research/stage1-sessions/{session_id}/iterations/{iteration_id}/score-training")
     def score_stage1_training_iteration(session_id: str, iteration_id: str) -> dict[str, Any]:
-        return _score_stage1_iteration(session_id=session_id, iteration_id=iteration_id, sample_role="recent_regime_train")
+        return _score_stage1_iteration(session_id=session_id, iteration_id=iteration_id, sample_role="training")
 
-    @app.post("/api/v1/research/stage1-sessions/{session_id}/iterations/{iteration_id}/score-validation")
-    def score_stage1_validation_iteration(session_id: str, iteration_id: str) -> dict[str, Any]:
-        return _score_stage1_iteration(session_id=session_id, iteration_id=iteration_id, sample_role="forward_validation")
-
-    @app.post("/api/v1/research/stage1-sessions/{session_id}/iterations/{iteration_id}/score-locked-oos")
-    def score_stage1_locked_oos_iteration(session_id: str, iteration_id: str) -> dict[str, Any]:
-        return _score_stage1_iteration(session_id=session_id, iteration_id=iteration_id, sample_role="locked_recent_oos")
+    @app.post("/api/v1/research/stage1-sessions/{session_id}/iterations/{iteration_id}/score-walk-forward")
+    def score_stage1_walk_forward_iteration(session_id: str, iteration_id: str) -> dict[str, Any]:
+        return _score_stage1_iteration(session_id=session_id, iteration_id=iteration_id, sample_role="walk_forward_test")
 
     def _score_stage1_iteration(*, session_id: str, iteration_id: str, sample_role: str) -> dict[str, Any]:
         session = get_runtime_repository().get_stage1_research_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Stage 1 session not found")
+        _ensure_stage1_session_mutable(session)
         artifact_root = Path(session["artifact_root"])
         if not artifact_root.is_absolute():
             artifact_root = Path.cwd() / artifact_root
@@ -651,7 +744,7 @@ def create_app(
     def generate_stage1_failure_audit(
         session_id: str,
         iteration_id: str,
-        sample_role: str = "recent_regime_train",
+        sample_role: str = "training",
     ) -> dict[str, Any]:
         session = get_runtime_repository().get_stage1_research_session(session_id)
         if session is None:
@@ -672,17 +765,23 @@ def create_app(
     def create_stage0_universe_run(request: Stage0UniverseRunRequest) -> dict[str, Any]:
         if get_runtime_repository().get_stage0_universe_run(request.universe_run_id):
             raise HTTPException(status_code=409, detail="stage0 universe run id already exists")
+        _validate_two_window_dates(
+            train_start=request.train_start,
+            train_end=request.train_end,
+            walk_forward_start=request.walk_forward_start,
+            walk_forward_end=request.walk_forward_end,
+        )
+        window_start = f"{request.train_start}T00:00:00Z"
+        window_end = f"{request.walk_forward_end}T23:59:59Z"
         config_hash = build_stage0_universe_config_hash(
-            window_start=request.window_start,
-            window_end=request.window_end,
+            window_start=window_start,
+            window_end=window_end,
             forward_hours=request.forward_hours,
             trigger_rate_threshold_pct=request.trigger_rate_threshold_pct,
             train_start=request.train_start,
             train_end=request.train_end,
-            validation_start=request.validation_start,
-            validation_end=request.validation_end,
-            locked_oos_start=request.locked_oos_start,
-            locked_oos_end=request.locked_oos_end,
+            walk_forward_start=request.walk_forward_start,
+            walk_forward_end=request.walk_forward_end,
             engine_ids=request.engine_ids,
             asset_symbols=request.assets,
         )
@@ -694,32 +793,28 @@ def create_app(
             signal_sets_for_engines = get_runtime_repository().list_signal_sets()
         universe = build_stage0_universe(
             universe_run_id=request.universe_run_id,
-            window_start=request.window_start,
-            window_end=request.window_end,
+            window_start=window_start,
+            window_end=window_end,
             forward_hours=request.forward_hours,
             trigger_rate_threshold_pct=request.trigger_rate_threshold_pct,
             train_start=request.train_start,
             train_end=request.train_end,
-            validation_start=request.validation_start,
-            validation_end=request.validation_end,
-            locked_oos_start=request.locked_oos_start,
-            locked_oos_end=request.locked_oos_end,
+            walk_forward_start=request.walk_forward_start,
+            walk_forward_end=request.walk_forward_end,
             signal_sets=signal_sets_for_engines,
             asset_symbols=request.assets,
             metrics_by_signal_set=get_runtime_repository().stage0_metrics_by_signal_set(),
             existing_rnd_by_signal_set=get_runtime_repository().existing_rnd_by_signal_set(),
             signal_counts_by_signal_set=get_runtime_repository().signal_counts_by_signal_set_window(
-                window_start=request.window_start,
-                window_end=request.window_end,
+                window_start=window_start,
+                window_end=window_end,
                 engine_ids=request.engine_ids,
             ),
             split_signal_counts_by_signal_set=get_runtime_repository().split_signal_counts_by_signal_set(
                 train_start=request.train_start,
                 train_end=request.train_end,
-                validation_start=request.validation_start,
-                validation_end=request.validation_end,
-                locked_oos_start=request.locked_oos_start,
-                locked_oos_end=request.locked_oos_end,
+                walk_forward_start=request.walk_forward_start,
+                walk_forward_end=request.walk_forward_end,
                 engine_ids=request.engine_ids,
             ),
             engine_ids=request.engine_ids,
@@ -959,10 +1054,10 @@ def _stage1_session_id(
     strategy_id: str,
     asset: str,
     train_start: str,
-    locked_oos_end: str,
+    walk_forward_end: str,
     source_candidate_id: str,
 ) -> str:
-    return f"stage1-{strategy_id}-{asset.lower()}-{train_start}-{locked_oos_end}-{_stage1_candidate_slug(source_candidate_id)}"
+    return f"stage1-{strategy_id}-{asset.lower()}-{train_start}-{walk_forward_end}-{_stage1_candidate_slug(source_candidate_id)}"
 
 
 def _stage1_candidate_slug(source_candidate_id: str) -> str:
@@ -978,10 +1073,8 @@ def _stage1_windows_for_batch(
     split_keys = (
         "train_start",
         "train_end",
-        "validation_start",
-        "validation_end",
-        "locked_oos_start",
-        "locked_oos_end",
+        "walk_forward_start",
+        "walk_forward_end",
     )
     if universe_run and all(universe_run.get(key) is not None for key in split_keys):
         return {key: _date_string(universe_run[key]) for key in split_keys}
@@ -992,11 +1085,34 @@ def _stage1_windows_for_batch(
         raise HTTPException(
             status_code=400,
             detail={
-                "message": "Stage 1 requires train, validation, and locked OOS windows. New sessions should define them on the Stage 0 batch.",
+                "message": "Stage 1 requires training and walk-forward windows. New sessions should define them on the Stage 0 batch.",
                 "missing": missing,
             },
         )
-    return {key: str(value) for key, value in request_values.items()}
+    windows = {key: str(value) for key, value in request_values.items()}
+    _validate_two_window_dates(**windows)
+    return windows
+
+
+def _validate_two_window_dates(
+    *,
+    train_start: str,
+    train_end: str,
+    walk_forward_start: str,
+    walk_forward_end: str,
+) -> None:
+    parsed = {
+        "train_start": date.fromisoformat(train_start),
+        "train_end": date.fromisoformat(train_end),
+        "walk_forward_start": date.fromisoformat(walk_forward_start),
+        "walk_forward_end": date.fromisoformat(walk_forward_end),
+    }
+    if parsed["train_start"] > parsed["train_end"]:
+        raise HTTPException(status_code=400, detail="Training start must be on or before training end")
+    if parsed["walk_forward_start"] > parsed["walk_forward_end"]:
+        raise HTTPException(status_code=400, detail="Walk-forward start must be on or before walk-forward end")
+    if parsed["train_end"] >= parsed["walk_forward_start"]:
+        raise HTTPException(status_code=400, detail="Training window must end before walk-forward window starts")
 
 
 def _date_string(value: Any) -> str:
@@ -1095,13 +1211,37 @@ def _engine_base_seed(*, repository: Any, signal_engine_id: str) -> dict[str, An
 
 
 def _stage1_sample_window(session: dict[str, Any], sample_method: str) -> tuple[str, str]:
-    if sample_method == "final_refit_ab":
-        return _date_string(session["train_start"]), _date_string(session["validation_end"])
-    if sample_method == "forward_validation":
-        return _date_string(session["validation_start"]), _date_string(session["validation_end"])
-    if sample_method == "locked_recent_oos":
-        return _date_string(session["locked_oos_start"]), _date_string(session["locked_oos_end"])
-    return _date_string(session["train_start"]), _date_string(session["train_end"])
+    if sample_method == "training":
+        return _date_string(session["train_start"]), _date_string(session["train_end"])
+    if sample_method == "walk_forward_test":
+        return _date_string(session["walk_forward_start"]), _date_string(session["walk_forward_end"])
+    raise HTTPException(status_code=400, detail=f"Unsupported Stage 1 sample method: {sample_method}")
+
+
+def _flatten_signal_roles(signals_by_role: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    signals_by_id: dict[str, dict[str, Any]] = {}
+    for signals in signals_by_role.values():
+        for signal in signals:
+            signals_by_id[str(signal["signal_id"])] = signal
+    return list(signals_by_id.values())
+
+
+def _stage2_raw_candles(session: dict[str, Any], *, repository: Any) -> list[Any]:
+    start = f"{_date_string(session['train_start'])}T00:00:00Z"
+    end = _add_hours(f"{_date_string(session['walk_forward_end'])}T23:59:59Z", 36)
+    reader = MarketDataReader(repository=repository, workspace_root=Path.cwd())
+    return reader.get_candles(
+        asset=session["asset"],
+        timeframe="5m",
+        origin="raw",
+        start=start,
+        end=end,
+    )
+
+
+def _add_hours(value: str, hours: int) -> str:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return (parsed + timedelta(hours=hours)).isoformat().replace("+00:00", "Z")
 
 
 def _build_development_queue(
@@ -1206,17 +1346,41 @@ def _development_queue_state(
             "stage1_not_started",
             _next_action("start_stage1", "Start Stage 1", target_stage="stage1"),
         )
+    if gate and (gate.get("stage4_realized_expectancy") or {}).get("exists"):
+        return (
+            "promotion_review_ready",
+            "stage4_complete",
+            _next_action("review_promotion", "Review Promotion", disabled=True, target_stage="stage4"),
+        )
+    if gate and (gate.get("stage3_pyramid") or {}).get("exists"):
+        return (
+            "stage4_ready",
+            "stage3_complete",
+            _next_action("run_stage4_realized_expectancy", "Run Realized Expectancy", target_stage="stage4"),
+        )
+    if gate and (gate.get("stage3_grid") or {}).get("exists"):
+        return (
+            "stage3_pyramid_ready",
+            "stage3_grid_complete",
+            _next_action("run_stage3_pyramid", "Run Pyramid", target_stage="stage3"),
+        )
+    if gate and (gate.get("stage2_capture") or {}).get("exists"):
+        return (
+            "stage3_ready",
+            "stage2_complete",
+            _next_action("run_stage3_grid_search", "Run Stage 3 Grid", target_stage="stage3"),
+        )
     if gate and (gate.get("canonical_readout") or {}).get("exists"):
         return (
-            "stage2_locked",
+            "stage2_ready",
             "stage1_frozen",
-            _next_action("stage2_locked", "Stage 2 Locked", disabled=True, target_stage="stage2"),
+            _next_action("run_stage2_capture_curve", "Run Travel Capture", target_stage="stage2"),
         )
     if session.get("status") == "stage1a_frozen":
         return (
-            "stage2_locked",
+            "stage2_ready",
             "stage1_frozen",
-            _next_action("stage2_locked", "Stage 2 Locked", disabled=True, target_stage="stage2"),
+            _next_action("run_stage2_capture_curve", "Run Travel Capture", target_stage="stage2"),
         )
     if gate and gate.get("ready_to_freeze"):
         return (
@@ -1234,25 +1398,27 @@ def _development_queue_state(
 
 def _stage1_role_next_action(gate: dict[str, Any] | None) -> dict[str, Any]:
     roles = (gate or {}).get("roles") or {}
-    final_refit = (gate or {}).get("final_refit") or {}
-    if (roles.get("locked_recent_oos") or {}).get("status") == "fail":
-        return _next_action("locked_oos_failed_new_cycle", "Locked OOS Failed", disabled=True, target_stage="stage1")
-    train_status = (roles.get("recent_regime_train") or {}).get("status", "missing")
-    validation_status = (roles.get("forward_validation") or {}).get("status", "missing")
-    oos_status = (roles.get("locked_recent_oos") or {}).get("status", "missing")
-    if train_status == "pass" and validation_status == "pass" and oos_status == "missing" and not final_refit.get("exists"):
-        return _next_action("create_final_refit_bundle", "Create Final Refit Bundle", target_stage="stage1")
-    for role in ("recent_regime_train", "forward_validation", "locked_recent_oos"):
+    if (roles.get("walk_forward_test") or {}).get("status") == "fail":
+        return _next_action("walk_forward_failed_new_cycle", "Walk-Forward Failed", disabled=True, target_stage="stage1")
+    for role in ("training", "walk_forward_test"):
         state = roles.get(role) or {}
         status = state.get("status", "missing")
         action_type, label = STAGE1_ROLE_ACTIONS[role]
         if status == "missing":
             return _next_action(action_type, label, target_stage="stage1")
-        if status == "fail" and role == "recent_regime_train":
+        if status == "fail" and role == "training":
             return _next_action("audit_and_revise_training", "Audit Training Failures", target_stage="stage1")
         if status == "fail":
-            return _next_action("return_to_training", "Return to Training", target_stage="stage1")
+            return _next_action("walk_forward_failed_new_cycle", "Walk-Forward Failed", disabled=True, target_stage="stage1")
     return _next_action("create_training_bundle", "Create Training Bundle", target_stage="stage1")
+
+
+def _ensure_stage1_session_mutable(session: dict[str, Any]) -> None:
+    if session.get("status") == "stage1a_frozen":
+        raise HTTPException(status_code=409, detail="Stage 1 session is frozen")
+    gate = build_stage1_gate_summary(workspace_root=Path.cwd(), session=session)
+    if (gate.get("canonical_readout") or {}).get("exists"):
+        raise HTTPException(status_code=409, detail="Stage 1 session is frozen")
 
 
 def _next_action(

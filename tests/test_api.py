@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 from fastapi.testclient import TestClient
 
 from quant_terminal_api.main import create_app
@@ -18,6 +20,8 @@ class StubRuntimeRepository:
         self.stage1_sessions = []
         self.updated_stage1_session = None
         self.window_requests = []
+        self.window_signals = None
+        self.candle_ref = None
 
     def list_signal_engines(self):
         if hasattr(self, "signal_engines"):
@@ -228,6 +232,8 @@ class StubRuntimeRepository:
 
     def list_signals_for_signal_set_window(self, **kwargs):
         self.window_requests.append(kwargs)
+        if self.window_signals is not None:
+            return self.window_signals
         if getattr(self, "empty_signal_windows", False):
             return []
         return [
@@ -254,6 +260,9 @@ class StubRuntimeRepository:
             }
         }
 
+    def get_candle_ref(self, *, asset, timeframe, origin, data_type="candles"):
+        return self.candle_ref
+
     def existing_rnd_by_signal_set(self):
         return {}
 
@@ -264,8 +273,7 @@ class StubRuntimeRepository:
         return {
             "vegas_ema:BTC:2026-BTC-2h-dedupe-vote2": {
                 "train": 60,
-                "validation": 20,
-                "locked_oos": 8,
+                "walk_forward": 20,
             }
         }
 
@@ -325,14 +333,14 @@ def test_agent_task_preview_scopes_prompt_context():
             "strategy_id": "vegas_reclaim",
             "strategy_version": "0.1.0",
             "allowed_context_paths": ["agent_tasks/example/failure_clusters.json"],
-            "forbidden_context_paths": ["agent_tasks/example/locked_oos.jsonl"],
+            "forbidden_context_paths": ["agent_tasks/example/walk_forward_ground_truth.jsonl"],
         },
     )
 
     assert response.status_code == 200
     prompt = response.json()["prompt"]
     assert "failure_clusters.json" in prompt
-    assert "locked_oos.jsonl" not in prompt
+    assert "walk_forward_ground_truth.jsonl" not in prompt
 
 
 def test_signal_engine_catalog_endpoints_expose_sets_and_packets():
@@ -441,10 +449,8 @@ def test_stage0_universe_endpoint_builds_candidates_and_allows_repeat_same_confi
         "window_end": "2026-05-30T11:55:00Z",
         "train_start": "2026-03-01",
         "train_end": "2026-04-30",
-        "validation_start": "2026-05-01",
-        "validation_end": "2026-05-24",
-        "locked_oos_start": "2026-05-25",
-        "locked_oos_end": "2026-05-30",
+        "walk_forward_start": "2026-05-25",
+        "walk_forward_end": "2026-05-30",
         "forward_hours": 36,
         "trigger_rate_threshold_pct": 85,
         "engine_ids": ["vegas_ema"],
@@ -461,10 +467,8 @@ def test_stage0_universe_endpoint_builds_candidates_and_allows_repeat_same_confi
     assert payload["run"]["status"] == "created"
     assert payload["run"]["train_start"] == "2026-03-01"
     assert payload["run"]["train_end"] == "2026-04-30"
-    assert payload["run"]["validation_start"] == "2026-05-01"
-    assert payload["run"]["validation_end"] == "2026-05-24"
-    assert payload["run"]["locked_oos_start"] == "2026-05-25"
-    assert payload["run"]["locked_oos_end"] == "2026-05-30"
+    assert payload["run"]["walk_forward_start"] == "2026-05-25"
+    assert payload["run"]["walk_forward_end"] == "2026-05-30"
     assert payload["candidates"][0]["acceptance_status"] == "accepted"
     assert payload["candidates"][0]["branch_path"] == "path_a"
     assert repeated_config_response.status_code == 200
@@ -481,10 +485,8 @@ def test_stage0_universe_endpoint_blocks_duplicate_run_id():
         "window_end": "2026-05-30T11:55:00Z",
         "train_start": "2026-03-01",
         "train_end": "2026-04-30",
-        "validation_start": "2026-05-01",
-        "validation_end": "2026-05-24",
-        "locked_oos_start": "2026-05-25",
-        "locked_oos_end": "2026-05-30",
+        "walk_forward_start": "2026-05-25",
+        "walk_forward_end": "2026-05-30",
         "forward_hours": 36,
         "trigger_rate_threshold_pct": 85,
         "engine_ids": ["vegas_ema"],
@@ -759,10 +761,8 @@ def test_stage0_universe_run_delete_removes_linked_stage1_sessions():
             "strategy_version": "v0.1",
             "train_start": "2026-03-01",
             "train_end": "2026-04-30",
-            "validation_start": "2026-05-01",
-            "validation_end": "2026-05-24",
-            "locked_oos_start": "2026-05-25",
-            "locked_oos_end": "2026-05-31",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
             "artifact_root": "/tmp/stage1",
             "status": "draft",
             "manifest": {},
@@ -825,10 +825,8 @@ def test_stage1_session_endpoint_creates_draft_from_accepted_stage0_candidate():
             "strategy_version": "v0.1",
             "train_start": "2026-03-01",
             "train_end": "2026-04-30",
-            "validation_start": "2026-05-01",
-            "validation_end": "2026-05-24",
-            "locked_oos_start": "2026-05-25",
-            "locked_oos_end": "2026-05-31",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
         },
     )
 
@@ -860,10 +858,8 @@ def test_stage1_session_id_includes_stage0_candidate_to_allow_repeat_windows(tmp
         "strategy_version": "v0.1",
         "train_start": "2026-03-01",
         "train_end": "2026-04-30",
-        "validation_start": "2026-05-01",
-        "validation_end": "2026-05-24",
-        "locked_oos_start": "2026-05-25",
-        "locked_oos_end": "2026-05-30",
+            "walk_forward_start": "2026-05-25",
+        "walk_forward_end": "2026-05-30",
     }
 
     old_response = client.post(
@@ -908,10 +904,10 @@ def test_stage1_session_endpoint_seeds_from_latest_pair_frozen_script(tmp_path, 
             "strategy_version": "v0.1",
             "train_start": "2026-01-01",
             "train_end": "2026-02-28",
-            "validation_start": "2026-03-01",
-            "validation_end": "2026-03-15",
-            "locked_oos_start": "2026-03-16",
-            "locked_oos_end": "2026-03-31",
+            "walk_forward_start": "2026-03-01",
+            "walk_forward_end": "2026-03-15",
+            "walk_forward_start": "2026-03-16",
+            "walk_forward_end": "2026-03-31",
             "status": "stage1a_frozen",
             "manifest": {"session_id": "stage1-aave-old"},
         }
@@ -926,10 +922,8 @@ def test_stage1_session_endpoint_seeds_from_latest_pair_frozen_script(tmp_path, 
             "strategy_version": "v0.2",
             "train_start": "2026-03-01",
             "train_end": "2026-04-30",
-            "validation_start": "2026-05-01",
-            "validation_end": "2026-05-24",
-            "locked_oos_start": "2026-05-25",
-            "locked_oos_end": "2026-05-31",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
         },
     )
 
@@ -973,10 +967,8 @@ def test_stage1_session_endpoint_seeds_from_signal_engine_base_when_pair_has_no_
             "strategy_version": "v0.1",
             "train_start": "2026-03-01",
             "train_end": "2026-04-30",
-            "validation_start": "2026-05-01",
-            "validation_end": "2026-05-24",
-            "locked_oos_start": "2026-05-25",
-            "locked_oos_end": "2026-05-31",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
         },
     )
 
@@ -997,10 +989,8 @@ def test_stage1_session_endpoint_inherits_windows_from_stage0_batch():
         "window_end": "2026-05-30T23:59:59Z",
         "train_start": "2026-03-01",
         "train_end": "2026-04-15",
-        "validation_start": "2026-04-16",
-        "validation_end": "2026-05-10",
-        "locked_oos_start": "2026-05-11",
-        "locked_oos_end": "2026-05-30",
+        "walk_forward_start": "2026-04-16",
+        "walk_forward_end": "2026-05-10",
         "forward_hours": 36,
         "trigger_rate_threshold_pct": 85,
         "config_hash": "hash",
@@ -1042,11 +1032,9 @@ def test_stage1_session_endpoint_inherits_windows_from_stage0_batch():
     payload = response.json()["session"]
     assert payload["train_start"] == "2026-03-01"
     assert payload["train_end"] == "2026-04-15"
-    assert payload["validation_start"] == "2026-04-16"
-    assert payload["validation_end"] == "2026-05-10"
-    assert payload["locked_oos_start"] == "2026-05-11"
-    assert payload["locked_oos_end"] == "2026-05-30"
-    assert payload["manifest"]["validation_window"] == {"start": "2026-04-16", "end": "2026-05-10"}
+    assert payload["walk_forward_start"] == "2026-04-16"
+    assert payload["walk_forward_end"] == "2026-05-10"
+    assert payload["manifest"]["walk_forward_window"] == {"start": "2026-04-16", "end": "2026-05-10"}
 
 
 def test_stage1_session_endpoint_rejects_unaccepted_stage0_candidate():
@@ -1080,10 +1068,8 @@ def test_stage1_session_endpoint_rejects_unaccepted_stage0_candidate():
             "strategy_version": "v0.1",
             "train_start": "2026-03-01",
             "train_end": "2026-04-30",
-            "validation_start": "2026-05-01",
-            "validation_end": "2026-05-24",
-            "locked_oos_start": "2026-05-25",
-            "locked_oos_end": "2026-05-31",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
         },
     )
 
@@ -1113,10 +1099,8 @@ def test_stage1_iteration_endpoint_creates_iteration_bundle(tmp_path, monkeypatc
         "strategy_version": "v0.1",
         "train_start": "2026-03-01",
         "train_end": "2026-04-30",
-        "validation_start": "2026-05-01",
-        "validation_end": "2026-05-24",
-        "locked_oos_start": "2026-05-25",
-        "locked_oos_end": "2026-05-31",
+        "walk_forward_start": "2026-05-25",
+        "walk_forward_end": "2026-05-31",
         "stage0_artifact_root": str(stage0_root),
         "artifact_root": str(tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"),
         "status": "draft",
@@ -1131,7 +1115,7 @@ def test_stage1_iteration_endpoint_creates_iteration_bundle(tmp_path, monkeypatc
 
     response = client.post(
         "/api/v1/research/stage1-sessions/stage1-aave/iterations",
-        json={"sample_method": "recent_regime_train", "bundle_role": "strategy_builder"},
+        json={"sample_method": "training", "bundle_role": "strategy_builder"},
     )
 
     assert response.status_code == 200
@@ -1144,6 +1128,42 @@ def test_stage1_iteration_endpoint_creates_iteration_bundle(tmp_path, monkeypatc
     evaluator_sample = (tmp_path / payload["iteration"]["signal_sample_path"]).read_text()
     assert "natural_direction" in builder_sample
     assert "natural_direction" not in evaluator_sample
+
+
+def test_stage1_iteration_endpoint_rejects_frozen_session(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repository = StubRuntimeRepository()
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
+    repository.stage1_sessions = [
+        {
+            "session_id": "stage1-aave",
+            "source_universe_run_id": "universe-march-may-vegas",
+            "source_candidate_id": "candidate-aave",
+            "signal_set_key": "vegas_ema:AAVE:2026-AAVE-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "AAVE",
+            "signal_set_id": "2026-AAVE-2h-dedupe-vote2",
+            "strategy_id": "aave-vegas-tunnel-v01",
+            "strategy_version": "v0.1",
+            "train_start": "2026-03-01",
+            "train_end": "2026-04-30",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
+            "artifact_root": str(artifact_root),
+            "status": "stage1a_frozen",
+            "manifest": {"session_id": "stage1-aave"},
+        }
+    ]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post(
+        "/api/v1/research/stage1-sessions/stage1-aave/iterations",
+        json={"sample_method": "training", "bundle_role": "strategy_builder"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Stage 1 session is frozen"
 
 
 def test_stage1_iteration_endpoint_uses_sample_method_window(tmp_path, monkeypatch):
@@ -1162,10 +1182,8 @@ def test_stage1_iteration_endpoint_uses_sample_method_window(tmp_path, monkeypat
         "strategy_version": "v0.1",
         "train_start": "2026-03-01",
         "train_end": "2026-04-30",
-        "validation_start": "2026-05-01",
-        "validation_end": "2026-05-24",
-        "locked_oos_start": "2026-05-25",
-        "locked_oos_end": "2026-05-31",
+        "walk_forward_start": "2026-05-25",
+        "walk_forward_end": "2026-05-31",
         "artifact_root": str(tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"),
         "status": "draft",
         "manifest": {"session_id": "stage1-aave", "stage": "stage1a_directional_agreement"},
@@ -1175,16 +1193,22 @@ def test_stage1_iteration_endpoint_uses_sample_method_window(tmp_path, monkeypat
 
     response = client.post(
         "/api/v1/research/stage1-sessions/stage1-aave/iterations",
-        json={"sample_method": "forward_validation", "bundle_role": "evaluator"},
+        json={"sample_method": "walk_forward_test", "bundle_role": "evaluator"},
     )
 
     assert response.status_code == 200
-    assert repository.window_requests[-1]["window_start"] == "2026-05-01T00:00:00Z"
-    assert repository.window_requests[-1]["window_end"] == "2026-05-24T23:59:59Z"
+    assert repository.window_requests[-1]["window_start"] == "2026-05-25T00:00:00Z"
+    assert repository.window_requests[-1]["window_end"] == "2026-05-31T23:59:59Z"
 
 
-def test_stage1_iteration_endpoint_uses_locked_oos_window(tmp_path, monkeypatch):
+def test_stage1_iteration_endpoint_uses_training_window(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    stage0_root = tmp_path / "dev/stage0/universe/vegas_ema/AAVE/2026-AAVE-2h-dedupe-vote2"
+    ground_truth_root = stage0_root / "scores" / "ground_truth"
+    ground_truth_root.mkdir(parents=True)
+    (ground_truth_root / "sig-1.json").write_text(
+        '{"signal_id":"sig-1","natural_direction":"LONG","first_move_pct":1.5,"status":"triggered"}'
+    )
     repository = StubRuntimeRepository()
     session = {
         "session_id": "stage1-aave",
@@ -1199,29 +1223,32 @@ def test_stage1_iteration_endpoint_uses_locked_oos_window(tmp_path, monkeypatch)
         "strategy_version": "v0.1",
         "train_start": "2026-03-01",
         "train_end": "2026-04-30",
-        "validation_start": "2026-05-01",
-        "validation_end": "2026-05-24",
-        "locked_oos_start": "2026-05-25",
-        "locked_oos_end": "2026-05-31",
+        "walk_forward_start": "2026-05-25",
+        "walk_forward_end": "2026-05-31",
+        "stage0_artifact_root": str(stage0_root),
         "artifact_root": str(tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"),
         "status": "draft",
-        "manifest": {"session_id": "stage1-aave", "stage": "stage1a_directional_agreement"},
+        "manifest": {
+            "session_id": "stage1-aave",
+            "stage": "stage1a_directional_agreement",
+            "stage0_artifact_root": str(stage0_root),
+        },
     }
     repository.stage1_sessions = [session]
     client = TestClient(create_app(runtime_repository=repository))
 
     response = client.post(
         "/api/v1/research/stage1-sessions/stage1-aave/iterations",
-        json={"sample_method": "locked_recent_oos", "bundle_role": "evaluator"},
+        json={"sample_method": "training", "bundle_role": "strategy_builder"},
     )
 
     assert response.status_code == 200
-    assert response.json()["iteration"]["sample_method"] == "locked_recent_oos"
-    assert repository.window_requests[-1]["window_start"] == "2026-05-25T00:00:00Z"
-    assert repository.window_requests[-1]["window_end"] == "2026-05-31T23:59:59Z"
+    assert response.json()["iteration"]["sample_method"] == "training"
+    assert repository.window_requests[-1]["window_start"] == "2026-03-01T00:00:00Z"
+    assert repository.window_requests[-1]["window_end"] == "2026-04-30T23:59:59Z"
 
 
-def test_stage1_iteration_endpoint_reports_empty_locked_oos_window(tmp_path, monkeypatch):
+def test_stage1_iteration_endpoint_reports_empty_walk_forward_window(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     repository = StubRuntimeRepository()
     repository.empty_signal_windows = True
@@ -1238,10 +1265,8 @@ def test_stage1_iteration_endpoint_reports_empty_locked_oos_window(tmp_path, mon
         "strategy_version": "v0.1",
         "train_start": "2026-03-01",
         "train_end": "2026-04-30",
-        "validation_start": "2026-05-01",
-        "validation_end": "2026-05-24",
-        "locked_oos_start": "2026-05-25",
-        "locked_oos_end": "2026-05-31",
+        "walk_forward_start": "2026-05-25",
+        "walk_forward_end": "2026-05-31",
         "artifact_root": str(tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"),
         "status": "draft",
         "manifest": {"session_id": "stage1-aave", "stage": "stage1a_directional_agreement"},
@@ -1251,11 +1276,11 @@ def test_stage1_iteration_endpoint_reports_empty_locked_oos_window(tmp_path, mon
 
     response = client.post(
         "/api/v1/research/stage1-sessions/stage1-aave/iterations",
-        json={"sample_method": "locked_recent_oos", "bundle_role": "evaluator"},
+        json={"sample_method": "walk_forward_test", "bundle_role": "evaluator"},
     )
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "No locked OOS signals found for Stage 1 session between 2026-05-25 and 2026-05-31"
+    assert response.json()["detail"] == "No walk-forward test signals found for Stage 1 session between 2026-05-25 and 2026-05-31"
 
 
 def test_stage1_iterations_endpoint_lists_persisted_iterations(tmp_path, monkeypatch):
@@ -1268,7 +1293,7 @@ def test_stage1_iterations_endpoint_lists_persisted_iterations(tmp_path, monkeyp
     (iteration_root / "decisions").mkdir()
     (iteration_root / "summaries").mkdir()
     (iteration_root / "manifest.json").write_text(
-        json.dumps({"iteration_id": "iter_001_v0.1", "sample_method": "recent_regime_train", "signal_count": 3})
+        json.dumps({"iteration_id": "iter_001_v0.1", "sample_method": "training", "signal_count": 3})
     )
     (iteration_root / "signal_sample.json").write_text("{}")
     (iteration_root / "agent_prompt.md").write_text("prompt")
@@ -1291,10 +1316,8 @@ def test_stage1_iterations_endpoint_lists_persisted_iterations(tmp_path, monkeyp
             "strategy_version": "v0.1",
             "train_start": "2026-03-01",
             "train_end": "2026-04-30",
-            "validation_start": "2026-05-01",
-            "validation_end": "2026-05-24",
-            "locked_oos_start": "2026-05-25",
-            "locked_oos_end": "2026-05-31",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
             "status": "draft",
             "manifest": {"session_id": "stage1-aave"},
         }
@@ -1332,10 +1355,8 @@ def test_stage1_iteration_delete_endpoint_removes_iteration_folder(tmp_path, mon
             "strategy_version": "v0.1",
             "train_start": "2026-03-01",
             "train_end": "2026-04-30",
-            "validation_start": "2026-05-01",
-            "validation_end": "2026-05-24",
-            "locked_oos_start": "2026-05-25",
-            "locked_oos_end": "2026-05-31",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
             "status": "draft",
             "manifest": {"session_id": "stage1-aave"},
         }
@@ -1376,10 +1397,8 @@ def test_stage1_iteration_agent_prompt_prefers_failure_audit_prompt(tmp_path, mo
             "strategy_version": "v0.1",
             "train_start": "2026-03-01",
             "train_end": "2026-04-30",
-            "validation_start": "2026-05-01",
-            "validation_end": "2026-05-24",
-            "locked_oos_start": "2026-05-25",
-            "locked_oos_end": "2026-05-31",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
             "status": "draft",
             "manifest": {"session_id": "stage1-aave"},
         }
@@ -1446,10 +1465,8 @@ def decide(context):
             "strategy_version": "v0.1",
             "train_start": "2026-03-01",
             "train_end": "2026-04-30",
-            "validation_start": "2026-05-01",
-            "validation_end": "2026-05-24",
-            "locked_oos_start": "2026-05-25",
-            "locked_oos_end": "2026-05-31",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
             "status": "draft",
             "manifest": {"session_id": "stage1-aave"},
         }
@@ -1465,7 +1482,7 @@ def decide(context):
     assert (tmp_path / result["decisions_path"]).exists()
 
 
-def test_stage1_validation_score_endpoint_scores_iteration(tmp_path, monkeypatch):
+def test_stage1_walk_forward_score_endpoint_scores_iteration(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     repository = StubRuntimeRepository()
     artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
@@ -1486,7 +1503,7 @@ def test_stage1_validation_score_endpoint_scores_iteration(tmp_path, monkeypatch
         """
 def decide(context):
     return {
-        "decision_id": "api-validation",
+        "decision_id": "api-walk-forward",
         "strategy_id": "aave-vegas-tunnel-v01",
         "strategy_version": "v0.1",
         "signal_id": context["signal"]["signal_id"],
@@ -1494,7 +1511,7 @@ def decide(context):
         "action": "ENTER",
         "direction": "SHORT",
         "confidence": 0.7,
-        "reason_code": "api_validation",
+        "reason_code": "api_walk_forward",
         "diagnostics": {},
     }
 """
@@ -1529,22 +1546,20 @@ def decide(context):
             "strategy_version": "v0.1",
             "train_start": "2026-03-01",
             "train_end": "2026-04-30",
-            "validation_start": "2026-05-01",
-            "validation_end": "2026-05-24",
-            "locked_oos_start": "2026-05-25",
-            "locked_oos_end": "2026-05-31",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
             "status": "draft",
             "manifest": {"session_id": "stage1-aave"},
         }
     ]
     client = TestClient(create_app(runtime_repository=repository))
 
-    response = client.post("/api/v1/research/stage1-sessions/stage1-aave/iterations/iter_001_v0.1/score-validation")
+    response = client.post("/api/v1/research/stage1-sessions/stage1-aave/iterations/iter_001_v0.1/score-walk-forward")
 
     assert response.status_code == 200
     result = response.json()["score"]
     assert result["metrics"]["matches"] == 1
-    assert result["scores_path"].endswith("scores/stage1a_forward_validation_scores.json")
+    assert result["scores_path"].endswith("scores/stage1a_walk_forward_scores.json")
 
 
 def test_stage1_gate_endpoint_reports_blockers(tmp_path, monkeypatch):
@@ -1556,7 +1571,7 @@ def test_stage1_gate_endpoint_reports_blockers(tmp_path, monkeypatch):
     (iteration_root / "decisions").mkdir()
     (iteration_root / "summaries").mkdir()
     (iteration_root / "manifest.json").write_text(
-        json.dumps({"iteration_id": "iter_001_v0.1", "sample_method": "recent_regime_train", "signal_count": 1})
+        json.dumps({"iteration_id": "iter_001_v0.1", "sample_method": "training", "signal_count": 1})
     )
     (iteration_root / "signal_sample.json").write_text("{}")
     (iteration_root / "agent_prompt.md").write_text("prompt")
@@ -1577,10 +1592,8 @@ def test_stage1_gate_endpoint_reports_blockers(tmp_path, monkeypatch):
             "strategy_version": "v0.1",
             "train_start": "2026-03-01",
             "train_end": "2026-04-30",
-            "validation_start": "2026-05-01",
-            "validation_end": "2026-05-24",
-            "locked_oos_start": "2026-05-25",
-            "locked_oos_end": "2026-05-31",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
             "status": "draft",
             "manifest": {"session_id": "stage1-aave"},
         }
@@ -1592,9 +1605,9 @@ def test_stage1_gate_endpoint_reports_blockers(tmp_path, monkeypatch):
     assert response.status_code == 200
     gate = response.json()["gate"]
     assert gate["ready_to_freeze"] is False
-    assert gate["roles"]["recent_regime_train"]["status"] == "pass"
-    assert gate["roles"]["forward_validation"]["status"] == "missing"
-    assert len(gate["blockers"]) == 2
+    assert gate["roles"]["training"]["status"] == "pass"
+    assert gate["roles"]["walk_forward_test"]["status"] == "missing"
+    assert len(gate["blockers"]) == 1
 
 
 def test_stage1_canonical_endpoint_blocks_until_gate_passes(tmp_path, monkeypatch):
@@ -1615,10 +1628,8 @@ def test_stage1_canonical_endpoint_blocks_until_gate_passes(tmp_path, monkeypatc
             "strategy_version": "v0.1",
             "train_start": "2026-03-01",
             "train_end": "2026-04-30",
-            "validation_start": "2026-05-01",
-            "validation_end": "2026-05-24",
-            "locked_oos_start": "2026-05-25",
-            "locked_oos_end": "2026-05-31",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
             "status": "draft",
             "manifest": {"session_id": "stage1-aave"},
         }
@@ -1664,9 +1675,8 @@ def decide(context):
 """
     )
     role_files = {
-        "recent_regime_train": "stage1a_directional_scores.json",
-        "forward_validation": "stage1a_forward_validation_scores.json",
-        "locked_recent_oos": "stage1a_locked_oos_scores.json",
+        "training": "stage1a_directional_scores.json",
+        "walk_forward_test": "stage1a_walk_forward_scores.json",
     }
     for index, (role, score_name) in enumerate(role_files.items(), start=1):
         iteration_root = artifact_root / "iterations" / f"iter_{index:03d}_v0.1"
@@ -1696,10 +1706,8 @@ def decide(context):
             "strategy_version": "v0.1",
             "train_start": "2026-03-01",
             "train_end": "2026-04-30",
-            "validation_start": "2026-05-01",
-            "validation_end": "2026-05-24",
-            "locked_oos_start": "2026-05-25",
-            "locked_oos_end": "2026-05-31",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
             "status": "draft",
             "manifest": {"session_id": "stage1-aave", "stage0_artifact_root": str(stage0_root)},
         }
@@ -1710,11 +1718,613 @@ def decide(context):
 
     assert response.status_code == 200
     readout = response.json()["canonical_readout"]
-    assert readout["metrics"]["matches"] == 3
+    assert readout["metrics"]["matches"] == 2
     assert readout["scores_path"].endswith("promotion/stage1a_canonical_full_cycle_scores.json")
     assert (tmp_path / readout["decisions_path"]).exists()
     assert repository.updated_stage1_session["status"] == "stage1a_frozen"
-    assert len(repository.window_requests) == 3
+    assert len(repository.window_requests) == 2
+
+
+def test_stage2_capture_endpoint_rejects_unfrozen_session(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repository = StubRuntimeRepository()
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
+    repository.stage1_sessions = [
+        {
+            "session_id": "stage1-aave",
+            "artifact_root": str(artifact_root),
+            "source_candidate_id": "candidate-aave",
+            "signal_set_key": "vegas_ema:AAVE:2026-AAVE-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "AAVE",
+            "signal_set_id": "2026-AAVE-2h-dedupe-vote2",
+            "strategy_id": "aave-vegas-tunnel-v01",
+            "strategy_version": "v0.1",
+            "train_start": "2026-03-01",
+            "train_end": "2026-04-30",
+            "walk_forward_start": "2026-05-01",
+            "walk_forward_end": "2026-05-31",
+            "status": "draft",
+            "manifest": {"session_id": "stage1-aave"},
+        }
+    ]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post("/api/v1/research/stage1-sessions/stage1-aave/stage2/capture-curve")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Stage 2 requires a frozen canonical Stage 1A readout"
+
+
+def test_stage2_capture_endpoint_writes_curve_from_canonical_match_set(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repository = StubRuntimeRepository()
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
+    promotion_root = artifact_root / "promotion"
+    frozen_root = promotion_root / "frozen_stage1a_strategy_module"
+    frozen_root.mkdir(parents=True)
+    (frozen_root / "strategy.py").write_text("def decide(context):\n    return {}\n")
+    (promotion_root / "stage1a_canonical_full_cycle_decisions.json").write_text("{}")
+    (promotion_root / "stage1a_canonical_full_cycle_scores.json").write_text(
+        json.dumps(
+            {
+                "metrics": {"matches": 1},
+                "match_set": [
+                    {
+                        "signal_id": "sig-1",
+                        "sample_role": "walk_forward_test",
+                        "decision_direction": "LONG",
+                        "ground_truth_direction": "LONG",
+                    }
+                ],
+            }
+        )
+    )
+    storage_uri = tmp_path / "data/market/source=okx/type=candles/asset=AAVE/timeframe=5m/origin=raw"
+    parquet_path = storage_uri / "year=2026/month=05/data.parquet"
+    parquet_path.parent.mkdir(parents=True)
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "timestamp": "2026-05-01T00:05:00Z",
+                    "open": 100,
+                    "high": 101.1,
+                    "low": 99.5,
+                    "close": 101,
+                    "volume": 1,
+                    "confirm": 1,
+                }
+            ]
+        ),
+        parquet_path,
+    )
+    repository.candle_ref = {
+        "dataset_id": "okx-aave-raw-5m",
+        "storage_backend": "parquet",
+        "storage_uri": str(storage_uri),
+    }
+    repository.window_signals = [
+        {
+            "signal_id": "sig-1",
+            "signal_set_key": "vegas_ema:AAVE:2026-AAVE-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "AAVE",
+            "instrument": "AAVE-USDT-SWAP",
+            "timestamp": "2026-05-01T00:00:00Z",
+            "data_refs": [],
+            "payload_schema": "signal_packet.v2",
+            "payload": {"active_timeframes": ["2h"], "interactions": {"2h": [{"market_price": 100}]}},
+        }
+    ]
+    repository.stage1_sessions = [
+        {
+            "session_id": "stage1-aave",
+            "artifact_root": str(artifact_root),
+            "source_candidate_id": "candidate-aave",
+            "signal_set_key": "vegas_ema:AAVE:2026-AAVE-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "AAVE",
+            "signal_set_id": "2026-AAVE-2h-dedupe-vote2",
+            "strategy_id": "aave-vegas-tunnel-v01",
+            "strategy_version": "v0.1",
+            "train_start": "2026-03-01",
+            "train_end": "2026-04-30",
+            "walk_forward_start": "2026-05-01",
+            "walk_forward_end": "2026-05-31",
+            "status": "stage1a_frozen",
+            "manifest": {"session_id": "stage1-aave"},
+        }
+    ]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post("/api/v1/research/stage1-sessions/stage1-aave/stage2/capture-curve")
+
+    assert response.status_code == 200
+    stage2 = response.json()["stage2_capture"]
+    assert stage2["metrics"]["total_match_signals"] == 1
+    assert stage2["results"]["1.0"]["walk_forward_test"] == {"reached": 1, "total": 1, "rate": 100.0}
+    assert stage2["capture_curve_path"].endswith("promotion/stage2_capture_curve.json")
+    assert (tmp_path / stage2["capture_curve_path"]).exists()
+    assert len(repository.window_requests) == 2
+
+
+def test_stage3_grid_endpoint_rejects_until_stage2_complete(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repository = StubRuntimeRepository()
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
+    promotion_root = artifact_root / "promotion"
+    frozen_root = promotion_root / "frozen_stage1a_strategy_module"
+    frozen_root.mkdir(parents=True)
+    (frozen_root / "strategy.py").write_text("def decide(context):\n    return {}\n")
+    (promotion_root / "stage1a_canonical_full_cycle_decisions.json").write_text("{}")
+    (promotion_root / "stage1a_canonical_full_cycle_scores.json").write_text(
+        json.dumps({"metrics": {"matches": 1}, "match_set": [{"signal_id": "sig-1"}]})
+    )
+    repository.stage1_sessions = [
+        {
+            "session_id": "stage1-aave",
+            "artifact_root": str(artifact_root),
+            "source_candidate_id": "candidate-aave",
+            "signal_set_key": "vegas_ema:AAVE:2026-AAVE-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "AAVE",
+            "signal_set_id": "2026-AAVE-2h-dedupe-vote2",
+            "strategy_id": "aave-vegas-tunnel-v01",
+            "strategy_version": "v0.1",
+            "train_start": "2026-03-01",
+            "train_end": "2026-04-30",
+            "walk_forward_start": "2026-05-01",
+            "walk_forward_end": "2026-05-31",
+            "status": "stage1a_frozen",
+            "manifest": {"session_id": "stage1-aave"},
+        }
+    ]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post("/api/v1/research/stage1-sessions/stage1-aave/stage3/grid-search")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Stage 3 requires completed Stage 2 travel capture"
+
+
+def test_stage3_grid_endpoint_writes_grid_and_stage4_candidates(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repository = StubRuntimeRepository()
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
+    promotion_root = artifact_root / "promotion"
+    frozen_root = promotion_root / "frozen_stage1a_strategy_module"
+    frozen_root.mkdir(parents=True)
+    (frozen_root / "strategy.py").write_text("def decide(context):\n    return {}\n")
+    (promotion_root / "stage1a_canonical_full_cycle_decisions.json").write_text("{}")
+    (promotion_root / "stage1a_canonical_full_cycle_scores.json").write_text(
+        json.dumps({"metrics": {"matches": 1}, "match_set": [{"signal_id": "sig-1"}]})
+    )
+    (promotion_root / "stage2_capture_curve.json").write_text(
+        json.dumps({"metrics": {"total_match_signals": 1}, "results": {}})
+    )
+    (promotion_root / "stage2_capture_per_signal.json").write_text(
+        json.dumps(
+            [
+                {
+                    "signal_id": "sig-1",
+                    "sample_role": "walk_forward_test",
+                    "direction": "LONG",
+                    "signal_ts": "2026-05-01T00:00:00Z",
+                    "reference_price": 100,
+                }
+            ]
+        )
+    )
+    (promotion_root / "stage2_summary.md").write_text("# Stage 2 Travel Capture\n")
+    storage_uri = tmp_path / "data/market/source=okx/type=candles/asset=AAVE/timeframe=5m/origin=raw"
+    parquet_path = storage_uri / "year=2026/month=05/data.parquet"
+    parquet_path.parent.mkdir(parents=True)
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "timestamp": "2026-05-01T00:05:00Z",
+                    "open": 100,
+                    "high": 102.5,
+                    "low": 99.5,
+                    "close": 102,
+                    "volume": 1,
+                    "confirm": 1,
+                }
+            ]
+        ),
+        parquet_path,
+    )
+    repository.candle_ref = {
+        "dataset_id": "okx-aave-raw-5m",
+        "storage_backend": "parquet",
+        "storage_uri": str(storage_uri),
+    }
+    repository.stage1_sessions = [
+        {
+            "session_id": "stage1-aave",
+            "artifact_root": str(artifact_root),
+            "source_candidate_id": "candidate-aave",
+            "signal_set_key": "vegas_ema:AAVE:2026-AAVE-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "AAVE",
+            "signal_set_id": "2026-AAVE-2h-dedupe-vote2",
+            "strategy_id": "aave-vegas-tunnel-v01",
+            "strategy_version": "v0.1",
+            "train_start": "2026-03-01",
+            "train_end": "2026-04-30",
+            "walk_forward_start": "2026-05-01",
+            "walk_forward_end": "2026-05-31",
+            "status": "stage1a_frozen",
+            "manifest": {"session_id": "stage1-aave"},
+        }
+    ]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post("/api/v1/research/stage1-sessions/stage1-aave/stage3/grid-search")
+
+    assert response.status_code == 200
+    stage3 = response.json()["stage3_grid"]
+    assert stage3["total_signals"] == 1
+    assert stage3["optimal"]["best"]["tp_count"] == 1
+    assert stage3["stage4_candidates_path"].endswith("promotion/stage4_candidates.json")
+    assert (tmp_path / stage3["stage4_candidates_path"]).exists()
+
+
+def test_stage3_pyramid_endpoint_requires_grid_search(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repository = StubRuntimeRepository()
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
+    promotion_root = artifact_root / "promotion"
+    frozen_root = promotion_root / "frozen_stage1a_strategy_module"
+    frozen_root.mkdir(parents=True)
+    (frozen_root / "strategy.py").write_text("def decide(context):\n    return {}\n")
+    (promotion_root / "stage1a_canonical_full_cycle_decisions.json").write_text("{}")
+    (promotion_root / "stage1a_canonical_full_cycle_scores.json").write_text(
+        json.dumps({"metrics": {"matches": 1}, "match_set": [{"signal_id": "sig-1"}]})
+    )
+    (promotion_root / "stage2_capture_curve.json").write_text(
+        json.dumps({"metrics": {"total_match_signals": 1}, "results": {}})
+    )
+    (promotion_root / "stage2_capture_per_signal.json").write_text("[]")
+    (promotion_root / "stage2_summary.md").write_text("# Stage 2 Travel Capture\n")
+    repository.stage1_sessions = [
+        {
+            "session_id": "stage1-aave",
+            "artifact_root": str(artifact_root),
+            "source_candidate_id": "candidate-aave",
+            "signal_set_key": "vegas_ema:AAVE:2026-AAVE-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "AAVE",
+            "signal_set_id": "2026-AAVE-2h-dedupe-vote2",
+            "strategy_id": "aave-vegas-tunnel-v01",
+            "strategy_version": "v0.1",
+            "train_start": "2026-03-01",
+            "train_end": "2026-04-30",
+            "walk_forward_start": "2026-05-01",
+            "walk_forward_end": "2026-05-31",
+            "status": "stage1a_frozen",
+            "manifest": {"session_id": "stage1-aave"},
+        }
+    ]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post("/api/v1/research/stage1-sessions/stage1-aave/stage3/pyramid")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Stage 3 pyramid requires completed Stage 3 grid search"
+
+
+def test_stage3_pyramid_endpoint_writes_pyramid_and_stage4_candidate(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repository = StubRuntimeRepository()
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
+    promotion_root = artifact_root / "promotion"
+    frozen_root = promotion_root / "frozen_stage1a_strategy_module"
+    frozen_root.mkdir(parents=True)
+    (frozen_root / "strategy.py").write_text("def decide(context):\n    return {}\n")
+    (promotion_root / "stage1a_canonical_full_cycle_decisions.json").write_text("{}")
+    (promotion_root / "stage1a_canonical_full_cycle_scores.json").write_text(
+        json.dumps({"metrics": {"matches": 1}, "match_set": [{"signal_id": "sig-1"}]})
+    )
+    (promotion_root / "stage2_capture_curve.json").write_text(
+        json.dumps({"metrics": {"total_match_signals": 1}, "results": {}})
+    )
+    (promotion_root / "stage2_capture_per_signal.json").write_text(
+        json.dumps(
+            [
+                {
+                    "signal_id": "sig-1",
+                    "sample_role": "walk_forward_test",
+                    "direction": "LONG",
+                    "signal_ts": "2026-05-01T00:00:00Z",
+                    "reference_price": 100,
+                }
+            ]
+        )
+    )
+    (promotion_root / "stage2_summary.md").write_text("# Stage 2 Travel Capture\n")
+    (promotion_root / "stage3_grid_results.json").write_text(
+        json.dumps({"total_signals": 1, "optimal": {"best": {"tp": 1.0, "sl": 1.0}}})
+    )
+    (promotion_root / "stage3_optimal.json").write_text(json.dumps({"best": {"tp": 1.0, "sl": 1.0}}))
+    (promotion_root / "stage4_candidates.json").write_text(
+        json.dumps({"candidates": [{"candidate_id": "market_tp_1p0_sl_1p0", "setup": {"entry_model": "market"}}]})
+    )
+    (promotion_root / "stage3_summary.md").write_text("# Stage 3 Grid Search\n")
+    storage_uri = tmp_path / "data/market/source=okx/type=candles/asset=AAVE/timeframe=5m/origin=raw"
+    parquet_path = storage_uri / "year=2026/month=05/data.parquet"
+    parquet_path.parent.mkdir(parents=True)
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "timestamp": "2026-05-01T00:05:00Z",
+                    "open": 100,
+                    "high": 101.5,
+                    "low": 99.8,
+                    "close": 101.2,
+                    "volume": 1,
+                    "confirm": 1,
+                },
+                {
+                    "timestamp": "2026-05-01T00:10:00Z",
+                    "open": 101.2,
+                    "high": 102.0,
+                    "low": 100.4,
+                    "close": 101.8,
+                    "volume": 1,
+                    "confirm": 1,
+                },
+            ]
+        ),
+        parquet_path,
+    )
+    repository.candle_ref = {
+        "dataset_id": "okx-aave-raw-5m",
+        "storage_backend": "parquet",
+        "storage_uri": str(storage_uri),
+    }
+    repository.stage1_sessions = [
+        {
+            "session_id": "stage1-aave",
+            "artifact_root": str(artifact_root),
+            "source_candidate_id": "candidate-aave",
+            "signal_set_key": "vegas_ema:AAVE:2026-AAVE-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "AAVE",
+            "signal_set_id": "2026-AAVE-2h-dedupe-vote2",
+            "strategy_id": "aave-vegas-tunnel-v01",
+            "strategy_version": "v0.1",
+            "train_start": "2026-03-01",
+            "train_end": "2026-04-30",
+            "walk_forward_start": "2026-05-01",
+            "walk_forward_end": "2026-05-31",
+            "status": "stage1a_frozen",
+            "manifest": {"session_id": "stage1-aave"},
+        }
+    ]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post("/api/v1/research/stage1-sessions/stage1-aave/stage3/pyramid")
+
+    assert response.status_code == 200
+    pyramid = response.json()["stage3_pyramid"]
+    assert pyramid["baseline"]["pnl_pct"] == 5.0
+    assert pyramid["optimal"]["best"]["comparison"] == "BETTER"
+    assert pyramid["stage4_candidates_path"].endswith("promotion/stage4_candidates.json")
+    candidates = json.loads((tmp_path / pyramid["stage4_candidates_path"]).read_text())["candidates"]
+    assert candidates[-1]["setup"]["max_legs"] == 3
+
+
+def test_stage4_endpoint_requires_stage3_pyramid(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repository = StubRuntimeRepository()
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
+    promotion_root = artifact_root / "promotion"
+    promotion_root.mkdir(parents=True, exist_ok=True)
+    (promotion_root / "stage4_candidates.json").write_text(json.dumps({"candidates": []}))
+    repository.stage1_sessions = [
+        {
+            "session_id": "stage1-aave",
+            "artifact_root": str(artifact_root),
+            "source_candidate_id": "candidate-aave",
+            "signal_set_key": "vegas_ema:AAVE:2026-AAVE-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "AAVE",
+            "signal_set_id": "2026-AAVE-2h-dedupe-vote2",
+            "strategy_id": "aave-vegas-tunnel-v01",
+            "strategy_version": "v0.1",
+            "train_start": "2026-03-01",
+            "train_end": "2026-04-30",
+            "walk_forward_start": "2026-05-01",
+            "walk_forward_end": "2026-05-31",
+            "status": "stage1a_frozen",
+            "manifest": {"session_id": "stage1-aave"},
+        }
+    ]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post("/api/v1/research/stage1-sessions/stage1-aave/stage4/realized-expectancy")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Stage 4 requires completed Stage 3 pyramid"
+
+
+def test_stage4_endpoint_writes_realized_expectancy_from_full_decision_set(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repository = StubRuntimeRepository()
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
+    promotion_root = artifact_root / "promotion"
+    promotion_root.mkdir(parents=True, exist_ok=True)
+    (promotion_root / "stage1a_canonical_full_cycle_scores.json").write_text(
+        json.dumps(
+            {
+                "records": [
+                    {
+                        "signal_id": "sig-enter",
+                        "agent_direction": "LONG",
+                        "decision_direction": "LONG",
+                        "agreement": "MATCH",
+                        "sample_role": "training",
+                    },
+                    {
+                        "signal_id": "sig-skip",
+                        "agent_direction": "FLAT",
+                        "decision_direction": "FLAT",
+                        "agreement": "NEUTRAL",
+                        "sample_role": "walk_forward_test",
+                    },
+                ]
+            }
+        )
+    )
+    (promotion_root / "stage3_pyramid_results.json").write_text(json.dumps({"total_signals": 1}))
+    (promotion_root / "stage3_pyramid_optimal.json").write_text(json.dumps({"best": {"step_pct": 0.5}}))
+    (promotion_root / "stage3_pyramid_summary.md").write_text("# Stage 3 Pyramid\n")
+    (promotion_root / "stage4_candidates.json").write_text(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "candidate_id": "market_tp_1p0_sl_1p0",
+                        "setup": {
+                            "entry_model": "market",
+                            "tp_pct": 1.0,
+                            "sl_pct": 1.0,
+                            "timeout_policy": "close_at_cutoff",
+                        },
+                    }
+                ]
+            }
+        )
+    )
+    repository.window_signals = [
+        {
+            "signal_id": "sig-enter",
+            "timestamp": "2026-05-01T00:00:00Z",
+            "payload": {
+                "timestamp": "2026-05-01T00:00:00Z",
+                "interactions": [{"timeframe": "2h", "market_price": 100}],
+                "active_timeframes": ["2h"],
+            },
+        },
+        {
+            "signal_id": "sig-skip",
+            "timestamp": "2026-05-01T01:00:00Z",
+            "payload": {
+                "timestamp": "2026-05-01T01:00:00Z",
+                "interactions": [{"timeframe": "2h", "market_price": 200}],
+                "active_timeframes": ["2h"],
+            },
+        },
+    ]
+    storage_uri = tmp_path / "data/market/source=okx/type=candles/asset=AAVE/timeframe=5m/origin=raw"
+    parquet_path = storage_uri / "year=2026/month=05/data.parquet"
+    parquet_path.parent.mkdir(parents=True)
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "timestamp": "2026-05-01T00:05:00Z",
+                    "open": 100,
+                    "high": 101.2,
+                    "low": 99.8,
+                    "close": 101,
+                    "volume": 1,
+                    "confirm": 1,
+                },
+                {
+                    "timestamp": "2026-05-01T01:05:00Z",
+                    "open": 200,
+                    "high": 201,
+                    "low": 199,
+                    "close": 200,
+                    "volume": 1,
+                    "confirm": 1,
+                },
+            ]
+        ),
+        parquet_path,
+    )
+    repository.candle_ref = {
+        "dataset_id": "okx-aave-raw-5m",
+        "storage_backend": "parquet",
+        "storage_uri": str(storage_uri),
+    }
+    repository.stage1_sessions = [
+        {
+            "session_id": "stage1-aave",
+            "artifact_root": str(artifact_root),
+            "source_candidate_id": "candidate-aave",
+            "signal_set_key": "vegas_ema:AAVE:2026-AAVE-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "AAVE",
+            "signal_set_id": "2026-AAVE-2h-dedupe-vote2",
+            "strategy_id": "aave-vegas-tunnel-v01",
+            "strategy_version": "v0.1",
+            "train_start": "2026-03-01",
+            "train_end": "2026-04-30",
+            "walk_forward_start": "2026-05-01",
+            "walk_forward_end": "2026-05-31",
+            "status": "stage1a_frozen",
+            "manifest": {"session_id": "stage1-aave"},
+        }
+    ]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post("/api/v1/research/stage1-sessions/stage1-aave/stage4/realized-expectancy")
+
+    assert response.status_code == 200
+    stage4 = response.json()["stage4_realized_expectancy"]
+    assert stage4["best_candidate"]["total_decisions"] == 2
+    assert stage4["best_candidate"]["skipped_decisions"] == 1
+    assert stage4["realized_expectancy_path"].endswith("promotion/stage4_realized_expectancy.json")
+    assert (tmp_path / stage4["optimal_path"]).exists()
+
+
+def test_stage1_score_endpoint_rejects_frozen_session(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repository = StubRuntimeRepository()
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
+    iteration_root = artifact_root / "iterations" / "iter_001_v0.1"
+    iteration_root.mkdir(parents=True)
+    repository.stage1_sessions = [
+        {
+            "session_id": "stage1-aave",
+            "artifact_root": str(artifact_root),
+            "source_candidate_id": "candidate-aave",
+            "signal_set_key": "vegas_ema:AAVE:2026-AAVE-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "AAVE",
+            "signal_set_id": "2026-AAVE-2h-dedupe-vote2",
+            "strategy_id": "aave-vegas-tunnel-v01",
+            "strategy_version": "v0.1",
+            "train_start": "2026-03-01",
+            "train_end": "2026-04-30",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
+            "status": "stage1a_frozen",
+            "manifest": {"session_id": "stage1-aave"},
+        }
+    ]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post("/api/v1/research/stage1-sessions/stage1-aave/iterations/iter_001_v0.1/score-training")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Stage 1 session is frozen"
 
 
 def test_stage1_failure_audit_endpoint_generates_audit(tmp_path, monkeypatch):
@@ -1763,10 +2373,8 @@ def test_stage1_failure_audit_endpoint_generates_audit(tmp_path, monkeypatch):
             "strategy_version": "v0.1",
             "train_start": "2026-03-01",
             "train_end": "2026-04-30",
-            "validation_start": "2026-05-01",
-            "validation_end": "2026-05-24",
-            "locked_oos_start": "2026-05-25",
-            "locked_oos_end": "2026-05-31",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
             "status": "draft",
             "manifest": {"session_id": "stage1-aave"},
         }
@@ -1816,18 +2424,17 @@ def test_development_queue_draft_session_missing_training_requests_training_bund
     assert response.status_code == 200
     row = response.json()["queue"][0]
     assert row["development_status"] == "stage1_in_progress"
-    assert row["stage1_gate"]["roles"]["recent_regime_train"]["status"] == "missing"
+    assert row["stage1_gate"]["roles"]["training"]["status"] == "missing"
     assert row["next_action"]["type"] == "create_training_bundle"
 
 
-def test_development_queue_validation_pass_locked_oos_missing_requests_final_refit(tmp_path, monkeypatch):
+def test_development_queue_training_pass_requests_walk_forward_bundle(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     repository = StubRuntimeRepository()
     repository.universe_run = _queue_universe_run()
     repository.universe_candidates = [_queue_candidate("candidate-aave", "AAVE", "accepted", 91.2)]
     session = _queue_session(tmp_path, "candidate-aave", "AAVE", "draft")
-    _write_stage1_score(session, "iter_001_v0.1", "recent_regime_train", "stage1a_directional_scores.json")
-    _write_stage1_score(session, "iter_002_v0.1", "forward_validation", "stage1a_forward_validation_scores.json")
+    _write_stage1_score(session, "iter_001_v0.1", "training", "stage1a_directional_scores.json")
     repository.stage1_sessions = [session]
     client = TestClient(create_app(runtime_repository=repository))
 
@@ -1835,29 +2442,18 @@ def test_development_queue_validation_pass_locked_oos_missing_requests_final_ref
 
     assert response.status_code == 200
     row = response.json()["queue"][0]
-    assert row["stage1_gate"]["roles"]["locked_recent_oos"]["status"] == "missing"
-    assert row["stage1_gate"]["final_refit"]["exists"] is False
-    assert row["next_action"]["type"] == "create_final_refit_bundle"
+    assert row["stage1_gate"]["roles"]["walk_forward_test"]["status"] == "missing"
+    assert row["next_action"]["type"] == "create_walk_forward_bundle"
 
 
-def test_development_queue_final_refit_then_requests_locked_oos(tmp_path, monkeypatch):
+def test_development_queue_training_and_walk_forward_pass_request_canonical_readout(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     repository = StubRuntimeRepository()
     repository.universe_run = _queue_universe_run()
     repository.universe_candidates = [_queue_candidate("candidate-aave", "AAVE", "accepted", 91.2)]
     session = _queue_session(tmp_path, "candidate-aave", "AAVE", "draft")
-    _write_stage1_score(session, "iter_001_v0.1", "recent_regime_train", "stage1a_directional_scores.json")
-    _write_stage1_score(session, "iter_002_v0.1", "forward_validation", "stage1a_forward_validation_scores.json")
-    final_refit_root = tmp_path / session["artifact_root"] / "iterations" / "iter_003_v0.1"
-    (final_refit_root / "scores").mkdir(parents=True)
-    (final_refit_root / "decisions").mkdir()
-    (final_refit_root / "summaries").mkdir()
-    (final_refit_root / "manifest.json").write_text(
-        json.dumps({"iteration_id": "iter_003_v0.1", "sample_method": "final_refit_ab", "signal_count": 32})
-    )
-    (final_refit_root / "signal_sample.json").write_text("{}")
-    (final_refit_root / "agent_prompt.md").write_text("prompt")
-    (final_refit_root / "strategy_builder_prompt.md").write_text("builder")
+    _write_stage1_score(session, "iter_001_v0.1", "training", "stage1a_directional_scores.json")
+    _write_stage1_score(session, "iter_002_v0.1", "walk_forward_test", "stage1a_walk_forward_scores.json")
     repository.stage1_sessions = [session]
     client = TestClient(create_app(runtime_repository=repository))
 
@@ -1865,19 +2461,18 @@ def test_development_queue_final_refit_then_requests_locked_oos(tmp_path, monkey
 
     assert response.status_code == 200
     row = response.json()["queue"][0]
-    assert row["stage1_gate"]["final_refit"]["exists"] is True
-    assert row["next_action"]["type"] == "create_locked_oos_bundle"
+    assert row["stage1_gate"]["ready_to_freeze"] is True
+    assert row["next_action"]["type"] == "run_canonical_stage1a"
 
 
-def test_development_queue_locked_oos_fail_blocks_same_cycle_return_to_training(tmp_path, monkeypatch):
+def test_development_queue_walk_forward_fail_blocks_same_cycle_training(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     repository = StubRuntimeRepository()
     repository.universe_run = _queue_universe_run()
     repository.universe_candidates = [_queue_candidate("candidate-aave", "AAVE", "accepted", 91.2)]
     session = _queue_session(tmp_path, "candidate-aave", "AAVE", "draft")
-    _write_stage1_score(session, "iter_001_v0.1", "recent_regime_train", "stage1a_directional_scores.json")
-    _write_stage1_score(session, "iter_002_v0.1", "forward_validation", "stage1a_forward_validation_scores.json")
-    _write_stage1_score(session, "iter_003_v0.1", "locked_recent_oos", "stage1a_locked_oos_scores.json", passes=False)
+    _write_stage1_score(session, "iter_001_v0.1", "training", "stage1a_directional_scores.json")
+    _write_stage1_score(session, "iter_002_v0.1", "walk_forward_test", "stage1a_walk_forward_scores.json", passes=False)
     repository.stage1_sessions = [session]
     client = TestClient(create_app(runtime_repository=repository))
 
@@ -1885,8 +2480,8 @@ def test_development_queue_locked_oos_fail_blocks_same_cycle_return_to_training(
 
     assert response.status_code == 200
     row = response.json()["queue"][0]
-    assert row["stage1_gate"]["roles"]["locked_recent_oos"]["status"] == "fail"
-    assert row["next_action"]["type"] == "locked_oos_failed_new_cycle"
+    assert row["stage1_gate"]["roles"]["walk_forward_test"]["status"] == "fail"
+    assert row["next_action"]["type"] == "walk_forward_failed_new_cycle"
     assert row["next_action"]["disabled"] is True
 
 
@@ -1896,9 +2491,9 @@ def test_development_queue_canonical_readout_marks_stage1_frozen(tmp_path, monke
     repository.universe_run = _queue_universe_run()
     repository.universe_candidates = [_queue_candidate("candidate-aave", "AAVE", "accepted", 91.2)]
     session = _queue_session(tmp_path, "candidate-aave", "AAVE", "stage1a_frozen")
-    _write_stage1_score(session, "iter_001_v0.1", "recent_regime_train", "stage1a_directional_scores.json")
-    _write_stage1_score(session, "iter_002_v0.1", "forward_validation", "stage1a_forward_validation_scores.json")
-    _write_stage1_score(session, "iter_003_v0.1", "locked_recent_oos", "stage1a_locked_oos_scores.json")
+    _write_stage1_score(session, "iter_001_v0.1", "training", "stage1a_directional_scores.json")
+    _write_stage1_score(session, "iter_002_v0.1", "walk_forward_test", "stage1a_walk_forward_scores.json")
+    _write_stage1_score(session, "iter_003_v0.1", "walk_forward_test", "stage1a_walk_forward_scores.json")
     promotion_root = tmp_path / session["artifact_root"] / "promotion"
     frozen_root = promotion_root / "frozen_stage1a_strategy_module"
     frozen_root.mkdir(parents=True)
@@ -1915,9 +2510,148 @@ def test_development_queue_canonical_readout_marks_stage1_frozen(tmp_path, monke
     assert response.status_code == 200
     row = response.json()["queue"][0]
     assert row["development_status"] == "stage1_frozen"
-    assert row["current_stage"] == "stage2_locked"
-    assert row["next_action"]["type"] == "stage2_locked"
+    assert row["current_stage"] == "stage2_ready"
+    assert row["next_action"]["type"] == "run_stage2_capture_curve"
     assert row["stage1_gate"]["canonical_readout"]["exists"] is True
+
+
+def test_development_queue_stage2_capture_complete_locks_stage3_until_runner_exists(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repository = StubRuntimeRepository()
+    repository.universe_run = _queue_universe_run()
+    repository.universe_candidates = [_queue_candidate("candidate-aave", "AAVE", "accepted", 91.2)]
+    session = _queue_session(tmp_path, "candidate-aave", "AAVE", "stage1a_frozen")
+    _write_stage1_score(session, "iter_001_v0.1", "training", "stage1a_directional_scores.json")
+    _write_stage1_score(session, "iter_002_v0.1", "walk_forward_test", "stage1a_walk_forward_scores.json")
+    promotion_root = tmp_path / session["artifact_root"] / "promotion"
+    frozen_root = promotion_root / "frozen_stage1a_strategy_module"
+    frozen_root.mkdir(parents=True)
+    (frozen_root / "strategy.py").write_text("def decide(context):\n    return {}\n")
+    (promotion_root / "stage1a_canonical_full_cycle_decisions.json").write_text("{}")
+    (promotion_root / "stage1a_canonical_full_cycle_scores.json").write_text(
+        json.dumps({"metrics": {"matches": 1}, "match_set": [{"signal_id": "sig-1"}]})
+    )
+    (promotion_root / "stage2_capture_curve.json").write_text(
+        json.dumps({"metrics": {"total_match_signals": 1}, "results": {}})
+    )
+    (promotion_root / "stage2_capture_per_signal.json").write_text("[]")
+    (promotion_root / "stage2_summary.md").write_text("# Stage 2 Travel Capture\n")
+    repository.stage1_sessions = [session]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.get("/api/v1/research/cycles/universe-march-may-vegas/development-queue")
+
+    assert response.status_code == 200
+    row = response.json()["queue"][0]
+    assert row["development_status"] == "stage2_complete"
+    assert row["current_stage"] == "stage3_ready"
+    assert row["next_action"]["type"] == "run_stage3_grid_search"
+    assert row["stage1_gate"]["stage2_capture"]["exists"] is True
+
+
+def test_development_queue_stage3_grid_complete_requests_pyramid(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repository = StubRuntimeRepository()
+    repository.universe_run = _queue_universe_run()
+    repository.universe_candidates = [_queue_candidate("candidate-aave", "AAVE", "accepted", 91.2)]
+    session = _queue_session(tmp_path, "candidate-aave", "AAVE", "stage1a_frozen")
+    promotion_root = tmp_path / session["artifact_root"] / "promotion"
+    frozen_root = promotion_root / "frozen_stage1a_strategy_module"
+    frozen_root.mkdir(parents=True)
+    (frozen_root / "strategy.py").write_text("def decide(context):\n    return {}\n")
+    (promotion_root / "stage1a_canonical_full_cycle_decisions.json").write_text("{}")
+    (promotion_root / "stage1a_canonical_full_cycle_scores.json").write_text(
+        json.dumps({"metrics": {"matches": 1}, "match_set": [{"signal_id": "sig-1"}]})
+    )
+    (promotion_root / "stage2_capture_curve.json").write_text(json.dumps({"metrics": {"total_match_signals": 1}}))
+    (promotion_root / "stage2_capture_per_signal.json").write_text("[]")
+    (promotion_root / "stage2_summary.md").write_text("# Stage 2 Travel Capture\n")
+    (promotion_root / "stage3_grid_results.json").write_text(
+        json.dumps({"total_signals": 1, "optimal": {"best": {"tp": 2.5, "sl": 1.0}}})
+    )
+    (promotion_root / "stage3_optimal.json").write_text(json.dumps({"best": {"tp": 2.5, "sl": 1.0}}))
+    (promotion_root / "stage4_candidates.json").write_text(json.dumps({"candidates": [{"candidate_id": "market"}]}))
+    (promotion_root / "stage3_summary.md").write_text("# Stage 3 Grid Search\n")
+    repository.stage1_sessions = [session]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.get("/api/v1/research/cycles/universe-march-may-vegas/development-queue")
+
+    assert response.status_code == 200
+    row = response.json()["queue"][0]
+    assert row["development_status"] == "stage3_grid_complete"
+    assert row["current_stage"] == "stage3_pyramid_ready"
+    assert row["next_action"]["type"] == "run_stage3_pyramid"
+    assert row["stage1_gate"]["stage3_grid"]["exists"] is True
+    assert row["stage1_gate"]["stage3_pyramid"]["exists"] is False
+
+
+def test_development_queue_stage3_pyramid_complete_requests_stage4(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repository = StubRuntimeRepository()
+    repository.universe_run = _queue_universe_run()
+    repository.universe_candidates = [_queue_candidate("candidate-aave", "AAVE", "accepted", 91.2)]
+    session = _queue_session(tmp_path, "candidate-aave", "AAVE", "stage1a_frozen")
+    promotion_root = tmp_path / session["artifact_root"] / "promotion"
+    frozen_root = promotion_root / "frozen_stage1a_strategy_module"
+    frozen_root.mkdir(parents=True)
+    (frozen_root / "strategy.py").write_text("def decide(context):\n    return {}\n")
+    (promotion_root / "stage1a_canonical_full_cycle_decisions.json").write_text("{}")
+    (promotion_root / "stage1a_canonical_full_cycle_scores.json").write_text(
+        json.dumps({"metrics": {"matches": 1}, "match_set": [{"signal_id": "sig-1"}]})
+    )
+    (promotion_root / "stage2_capture_curve.json").write_text(json.dumps({"metrics": {"total_match_signals": 1}}))
+    (promotion_root / "stage2_capture_per_signal.json").write_text("[]")
+    (promotion_root / "stage2_summary.md").write_text("# Stage 2 Travel Capture\n")
+    (promotion_root / "stage3_grid_results.json").write_text(
+        json.dumps({"total_signals": 1, "optimal": {"best": {"tp": 2.5, "sl": 1.0}}})
+    )
+    (promotion_root / "stage3_optimal.json").write_text(json.dumps({"best": {"tp": 2.5, "sl": 1.0}}))
+    (promotion_root / "stage3_summary.md").write_text("# Stage 3 Grid Search\n")
+    (promotion_root / "stage3_pyramid_results.json").write_text(
+        json.dumps({"total_signals": 1, "tp_pct": 2.5, "sl_pct": 1.0, "baseline": {}, "results": []})
+    )
+    (promotion_root / "stage3_pyramid_optimal.json").write_text(json.dumps({"best": {"step_pct": 0.5, "pnl_pct": 12.0}}))
+    (promotion_root / "stage4_candidates.json").write_text(json.dumps({"candidates": [{"candidate_id": "pyramid"}]}))
+    (promotion_root / "stage3_pyramid_summary.md").write_text("# Stage 3 Pyramid\n")
+    repository.stage1_sessions = [session]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.get("/api/v1/research/cycles/universe-march-may-vegas/development-queue")
+
+    assert response.status_code == 200
+    row = response.json()["queue"][0]
+    assert row["development_status"] == "stage3_complete"
+    assert row["current_stage"] == "stage4_ready"
+    assert row["next_action"]["type"] == "run_stage4_realized_expectancy"
+    assert row["stage1_gate"]["stage3_pyramid"]["exists"] is True
+
+
+def test_development_queue_stage4_complete_marks_promotion_review_ready(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repository = StubRuntimeRepository()
+    repository.universe_run = _queue_universe_run()
+    repository.universe_candidates = [_queue_candidate("candidate-aave", "AAVE", "accepted", 91.2)]
+    session = _queue_session(tmp_path, "candidate-aave", "AAVE", "stage1a_frozen")
+    promotion_root = tmp_path / session["artifact_root"] / "promotion"
+    promotion_root.mkdir(parents=True, exist_ok=True)
+    (promotion_root / "stage4_realized_expectancy.json").write_text(
+        json.dumps({"best_candidate_id": "market", "best_candidate": {"candidate_id": "market"}, "candidates": []})
+    )
+    (promotion_root / "stage4_trade_ledger.json").write_text(json.dumps({"candidates": []}))
+    (promotion_root / "stage4_optimal.json").write_text(json.dumps({"best": {"candidate_id": "market"}}))
+    (promotion_root / "stage4_summary.md").write_text("# Stage 4 Realized Expectancy\n")
+    repository.stage1_sessions = [session]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.get("/api/v1/research/cycles/universe-march-may-vegas/development-queue")
+
+    assert response.status_code == 200
+    row = response.json()["queue"][0]
+    assert row["development_status"] == "stage4_complete"
+    assert row["current_stage"] == "promotion_review_ready"
+    assert row["next_action"]["type"] == "review_promotion"
+    assert row["stage1_gate"]["stage4_realized_expectancy"]["exists"] is True
 
 
 def test_development_queue_includes_watchlist_and_pending_as_non_startable(tmp_path, monkeypatch):
@@ -1994,10 +2728,8 @@ def _queue_session(tmp_path, candidate_id, asset, status):
         "strategy_version": "v0.1",
         "train_start": "2026-03-01",
         "train_end": "2026-04-30",
-        "validation_start": "2026-05-01",
-        "validation_end": "2026-05-24",
-        "locked_oos_start": "2026-05-25",
-        "locked_oos_end": "2026-05-31",
+            "walk_forward_start": "2026-05-25",
+        "walk_forward_end": "2026-05-31",
         "artifact_root": artifact_root,
         "status": status,
         "manifest": {"session_id": f"stage1-{asset.lower()}"},

@@ -15,10 +15,8 @@ def build_stage0_universe(
     trigger_rate_threshold_pct: float,
     train_start: str | None = None,
     train_end: str | None = None,
-    validation_start: str | None = None,
-    validation_end: str | None = None,
-    locked_oos_start: str | None = None,
-    locked_oos_end: str | None = None,
+    walk_forward_start: str | None = None,
+    walk_forward_end: str | None = None,
     signal_sets: list[dict[str, Any]],
     metrics_by_signal_set: dict[str, dict[str, Any]],
     existing_rnd_by_signal_set: dict[str, dict[str, Any]],
@@ -34,10 +32,8 @@ def build_stage0_universe(
         trigger_rate_threshold_pct=trigger_rate_threshold_pct,
         train_start=train_start,
         train_end=train_end,
-        validation_start=validation_start,
-        validation_end=validation_end,
-        locked_oos_start=locked_oos_start,
-        locked_oos_end=locked_oos_end,
+        walk_forward_start=walk_forward_start,
+        walk_forward_end=walk_forward_end,
         engine_ids=engine_ids,
         asset_symbols=asset_symbols,
     )
@@ -48,23 +44,19 @@ def build_stage0_universe(
             if _matches_universe_window(signal_set, window_start, window_end, engine_ids, asset_symbols)
             and signal_counts_by_signal_set.get(signal_set["signal_set_key"], 0) > 0
             and _has_required_split_coverage(
-                split_signal_counts_by_signal_set=split_signal_counts_by_signal_set,
-                required_splits=_required_splits(
+                    split_signal_counts_by_signal_set=split_signal_counts_by_signal_set,
+                    required_splits=_required_splits(
+                        train_start=train_start,
+                        train_end=train_end,
+                        walk_forward_start=walk_forward_start,
+                        walk_forward_end=walk_forward_end,
+                    ),
+                    signal_set=signal_set,
                     train_start=train_start,
                     train_end=train_end,
-                    validation_start=validation_start,
-                    validation_end=validation_end,
-                    locked_oos_start=locked_oos_start,
-                    locked_oos_end=locked_oos_end,
-                ),
-                signal_set=signal_set,
-                train_start=train_start,
-                train_end=train_end,
-                validation_start=validation_start,
-                validation_end=validation_end,
-                locked_oos_start=locked_oos_start,
-                locked_oos_end=locked_oos_end,
-            )
+                    walk_forward_start=walk_forward_start,
+                    walk_forward_end=walk_forward_end,
+                )
         ],
         signal_counts_by_signal_set=signal_counts_by_signal_set,
         split_signal_counts_by_signal_set=split_signal_counts_by_signal_set,
@@ -91,10 +83,8 @@ def build_stage0_universe(
             "window_end": window_end,
             "train_start": train_start,
             "train_end": train_end,
-            "validation_start": validation_start,
-            "validation_end": validation_end,
-            "locked_oos_start": locked_oos_start,
-            "locked_oos_end": locked_oos_end,
+            "walk_forward_start": walk_forward_start,
+            "walk_forward_end": walk_forward_end,
             "forward_hours": forward_hours,
             "trigger_rate_threshold_pct": trigger_rate_threshold_pct,
             "engine_filter": engine_ids or [],
@@ -118,10 +108,8 @@ def build_stage0_universe_config_hash(
     trigger_rate_threshold_pct: float,
     train_start: str | None = None,
     train_end: str | None = None,
-    validation_start: str | None = None,
-    validation_end: str | None = None,
-    locked_oos_start: str | None = None,
-    locked_oos_end: str | None = None,
+    walk_forward_start: str | None = None,
+    walk_forward_end: str | None = None,
     engine_ids: list[str] | None,
     asset_symbols: list[str] | None = None,
 ) -> str:
@@ -133,10 +121,8 @@ def build_stage0_universe_config_hash(
         "trigger_rate_threshold_pct": trigger_rate_threshold_pct,
         "train_start": train_start,
         "train_end": train_end,
-        "validation_start": validation_start,
-        "validation_end": validation_end,
-        "locked_oos_start": locked_oos_start,
-        "locked_oos_end": locked_oos_end,
+        "walk_forward_start": walk_forward_start,
+        "walk_forward_end": walk_forward_end,
         "engine_ids": sorted(engine_ids or []),
         "asset_symbols": sorted(asset_symbols or []),
     }
@@ -186,18 +172,14 @@ def _required_splits(
     *,
     train_start: str | None,
     train_end: str | None,
-    validation_start: str | None,
-    validation_end: str | None,
-    locked_oos_start: str | None,
-    locked_oos_end: str | None,
+    walk_forward_start: str | None,
+    walk_forward_end: str | None,
 ) -> list[str]:
     required: list[str] = []
     if train_start and train_end:
         required.append("train")
-    if validation_start and validation_end:
-        required.append("validation")
-    if locked_oos_start and locked_oos_end:
-        required.append("locked_oos")
+    if walk_forward_start and walk_forward_end:
+        required.append("walk_forward")
     return required
 
 
@@ -208,28 +190,11 @@ def _has_required_split_coverage(
     signal_set: dict[str, Any],
     train_start: str | None,
     train_end: str | None,
-    validation_start: str | None,
-    validation_end: str | None,
-    locked_oos_start: str | None,
-    locked_oos_end: str | None,
+    walk_forward_start: str | None,
+    walk_forward_end: str | None,
 ) -> bool:
     if not required_splits:
         return True
-    if signal_set.get("coverage_start_ts") and signal_set.get("coverage_end_ts"):
-        coverage_start = _parse_datetime(signal_set["coverage_start_ts"])
-        coverage_end = _parse_datetime(signal_set["coverage_end_ts"])
-        split_windows = [
-            (train_start, train_end),
-            (validation_start, validation_end),
-            (locked_oos_start, locked_oos_end),
-        ]
-        if all(
-            start is None
-            or end is None
-            or (coverage_start <= _parse_date_window_start(start) and coverage_end >= _parse_date_window_end(end))
-            for start, end in split_windows
-        ):
-            return True
     signal_set_key = signal_set["signal_set_key"]
     split_counts = (split_signal_counts_by_signal_set or {}).get(signal_set_key, {})
     return all(split_counts.get(split, 0) > 0 for split in required_splits)

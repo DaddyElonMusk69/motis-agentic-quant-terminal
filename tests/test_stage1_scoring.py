@@ -238,7 +238,7 @@ def test_generate_stage1a_failure_audit_writes_failure_ledger_and_prompt(tmp_pat
     assert "sig-flat" in markdown
 
 
-def test_generate_stage1a_failure_audit_writes_validation_diagnostic_prompt(tmp_path: Path):
+def test_generate_stage1a_failure_audit_writes_walk_forward_diagnostic_prompt(tmp_path: Path):
     iteration_root = tmp_path / "dev/training_sessions/aave/stage1-aave/iterations/iter_002_v0.1"
     stage0_root = tmp_path / "dev/stage0/aave"
     packets_root = tmp_path / "packets"
@@ -249,15 +249,15 @@ def test_generate_stage1a_failure_audit_writes_validation_diagnostic_prompt(tmp_
     ground_truth_root = stage0_root / "scores" / "ground_truth"
     ground_truth_root.mkdir(parents=True)
     (iteration_root.parents[1] / "manifest.json").write_text(json.dumps({"stage0_artifact_root": str(stage0_root)}))
-    (packets_root / "sig-val.json").write_text(json.dumps({"signal_id": "sig-val", "payload": {"setup": "validation"}}))
+    (packets_root / "sig-val.json").write_text(json.dumps({"signal_id": "sig-val", "payload": {"setup": "walk-forward"}}))
     (ground_truth_root / "sig-val.json").write_text(json.dumps({"signal_id": "sig-val", "natural_direction": "SHORT"}))
     (iteration_root / "signal_sample.json").write_text(
         json.dumps({"signals": [{"signal_id": "sig-val", "packet_path": str(packets_root / "sig-val.json")}]})
     )
-    (iteration_root / "decisions/stage1a_forward_validation_decisions.json").write_text(
-        json.dumps({"decisions": [{"signal_id": "sig-val", "direction": "LONG", "trade_action": "ENTER", "reason_code": "bad_validation"}]})
+    (iteration_root / "decisions/stage1a_walk_forward_decisions.json").write_text(
+        json.dumps({"decisions": [{"signal_id": "sig-val", "direction": "LONG", "trade_action": "ENTER", "reason_code": "bad_walk_forward"}]})
     )
-    (iteration_root / "scores/stage1a_forward_validation_scores.json").write_text(
+    (iteration_root / "scores/stage1a_walk_forward_scores.json").write_text(
         json.dumps(
             {
                 "metrics": {"total": 1, "matches": 0, "mismatches": 1, "neutral": 0},
@@ -268,18 +268,18 @@ def test_generate_stage1a_failure_audit_writes_validation_diagnostic_prompt(tmp_
         )
     )
 
-    result = generate_stage1a_failure_audit(iteration_root=iteration_root, sample_role="forward_validation")
+    result = generate_stage1a_failure_audit(iteration_root=iteration_root, sample_role="walk_forward_test")
 
     audit = json.loads((iteration_root / "audits/failure_audit.json").read_text())
     prompt = (iteration_root / "agent_failure_audit_prompt.md").read_text()
-    assert result["sample_role"] == "forward_validation"
-    assert audit["sample_role"] == "forward_validation"
-    assert audit["agent_handoff_policy"] == "return_to_training"
-    assert "Do not edit the strategy directly against validation labels" in prompt
-    assert "create a new training bundle" in prompt
+    assert result["sample_role"] == "walk_forward_test"
+    assert audit["sample_role"] == "walk_forward_test"
+    assert audit["agent_handoff_policy"] == "postmortem_only"
+    assert "Do not edit the strategy based on walk-forward test evidence" in prompt
+    assert "postmortem only" in prompt.lower()
 
 
-def test_generate_stage1a_failure_audit_writes_locked_oos_postmortem_prompt(tmp_path: Path):
+def test_generate_stage1a_failure_audit_writes_walk_forward_postmortem_prompt(tmp_path: Path):
     iteration_root = tmp_path / "dev/training_sessions/aave/stage1-aave/iterations/iter_003_v0.1"
     stage0_root = tmp_path / "dev/stage0/aave"
     packets_root = tmp_path / "packets"
@@ -295,10 +295,10 @@ def test_generate_stage1a_failure_audit_writes_locked_oos_postmortem_prompt(tmp_
     (iteration_root / "signal_sample.json").write_text(
         json.dumps({"signals": [{"signal_id": "sig-oos", "packet_path": str(packets_root / "sig-oos.json")}]})
     )
-    (iteration_root / "decisions/stage1a_locked_oos_decisions.json").write_text(
+    (iteration_root / "decisions/stage1a_walk_forward_decisions.json").write_text(
         json.dumps({"decisions": [{"signal_id": "sig-oos", "direction": "SHORT", "trade_action": "ENTER", "reason_code": "bad_oos"}]})
     )
-    (iteration_root / "scores/stage1a_locked_oos_scores.json").write_text(
+    (iteration_root / "scores/stage1a_walk_forward_scores.json").write_text(
         json.dumps(
             {
                 "metrics": {"total": 1, "matches": 0, "mismatches": 1, "neutral": 0},
@@ -309,17 +309,17 @@ def test_generate_stage1a_failure_audit_writes_locked_oos_postmortem_prompt(tmp_
         )
     )
 
-    result = generate_stage1a_failure_audit(iteration_root=iteration_root, sample_role="locked_recent_oos")
+    result = generate_stage1a_failure_audit(iteration_root=iteration_root, sample_role="walk_forward_test")
 
     audit = json.loads((iteration_root / "audits/failure_audit.json").read_text())
     prompt = (iteration_root / "agent_failure_audit_prompt.md").read_text()
-    assert result["sample_role"] == "locked_recent_oos"
+    assert result["sample_role"] == "walk_forward_test"
     assert audit["agent_handoff_policy"] == "postmortem_only"
     assert "postmortem only" in prompt.lower()
     assert "Do not edit" in prompt
 
 
-def test_run_stage1a_score_writes_forward_validation_artifacts_and_loads_stage0_labels(tmp_path: Path):
+def test_run_stage1a_score_writes_walk_forward_test_artifacts_and_loads_stage0_labels(tmp_path: Path):
     session_root = tmp_path / "dev/training_sessions/aave/stage1-aave"
     iteration_root = session_root / "iterations" / "iter_001_v0.1"
     stage0_root = tmp_path / "dev/stage0/aave"
@@ -338,7 +338,7 @@ def test_run_stage1a_score_writes_forward_validation_artifacts_and_loads_stage0_
         """
 def decide(context):
     return {
-        "decision_id": "validation-strategy",
+        "decision_id": "walk-forward-strategy",
         "strategy_id": "unit-strategy",
         "strategy_version": "v0.1",
         "signal_id": context["signal"]["signal_id"],
@@ -346,7 +346,7 @@ def decide(context):
         "action": "ENTER",
         "direction": "SHORT",
         "confidence": 0.8,
-        "reason_code": "validation_rule",
+        "reason_code": "walk_forward_rule",
         "diagnostics": {},
     }
 """
@@ -360,12 +360,12 @@ def decide(context):
         json.dumps({"signal_id": "20260501T000000Z", "natural_direction": "SHORT"})
     )
 
-    result = run_stage1a_score(iteration_root=iteration_root, sample_role="forward_validation")
+    result = run_stage1a_score(iteration_root=iteration_root, sample_role="walk_forward_test")
 
     assert result["metrics"]["matches"] == 1
-    assert result["scores_path"].endswith("scores/stage1a_forward_validation_scores.json")
-    assert result["decisions_path"].endswith("decisions/stage1a_forward_validation_decisions.json")
-    assert (iteration_root / "summaries/forward_validation_summary.md").exists()
+    assert result["scores_path"].endswith("scores/stage1a_walk_forward_scores.json")
+    assert result["decisions_path"].endswith("decisions/stage1a_walk_forward_decisions.json")
+    assert (iteration_root / "summaries/walk_forward_summary.md").exists()
 
 
 def test_run_stage1a_score_falls_back_to_stage0_subset_packets_when_canonical_path_is_missing(tmp_path: Path):
@@ -422,7 +422,7 @@ def decide(context):
         json.dumps({"signal_id": "20260304T132500Z", "natural_direction": "LONG"})
     )
 
-    result = run_stage1a_score(iteration_root=iteration_root, sample_role="recent_regime_train")
+    result = run_stage1a_score(iteration_root=iteration_root, sample_role="training")
 
     assert result["metrics"]["matches"] == 1
     decisions = json.loads((iteration_root / "decisions/stage1a_directional_decisions.json").read_text())
@@ -458,16 +458,13 @@ def decide(context):
     }
 """
     )
-    for packet_name in ("sig-train-long", "sig-validation-short", "sig-oos-long"):
+    for packet_name in ("sig-train-long", "sig-walk-forward-short"):
         (packets_root / f"{packet_name}.json").write_text(json.dumps({"signal_id": packet_name, "payload": {}}))
     (ground_truth_root / "sig-train-long.json").write_text(
         json.dumps({"signal_id": "sig-train-long", "natural_direction": "LONG"})
     )
-    (ground_truth_root / "sig-validation-short.json").write_text(
-        json.dumps({"signal_id": "sig-validation-short", "natural_direction": "SHORT"})
-    )
-    (ground_truth_root / "sig-oos-long.json").write_text(
-        json.dumps({"signal_id": "sig-oos-long", "natural_direction": "LONG"})
+    (ground_truth_root / "sig-walk-forward-short.json").write_text(
+        json.dumps({"signal_id": "sig-walk-forward-short", "natural_direction": "SHORT"})
     )
     session = {
         "session_id": "stage1-aave",
@@ -488,18 +485,17 @@ def decide(context):
         workspace_root=tmp_path,
         session=session,
         signals_by_role={
-            "recent_regime_train": [{"signal_id": "sig-train-long", "signal_set_key": session["signal_set_key"]}],
-            "forward_validation": [{"signal_id": "sig-validation-short", "signal_set_key": session["signal_set_key"]}],
-            "locked_recent_oos": [{"signal_id": "sig-oos-long", "signal_set_key": session["signal_set_key"]}],
+            "training": [{"signal_id": "sig-train-long", "signal_set_key": session["signal_set_key"]}],
+            "walk_forward_test": [{"signal_id": "sig-walk-forward-short", "signal_set_key": session["signal_set_key"]}],
         },
     )
 
     scores = json.loads((artifact_root / "promotion/stage1a_canonical_full_cycle_scores.json").read_text())
     decisions = json.loads((artifact_root / "promotion/stage1a_canonical_full_cycle_decisions.json").read_text())
-    assert result["metrics"]["matches"] == 3
-    assert result["match_count"] == 3
+    assert result["metrics"]["matches"] == 2
+    assert result["match_count"] == 2
     assert scores["stage2_stage3_input"]["role"] == "canonical_match_set"
     assert scores["stage4_input"]["role"] == "canonical_full_decision_set"
-    assert scores["slice_metrics"]["locked_recent_oos"]["matches"] == 1
-    assert decisions["decisions"][1]["sample_role"] == "forward_validation"
+    assert scores["slice_metrics"]["walk_forward_test"]["matches"] == 1
+    assert decisions["decisions"][1]["sample_role"] == "walk_forward_test"
     assert (artifact_root / "promotion/frozen_stage1a_strategy_module/strategy.py").exists()

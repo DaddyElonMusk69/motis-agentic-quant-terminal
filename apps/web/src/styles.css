@@ -698,12 +698,16 @@ h2 {
 
 .dev-lifecycle-step {
   align-content: center;
+  background: #fff;
   border: 1px solid #dfe5e0;
   border-radius: 8px;
+  color: inherit;
+  cursor: pointer;
   display: grid;
   gap: 4px;
   min-height: 62px;
   padding: 10px;
+  text-align: left;
 }
 
 .dev-lifecycle-step span {
@@ -719,12 +723,86 @@ h2 {
   border-color: #126b5f;
 }
 
-.dev-stage1-panel {
+.dev-lifecycle-step.selected {
+  box-shadow: inset 0 0 0 2px #126b5f;
+}
+
+.dev-stage0-panel,
+.dev-stage1-panel,
+.dev-stage4-panel {
   border: 1px solid #dfe5e0;
   border-radius: 8px;
   display: grid;
   gap: 12px;
   padding: 12px;
+}
+
+.dev-stage2-panel,
+.dev-stage3-panel {
+  border: 1px solid #dfe5e0;
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+}
+
+.stage2-summary-strip,
+.stage3-summary-strip {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.stage3-summary-strip {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.stage2-summary-strip div,
+.stage3-summary-strip div {
+  border: 1px solid #edf0ed;
+  border-radius: 8px;
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+}
+
+.stage2-summary-strip span,
+.stage3-summary-strip span {
+  color: #65736b;
+  font-size: 12px;
+}
+
+.stage2-summary-strip strong,
+.stage3-summary-strip strong {
+  font-size: 18px;
+}
+
+.stage2-capture-table .row {
+  grid-template-columns: 0.7fr repeat(3, minmax(0, 1fr));
+}
+
+.stage3-grid-table .row {
+  grid-template-columns: 1.2fr 0.7fr 1.2fr 0.8fr 0.6fr 0.8fr;
+}
+
+.stage3-pyramid-table .row {
+  grid-template-columns: 0.7fr 0.8fr 0.8fr 0.8fr 1fr 0.8fr;
+}
+
+.stage4-results-table .row {
+  grid-template-columns: 1.4fr 0.8fr 1fr 0.7fr 0.8fr 0.8fr;
+}
+
+.stage3-substep {
+  border: 1px solid #edf0ed;
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+}
+
+.stage3-substep h3 {
+  font-size: 17px;
 }
 
 .stage-heading.compact {
@@ -854,19 +932,19 @@ h2 {
   width: fit-content;
 }
 
-.agent-use-badge.recent_regime_train {
+.agent-use-badge.training {
   background: #eef5f2;
   border-color: #9ccfbe;
   color: #126b5f;
 }
 
-.agent-use-badge.forward_validation {
+.agent-use-badge.walk_forward_test {
   background: #fff8ec;
   border-color: #ead1a3;
   color: #8a5d12;
 }
 
-.agent-use-badge.locked_recent_oos {
+.agent-use-badge.walk_forward_test {
   background: #f6e4e1;
   border-color: #e2b7b2;
   color: #a33a2c;

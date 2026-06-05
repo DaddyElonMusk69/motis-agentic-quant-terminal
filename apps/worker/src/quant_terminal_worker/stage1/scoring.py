@@ -13,29 +13,23 @@ PROMOTION_THRESHOLD_PCT = 55.0
 
 
 SAMPLE_ROLE_ARTIFACTS = {
-    "recent_regime_train": {
+    "training": {
         "decisions": "stage1a_directional_decisions.json",
         "scores": "stage1a_directional_scores.json",
         "summary": "iteration_summary.md",
         "title": "Stage 1A Training Score",
     },
-    "forward_validation": {
-        "decisions": "stage1a_forward_validation_decisions.json",
-        "scores": "stage1a_forward_validation_scores.json",
-        "summary": "forward_validation_summary.md",
-        "title": "Stage 1A Forward Validation Score",
-    },
-    "locked_recent_oos": {
-        "decisions": "stage1a_locked_oos_decisions.json",
-        "scores": "stage1a_locked_oos_scores.json",
-        "summary": "locked_oos_summary.md",
-        "title": "Stage 1A Locked OOS Score",
+    "walk_forward_test": {
+        "decisions": "stage1a_walk_forward_decisions.json",
+        "scores": "stage1a_walk_forward_scores.json",
+        "summary": "walk_forward_summary.md",
+        "title": "Stage 1A Walk-Forward Test Score",
     },
 }
 
 
 def run_stage1a_training_score(*, iteration_root: Path) -> dict[str, Any]:
-    return run_stage1a_score(iteration_root=iteration_root, sample_role="recent_regime_train")
+    return run_stage1a_score(iteration_root=iteration_root, sample_role="training")
 
 
 def run_stage1a_score(*, iteration_root: Path, sample_role: str) -> dict[str, Any]:
@@ -131,7 +125,7 @@ def run_stage1a_canonical_full_cycle(
     decisions: list[dict[str, Any]] = []
     records: list[dict[str, Any]] = []
     slice_metrics: dict[str, dict[str, Any]] = {}
-    for sample_role in ("recent_regime_train", "forward_validation", "locked_recent_oos"):
+    for sample_role in ("training", "walk_forward_test"):
         role_records: list[dict[str, Any]] = []
         for signal in signals_by_role.get(sample_role, []):
             item = _canonical_signal_item(workspace_root=workspace_root, session=session, signal=signal)
@@ -199,7 +193,7 @@ def run_stage1a_canonical_full_cycle(
         "records": records,
         "stage2_stage3_input": {
             "role": "canonical_match_set",
-            "description": "Stage 2 and Stage 3 must use this MATCH subset from the frozen full-cycle readout.",
+            "description": "Stage 2 and Stage 3 must use this MATCH subset from the frozen walk-forward readout.",
         },
         "stage4_input": {
             "role": "canonical_full_decision_set",
@@ -224,7 +218,7 @@ def run_stage1a_canonical_full_cycle(
     }
 
 
-def generate_stage1a_failure_audit(*, iteration_root: Path, sample_role: str = "recent_regime_train") -> dict[str, Any]:
+def generate_stage1a_failure_audit(*, iteration_root: Path, sample_role: str = "training") -> dict[str, Any]:
     if sample_role not in SAMPLE_ROLE_ARTIFACTS:
         raise ValueError(f"Unsupported Stage 1A sample role: {sample_role}")
     iteration_root = iteration_root.resolve()
@@ -277,7 +271,7 @@ def generate_stage1a_failure_audit(*, iteration_root: Path, sample_role: str = "
             "layer": "Stage 1A directional classification only",
             "proposed_skill_change": "Identify recurring packet evidence that should reclassify direction or turn neutral reads into LONG/SHORT calls.",
             "regression_risk": "Do not break protected MATCH cases while correcting failures.",
-            "retest_plan": "Rerun Stage 1A training score, then validate on forward and locked OOS samples before promotion.",
+            "retest_plan": "Rerun Stage 1A training score, then run the walk-forward test before promotion.",
         },
     }
     audit_json_path = iteration_root / "audits" / "failure_audit.json"
@@ -349,11 +343,9 @@ def _audit_labels_for_iteration(*, iteration_root: Path, training_sample: dict[s
 
 
 def _audit_handoff_policy(sample_role: str) -> str:
-    if sample_role == "recent_regime_train":
+    if sample_role == "training":
         return "direct_strategy_revision"
-    if sample_role == "forward_validation":
-        return "return_to_training"
-    if sample_role == "locked_recent_oos":
+    if sample_role == "walk_forward_test":
         return "postmortem_only"
     return "unknown"
 
@@ -413,33 +405,8 @@ def _render_failure_audit_prompt(audit: dict[str, Any]) -> str:
     iteration_root = Path(audit["iteration_root"])
     strategy_path = audit["session_strategy_path"]
     policy = audit.get("agent_handoff_policy")
-    if policy == "return_to_training":
-        return f"""You are reviewing a failed Stage 1A forward-validation slice.
-
-Read:
-- {iteration_root / "audits" / "failure_audit.json"}
-- {iteration_root / "audits" / "failure_audit.md"}
-- {iteration_root / "signal_sample.json"}
-- {strategy_path}
-
-Read-only strategy snapshot for this validation iteration:
-- {audit["strategy_snapshot_path"]}
-
-Current failure cluster: {audit['failure_cluster']}
-Failure cases: {failure_ids}
-Protected cases that should not regress: {protected_ids}
-
-Task:
-Diagnose why the current pair-specific strategy failed validation and produce guidance for the next training iteration.
-
-Rules:
-- Do not edit the strategy directly against validation labels.
-- Do not tune to exact validation timestamps or signal ids.
-- Use this validation audit only to propose general pattern hypotheses.
-- The user should create a new training bundle and apply any strategy changes there before re-validating.
-"""
     if policy == "postmortem_only":
-        return f"""You are reviewing a failed locked-OOS Stage 1A slice.
+        return f"""You are reviewing a failed Stage 1A walk-forward test.
 
 Read:
 - {iteration_root / "audits" / "failure_audit.json"}
@@ -454,10 +421,10 @@ Task:
 Write a postmortem only. Explain the failure modes and whether the strategy should be rejected, retrained in a fresh cycle, or held for review.
 
 Rules:
-- Do not edit the strategy based on locked OOS.
+- Do not edit the strategy based on walk-forward test evidence.
 - Do not create a revision prompt for this same cycle.
-- Do not tune to exact OOS timestamps, signal ids, or labels.
-- Locked OOS is a promotion gate, not an optimization set.
+- Do not tune to exact walk-forward timestamps, signal ids, or labels.
+- Walk-forward is a promotion gate, not an optimization set.
 """
     return f"""You are the strategy-builder agent for the next Stage 1A iteration.
 
@@ -488,7 +455,7 @@ Rules:
 - Preserve protected MATCH cases unless the audit evidence proves the old read was wrong.
 - Do not edit the read-only strategy snapshot; it is only evidence of what failed.
 - New Stage 1 bundles automatically snapshot the current session strategy file into their own source_artifacts/strategy_module_snapshot folder.
-- After editing, the user should rerun Score on this iteration before creating validation or OOS bundles.
+- After editing, the user should rerun Score on this iteration before creating a walk-forward test bundle.
 """
 
 
@@ -735,7 +702,7 @@ def _metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _render_summary(metrics: dict[str, Any], *, title: str) -> str:
     agreement_pct = metrics["directional_agreement"] * 100
-    decision = "continue to validation" if metrics["passes_threshold"] else "audit failures before next edit"
+    decision = "continue to walk-forward test" if metrics["passes_threshold"] else "audit failures before next edit"
     return f"""# {title}
 
 Directional agreement: {agreement_pct:.2f}%
@@ -757,7 +724,7 @@ def _render_canonical_summary(score_artifact: dict[str, Any]) -> str:
         f"{role_metrics['matches']} match / {role_metrics['mismatches']} mismatch / {role_metrics['neutral']} neutral"
         for role, role_metrics in score_artifact["slice_metrics"].items()
     )
-    return f"""# Canonical Stage 1A Full-Cycle Readout
+    return f"""# Canonical Stage 1A Walk-Forward Readout
 
 Session: {score_artifact['session_id']}
 Strategy: {score_artifact['strategy_id']}@{score_artifact['strategy_version']}

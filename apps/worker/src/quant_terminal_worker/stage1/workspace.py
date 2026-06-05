@@ -279,10 +279,9 @@ def build_stage1_gate_summary(*, workspace_root: Path, session: dict[str, Any]) 
     artifact_root = _artifact_root(workspace_root, session)
     iterations = list_stage1_iterations(workspace_root=workspace_root, session=session)
     latest_scores = _latest_role_scores(iterations)
-    final_refit = _final_refit_state(iterations)
     roles = {
         role: _role_gate_state(role=role, score=latest_scores.get(role))
-        for role in ("recent_regime_train", "forward_validation", "locked_recent_oos")
+        for role in ("training", "walk_forward_test")
     }
     blockers = [
         role_state["blocker"]
@@ -291,6 +290,10 @@ def build_stage1_gate_summary(*, workspace_root: Path, session: dict[str, Any]) 
     ]
     ready_to_freeze = not blockers
     canonical = _canonical_readout_state(artifact_root)
+    stage2_capture = _stage2_capture_state(artifact_root)
+    stage3_grid = _stage3_grid_state(artifact_root)
+    stage3_pyramid = _stage3_pyramid_state(artifact_root)
+    stage4_realized_expectancy = _stage4_realized_expectancy_state(artifact_root)
     status = "canonical_complete" if canonical["exists"] else "ready_to_freeze" if ready_to_freeze else "blocked"
     if session.get("status") == "stage1a_frozen" and canonical["exists"]:
         status = "stage1a_frozen"
@@ -300,8 +303,11 @@ def build_stage1_gate_summary(*, workspace_root: Path, session: dict[str, Any]) 
         "ready_to_freeze": ready_to_freeze,
         "blockers": blockers,
         "roles": roles,
-        "final_refit": final_refit,
         "canonical_readout": canonical,
+        "stage2_capture": stage2_capture,
+        "stage3_grid": stage3_grid,
+        "stage3_pyramid": stage3_pyramid,
+        "stage4_realized_expectancy": stage4_realized_expectancy,
         "downstream_contract": {
             "stage2_stage3": "Use the MATCH subset from promotion/stage1a_canonical_full_cycle_scores.json.",
             "stage4": "Use the full decision set from promotion/stage1a_canonical_full_cycle_decisions.json.",
@@ -331,27 +337,6 @@ def _latest_role_scores(iterations: list[dict[str, Any]]) -> dict[str, dict[str,
                 "sample_method": iteration.get("sample_method"),
             }
     return latest
-
-
-def _final_refit_state(iterations: list[dict[str, Any]]) -> dict[str, Any]:
-    for iteration in reversed(iterations):
-        if iteration.get("sample_method") == "final_refit_ab":
-            return {
-                "exists": True,
-                "iteration_id": iteration.get("iteration_id"),
-                "iteration_root": iteration.get("iteration_root"),
-                "signal_count": iteration.get("signal_count"),
-                "builder_prompt_path": iteration.get("builder_prompt_path"),
-                "builder_training_sample_path": iteration.get("builder_training_sample_path"),
-            }
-    return {
-        "exists": False,
-        "iteration_id": None,
-        "iteration_root": None,
-        "signal_count": 0,
-        "builder_prompt_path": None,
-        "builder_training_sample_path": None,
-    }
 
 
 def _role_gate_state(*, role: str, score: dict[str, Any] | None) -> dict[str, Any]:
@@ -393,6 +378,96 @@ def _canonical_readout_state(artifact_root: Path) -> dict[str, Any]:
     }
 
 
+def _stage2_capture_state(artifact_root: Path) -> dict[str, Any]:
+    capture_path = artifact_root / "promotion" / "stage2_capture_curve.json"
+    per_signal_path = artifact_root / "promotion" / "stage2_capture_per_signal.json"
+    summary_path = artifact_root / "promotion" / "stage2_summary.md"
+    capture = _read_json_if_exists(capture_path)
+    return {
+        "exists": capture is not None and per_signal_path.exists() and summary_path.exists(),
+        "capture_curve_path": str(capture_path) if capture_path.exists() else None,
+        "per_signal_path": str(per_signal_path) if per_signal_path.exists() else None,
+        "summary_path": str(summary_path) if summary_path.exists() else None,
+        "metrics": capture.get("metrics", {}) if capture else {},
+        "results": capture.get("results", {}) if capture else {},
+    }
+
+
+def _stage3_grid_state(artifact_root: Path) -> dict[str, Any]:
+    grid_path = artifact_root / "promotion" / "stage3_grid_results.json"
+    optimal_path = artifact_root / "promotion" / "stage3_optimal.json"
+    candidates_path = artifact_root / "promotion" / "stage4_candidates.json"
+    summary_path = artifact_root / "promotion" / "stage3_summary.md"
+    grid = _read_json_if_exists(grid_path)
+    optimal = _read_json_if_exists(optimal_path)
+    best = None
+    if optimal:
+        best = optimal.get("best")
+    if best is None and grid:
+        best = (grid.get("optimal") or {}).get("best")
+    return {
+        "exists": grid is not None and optimal is not None and candidates_path.exists() and summary_path.exists(),
+        "grid_results_path": str(grid_path) if grid_path.exists() else None,
+        "optimal_path": str(optimal_path) if optimal_path.exists() else None,
+        "stage4_candidates_path": str(candidates_path) if candidates_path.exists() else None,
+        "summary_path": str(summary_path) if summary_path.exists() else None,
+        "total_signals": grid.get("total_signals", 0) if grid else 0,
+        "forward_hours": grid.get("forward_hours") if grid else None,
+        "leverage": grid.get("leverage") if grid else None,
+        "best": best or {},
+        "top_5": (optimal.get("top_5") if optimal else (grid.get("optimal") or {}).get("top_5") if grid else []) or [],
+    }
+
+
+def _stage3_pyramid_state(artifact_root: Path) -> dict[str, Any]:
+    results_path = artifact_root / "promotion" / "stage3_pyramid_results.json"
+    optimal_path = artifact_root / "promotion" / "stage3_pyramid_optimal.json"
+    candidates_path = artifact_root / "promotion" / "stage4_candidates.json"
+    summary_path = artifact_root / "promotion" / "stage3_pyramid_summary.md"
+    results = _read_json_if_exists(results_path)
+    optimal = _read_json_if_exists(optimal_path)
+    best = optimal.get("best") if optimal else None
+    return {
+        "exists": results is not None and optimal is not None and candidates_path.exists() and summary_path.exists(),
+        "results_path": str(results_path) if results_path.exists() else None,
+        "optimal_path": str(optimal_path) if optimal_path.exists() else None,
+        "stage4_candidates_path": str(candidates_path) if candidates_path.exists() else None,
+        "summary_path": str(summary_path) if summary_path.exists() else None,
+        "total_signals": results.get("total_signals", 0) if results else 0,
+        "tp_pct": results.get("tp_pct") if results else None,
+        "sl_pct": results.get("sl_pct") if results else None,
+        "max_legs": results.get("max_legs") if results else None,
+        "sl_breakeven": results.get("sl_breakeven") if results else None,
+        "baseline": results.get("baseline", {}) if results else {},
+        "best": best or {},
+        "results": results.get("results", []) if results else [],
+    }
+
+
+def _stage4_realized_expectancy_state(artifact_root: Path) -> dict[str, Any]:
+    realized_path = artifact_root / "promotion" / "stage4_realized_expectancy.json"
+    ledger_path = artifact_root / "promotion" / "stage4_trade_ledger.json"
+    optimal_path = artifact_root / "promotion" / "stage4_optimal.json"
+    summary_path = artifact_root / "promotion" / "stage4_summary.md"
+    realized = _read_json_if_exists(realized_path)
+    optimal = _read_json_if_exists(optimal_path)
+    best = None
+    if optimal:
+        best = optimal.get("best")
+    if best is None and realized:
+        best = realized.get("best_candidate")
+    return {
+        "exists": realized is not None and ledger_path.exists() and optimal is not None and summary_path.exists(),
+        "realized_expectancy_path": str(realized_path) if realized_path.exists() else None,
+        "trade_ledger_path": str(ledger_path) if ledger_path.exists() else None,
+        "optimal_path": str(optimal_path) if optimal_path.exists() else None,
+        "summary_path": str(summary_path) if summary_path.exists() else None,
+        "best_candidate_id": realized.get("best_candidate_id") if realized else None,
+        "best_candidate": best or {},
+        "candidates": realized.get("candidates", []) if realized else [],
+    }
+
+
 def _copy_strategy_snapshot(source_dir: Path, snapshot_dir: Path) -> None:
     if snapshot_dir.exists():
         shutil.rmtree(snapshot_dir)
@@ -404,7 +479,7 @@ def _summarize_iteration(*, iteration_root: Path) -> dict[str, Any]:
     audit_path = iteration_root / "audits" / "failure_audit.json"
     audit = _read_json_if_exists(audit_path)
     role_scores = _role_scores(iteration_root)
-    training_score = role_scores.get("recent_regime_train")
+    training_score = role_scores.get("training")
     return {
         "iteration_id": manifest.get("iteration_id", iteration_root.name),
         "iteration_root": str(iteration_root),
@@ -544,7 +619,7 @@ Signal sample entries:
 
 Rules:
 - Use only the embedded `packet` JSON in signal_sample.json and the strategy module snapshot.
-- Treat `packet_path` fields as legacy/debug metadata only; do not depend on global packet folders.
+- Treat `packet_path` fields as debug metadata only; use the embedded packet JSON as the evaluated input.
 - Evaluate only the listed signal_sample.json entries.
 - Preserve the listed order exactly.
 - Do not scan any signal folder for additional packets.
@@ -591,11 +666,11 @@ def _build_training_sample(
         "signal_count": len(builder_signals),
         "ground_truth_visible": True,
         "allowed_use": "strategy_builder_training_only",
-        "forbidden_use": ["forward_validation", "locked_oos", "evaluator_handoff"],
+        "forbidden_use": ["walk_forward_test", "evaluator_handoff"],
         "signals": builder_signals,
         "notes": {
             "label_source": "Stage 0 natural direction records inside the training window",
-            "validation_oos_hidden": True,
+            "walk_forward_hidden": True,
         },
     }
 
@@ -803,29 +878,13 @@ def _render_strategy_builder_prompt(
     short_count = sum(
         1 for item in builder_sample["signals"] if item.get("ground_truth", {}).get("natural_direction") == "SHORT"
     )
-    final_refit = sample.get("sample_method") == "final_refit_ab"
-    sample_scope = "Training + Forward Validation final refit" if final_refit else "Training sample"
-    label_policy = (
-        "- Use training plus forward-validation natural_direction labels in builder_training_sample.json.\n"
-        "- Locked OOS labels and packets remain hidden until this refit is complete.\n"
-        "- After editing, create the locked OOS evaluator bundle for the one-shot promotion gate."
-        if final_refit
-        else "- Use training-only natural_direction labels in builder_training_sample.json."
-    )
+    label_policy = "- Use training-window natural_direction labels in builder_training_sample.json."
     forbidden_policy = (
-        "- Do not use locked OOS labels, packets, score files, or future candles.\n"
+        "- Do not use walk-forward labels, packets, score files, or future candles.\n"
         "- Do not modify signal packets, Stage 0 evidence, sample files, or evaluator handoff files.\n"
-        "- Do not claim promotion readiness from this final-refit bundle; locked OOS must still pass untouched."
-        if final_refit
-        else "- Do not use validation or locked OOS labels, packets, score files, or future candles.\n"
-        "- Do not modify signal packets, Stage 0 evidence, sample files, or evaluator handoff files.\n"
-        "- Do not claim promotion readiness from this training bundle; validation and locked OOS must be separate checks."
+        "- Do not claim promotion readiness from this training bundle; the walk-forward test must pass separately."
     )
-    next_step = (
-        f"- After editing {strategy_path}, create the locked OOS evaluator bundle. Do not reopen the same cycle from locked OOS evidence."
-        if final_refit
-        else f"- After editing {strategy_path}, the user should click Score on this iteration, then create the next training or validation bundle as directed by the gate."
-    )
+    next_step = f"- After editing {strategy_path}, the user should click Score on this iteration, then create the walk-forward test bundle if training passes."
     return f"""You are the strategy-builder agent for a Stage 1A deterministic strategy-script iteration.
 
 Session: {session['session_id']}
@@ -845,7 +904,7 @@ Read:
 Task:
 Edit {strategy_path} so the deterministic `decide(...)` function learns packet-evidence patterns that improve agreement with Stage 0 natural direction on the selected builder sample.
 
-{sample_scope}:
+Training sample:
 - sample method: {sample['sample_method']}
 - signal count: {builder_sample['signal_count']}
 - label balance: LONG {long_count}, SHORT {short_count}
