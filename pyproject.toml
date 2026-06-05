@@ -28,6 +28,8 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = [
   "packages/strategy_sdk/src",
+  "packages/engine_sdk/src",
+  "packages/strategy_modules/src",
   "apps/api/src",
   "apps/worker/src"
 ]
@@ -39,6 +41,8 @@ include = [
 testpaths = ["tests"]
 pythonpath = [
   "packages/strategy_sdk/src",
+  "packages/engine_sdk/src",
+  "packages/strategy_modules/src",
   "apps/api/src",
   "apps/worker/src"
 ]

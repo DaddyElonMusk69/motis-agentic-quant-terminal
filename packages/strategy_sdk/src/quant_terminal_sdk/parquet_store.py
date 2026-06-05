@@ -26,7 +26,7 @@ def write_candles(
 
 def read_candles(path: Path) -> list[dict[str, Any]]:
     partition_columns = {"source", "type", "asset", "timeframe", "year", "month"}
-    rows = pq.read_table(path).to_pylist()
+    rows = pq.ParquetFile(path).read().to_pylist()
     return [
         {key: value for key, value in row.items() if key not in partition_columns}
         for row in rows

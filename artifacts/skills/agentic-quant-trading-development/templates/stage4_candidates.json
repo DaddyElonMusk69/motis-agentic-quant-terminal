@@ -1,0 +1,40 @@
+{
+  "schema_version": "0.1",
+  "defaults": {
+    "leverage": 5,
+    "max_hold_hours": 36,
+    "timeout_exit_policy": "close_at_cutoff"
+  },
+  "candidates": [
+    {
+      "candidate_id": "market_tp2.0_sl2.0",
+      "entry_type": "market",
+      "tp_pct": 2.0,
+      "sl_pct": 2.0,
+      "source_stage": "stage3_grid",
+      "source_path": "iterations/<ITERATION_ID>/scores/stage3_grid/optimal.json"
+    },
+    {
+      "candidate_id": "limit_tp2.0_sl2.0_off0.3",
+      "entry_type": "limit",
+      "tp_pct": 2.0,
+      "sl_pct": 2.0,
+      "limit_offset_pct": 0.3,
+      "source_stage": "stage3_limit_grid",
+      "source_path": "iterations/<ITERATION_ID>/scores/stage3_limit_grid/limit_optimal.json"
+    },
+    {
+      "candidate_id": "pyramid_tp2.0_sl2.0_step0.3_legs3_be",
+      "entry_type": "market",
+      "tp_pct": 2.0,
+      "sl_pct": 2.0,
+      "source_stage": "stage3_pyramid",
+      "source_path": "iterations/<ITERATION_ID>/scores/stage3_pyramid_be_tp2.0_sl2.0/pyramid_optimal.json",
+      "pyramid": {
+        "step_pct": 0.3,
+        "max_legs": 3,
+        "sl_breakeven": true
+      }
+    }
+  ]
+}

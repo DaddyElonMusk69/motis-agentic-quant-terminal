@@ -1,0 +1,31 @@
+{
+  "schema_version": "walk_forward_universe.v0.1",
+  "created_at": "",
+  "walk_forward_month": "YYYY-MM",
+  "as_of_date": "YYYY-MM-DD",
+  "path_a_threshold_pct": 80.0,
+  "source_branch_decisions": "stage0_branch_decisions.json",
+  "assets": [
+    {
+      "asset": "",
+      "strategy_id": "",
+      "signal_engine_id": "",
+      "signal_family": "",
+      "signal_set_id": "",
+      "stage0_manifest_path": "",
+      "total_valid_signals": 0,
+      "triggered_signals": 0,
+      "trigger_rate_pct": 0.0,
+      "branch_path": "path_a",
+      "branch_decision": "monthly_tradable_candidate",
+      "threshold_pct": 0.0,
+      "path_a_threshold_pct": 80.0,
+      "forward_hours": 36,
+      "strategy_training_status": "stale",
+      "strategy_version": "",
+      "latest_training_session": "",
+      "latest_training_date": "",
+      "notes": ""
+    }
+  ]
+}

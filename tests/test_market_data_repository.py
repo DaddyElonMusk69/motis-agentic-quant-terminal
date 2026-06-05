@@ -3,6 +3,7 @@ from sqlalchemy.dialects import postgresql
 from quant_terminal_api.repositories.market_data import (
     build_data_source_upsert,
     build_market_data_ref_upsert,
+    PostgresMarketDataRepository,
 )
 
 
@@ -39,3 +40,22 @@ def test_build_data_source_upsert_targets_data_sources_table():
 
     assert "INSERT INTO data_sources" in compiled
     assert "ON CONFLICT" in compiled
+
+
+def test_list_derived_refs_for_raw_filters_matching_candle_datasets():
+    repository = PostgresMarketDataRepository.__new__(PostgresMarketDataRepository)
+    statement = repository.build_derived_refs_for_raw_statement(
+        {
+            "source_id": "okx",
+            "asset": "BTC",
+            "instrument": "BTC-USDT-SWAP",
+            "data_type": "candles",
+        }
+    )
+    compiled = str(statement.compile(dialect=postgresql.dialect()))
+
+    assert "market_data_refs.source_id = " in compiled
+    assert "market_data_refs.asset = " in compiled
+    assert "market_data_refs.instrument = " in compiled
+    assert "market_data_refs.data_type = " in compiled
+    assert "market_data_refs.data_origin = " in compiled

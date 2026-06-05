@@ -21,6 +21,8 @@ def run_entrypoint_subprocess(
         *(str(path) for path in extra_python_paths or []),
         str(src_root),
         str(repo_root / "packages" / "strategy_sdk" / "src"),
+        str(repo_root / "packages" / "engine_sdk" / "src"),
+        str(repo_root / "packages" / "strategy_modules" / "src"),
     ]
     existing_pythonpath = os.environ.get("PYTHONPATH")
     if existing_pythonpath:

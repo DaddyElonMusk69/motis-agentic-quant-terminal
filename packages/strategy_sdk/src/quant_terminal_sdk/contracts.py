@@ -34,7 +34,7 @@ class StrategyDecision:
     strategy_id: str
     strategy_version: str
     signal_id: str
-    action: Literal["ENTER", "SKIP", "EXIT", "HOLD"]
+    trade_action: Literal["ENTER", "SKIP"]
     direction: Literal["LONG", "SHORT", "FLAT"]
     confidence: float
     reason_code: str
@@ -44,3 +44,16 @@ class StrategyDecision:
     def __post_init__(self) -> None:
         if not 0 <= self.confidence <= 1:
             raise ValueError("confidence must be between 0 and 1")
+        validate_strategy_decision(self)
+
+    @property
+    def action(self) -> Literal["ENTER", "SKIP"]:
+        return self.trade_action
+
+
+def validate_strategy_decision(decision: StrategyDecision) -> StrategyDecision:
+    if decision.trade_action == "SKIP" and decision.direction != "FLAT":
+        raise ValueError("SKIP decisions must use FLAT direction")
+    if decision.trade_action == "ENTER" and decision.direction not in {"LONG", "SHORT"}:
+        raise ValueError("ENTER decisions must use LONG or SHORT direction")
+    return decision

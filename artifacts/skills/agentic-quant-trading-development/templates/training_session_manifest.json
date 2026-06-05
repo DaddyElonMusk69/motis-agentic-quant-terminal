@@ -1,0 +1,39 @@
+{
+  "session_id": "",
+  "created_at": "",
+  "asset": "",
+  "strategy_id": "",
+  "strategy_version": "",
+  "signal_engine_id": "",
+  "signal_family": "",
+  "signal_set_id": "",
+  "stage": "",
+  "iteration_mode": true,
+  "active_iteration": "",
+  "iteration_count": 0,
+  "branch_path": "",
+  "forward_hours": 36,
+  "threshold_pct": null,
+  "walk_forward_month": "",
+  "train_window": "",
+  "validation_window": "",
+  "locked_oos_window": "",
+  "universe_manifest_path": "",
+  "data_manifest": "",
+  "signal_set_manifest": "",
+  "inputs": {
+    "signal_packets": "",
+    "strategy_skill": "",
+    "ground_truth": ""
+  },
+  "outputs": {
+    "decisions": "",
+    "scores": "",
+    "summary": ""
+  },
+  "scoring": {
+    "method": "",
+    "promotion_gate": ""
+  },
+  "status": "created"
+}

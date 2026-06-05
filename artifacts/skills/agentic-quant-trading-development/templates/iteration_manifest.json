@@ -1,0 +1,34 @@
+{
+  "schema_version": "0.2",
+  "iteration_id": "",
+  "created_at": "",
+  "session_id": "",
+  "stage": "",
+  "asset": "",
+  "strategy_id": "",
+  "strategy_version": "",
+  "signal_engine_id": "",
+  "signal_family": "",
+  "signal_set_id": "",
+  "sample_method": "",
+  "sample_size": 0,
+  "contamination_controls": {
+    "ground_truth_hidden": true,
+    "future_candles_hidden": true,
+    "prior_iteration_results_hidden": true,
+    "proposed_fixes_hidden": true
+  },
+  "handoff_path": "handoff.md",
+  "signal_sample_path": "signal_sample.json",
+  "strategy_skill_snapshot": {
+    "path": "source_artifacts/strategy_skill_snapshot",
+    "manifest_path": "source_artifacts/strategy_skill_snapshot_manifest.json"
+  },
+  "outputs": {
+    "decisions": "decisions/",
+    "scores": "scores/",
+    "audit": "audits/failure_audit.md",
+    "summary": "summaries/iteration_summary.md"
+  },
+  "status": "created"
+}

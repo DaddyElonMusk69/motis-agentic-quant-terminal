@@ -23,7 +23,7 @@ extension of the current file-based workspace.
 Use the current development skill as historical design input, not as an implementation
 dependency:
 
-`/Users/haokaiqin/Motis Agentic Quan Trading/artifacts/skills/agentic-quant-trading-development/SKILL.md`
+`/Users/haokaiqin/.codex/skills/agentic-quant-trading-development/SKILL.md`
 
 Key concepts to carry forward:
 

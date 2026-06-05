@@ -1,0 +1,879 @@
+from __future__ import annotations
+
+import json
+import shutil
+from pathlib import Path
+from typing import Any
+
+from quant_terminal_worker.stage1.scoring import SAMPLE_ROLE_ARTIFACTS
+
+
+STARTER_STRATEGY = '''from __future__ import annotations
+
+from quant_terminal_strategies.vegas_ema_base import decide
+
+'''
+
+
+def materialize_stage1_session_workspace(
+    *,
+    workspace_root: Path,
+    session: dict[str, Any],
+) -> dict[str, str]:
+    artifact_root = Path(session["artifact_root"])
+    if not artifact_root.is_absolute():
+        artifact_root = workspace_root / artifact_root
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    for folder in ("inputs", "iterations", "promotion"):
+        (artifact_root / folder).mkdir(exist_ok=True)
+
+    strategy_module_dir = artifact_root / "strategy_module"
+    strategy_module_dir.mkdir(exist_ok=True)
+    (strategy_module_dir / "__init__.py").write_text("")
+    strategy_path = strategy_module_dir / "strategy.py"
+    if not strategy_path.exists():
+        seed_path_value = session.get("seed_strategy_source_path")
+        if seed_path_value:
+            seed_path = Path(seed_path_value)
+            if not seed_path.is_absolute():
+                seed_path = workspace_root / seed_path
+            if not seed_path.is_file():
+                raise ValueError(f"Seed strategy source not found: {seed_path}")
+            strategy_path.write_text(seed_path.read_text())
+        else:
+            strategy_path.write_text(STARTER_STRATEGY)
+
+    manifest = dict(session["manifest"])
+    if session.get("seed_strategy_source_type") or session.get("seed_strategy_source_path"):
+        manifest["seed_strategy"] = {
+            "source_type": session.get("seed_strategy_source_type", "unknown"),
+            "source_path": session.get("seed_strategy_source_path"),
+            "source_version": session.get("seed_strategy_source_version"),
+        }
+    (artifact_root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    return {
+        "artifact_root": str(artifact_root),
+        "manifest_path": str(artifact_root / "manifest.json"),
+        "strategy_path": str(strategy_path),
+        "strategy_entrypoint": "strategy_module.strategy:decide",
+    }
+
+
+def create_stage1_iteration_workspace(
+    *,
+    workspace_root: Path,
+    session: dict[str, Any],
+    signals: list[dict[str, Any]],
+    sample_method: str,
+    bundle_role: str = "evaluator",
+) -> dict[str, str]:
+    materialize_stage1_session_workspace(workspace_root=workspace_root, session=session)
+    artifact_root = _artifact_root(workspace_root, session)
+    iteration_id = _next_iteration_id(artifact_root, session["strategy_version"])
+    iteration_root = artifact_root / "iterations" / iteration_id
+    for folder in ("decisions", "scores", "audits", "summaries", "source_artifacts"):
+        (iteration_root / folder).mkdir(parents=True, exist_ok=True)
+
+    snapshot_dir = iteration_root / "source_artifacts" / "strategy_module_snapshot"
+    _copy_strategy_snapshot(artifact_root / "strategy_module", snapshot_dir)
+
+    selected_signals = _all_window_signals(signals)
+    sample = {
+        "schema_version": "0.1",
+        "sample_method": sample_method,
+        "signal_count": len(selected_signals),
+        "signals": [
+            {
+                "signal_id": signal["signal_id"],
+                "timestamp": _iso_timestamp(signal["timestamp"]),
+                "packet_path": _packet_path(workspace_root, session, signal),
+                "packet": _packet_payload(signal),
+            }
+            for signal in selected_signals
+        ],
+        "selection_notes": {
+            "ordering": "all signals in the selected Stage 1 window, emitted chronologically",
+            "ground_truth_hidden": True,
+            "future_candles_hidden": True,
+        },
+    }
+    manifest = {
+        "schema_version": "0.2",
+        "iteration_id": iteration_id,
+        "session_id": session["session_id"],
+        "stage": "stage1a_directional_agreement",
+        "asset": session["asset"],
+        "strategy_id": session["strategy_id"],
+        "strategy_version": session["strategy_version"],
+        "signal_engine_id": session["signal_engine_id"],
+        "signal_family": session["signal_engine_id"],
+        "signal_set_id": session["signal_set_id"],
+        "sample_method": sample_method,
+        "signal_count": len(selected_signals),
+        "contamination_controls": {
+            "ground_truth_hidden": True,
+            "future_candles_hidden": True,
+            "prior_iteration_results_hidden": True,
+            "proposed_fixes_hidden": True,
+        },
+        "handoff_path": "handoff.md",
+        "signal_sample_path": "signal_sample.json",
+        "strategy_module_snapshot": {
+            "path": "source_artifacts/strategy_module_snapshot",
+        },
+        "outputs": {
+            "decisions": "decisions/",
+            "scores": "scores/",
+            "audit": "audits/failure_audit.md",
+            "summary": "summaries/iteration_summary.md",
+        },
+        "status": "created",
+    }
+    handoff = _render_handoff(session=session, iteration_id=iteration_id, sample=sample, iteration_root=iteration_root)
+    evaluator_prompt = _render_evaluator_prompt(
+        session=session,
+        iteration_id=iteration_id,
+        sample=sample,
+        iteration_root=iteration_root,
+        strategy_path=artifact_root / "strategy_module" / "strategy.py",
+        snapshot_dir=snapshot_dir,
+    )
+    (iteration_root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    (iteration_root / "signal_sample.json").write_text(json.dumps(sample, indent=2) + "\n")
+    (iteration_root / "handoff.md").write_text(handoff)
+    (iteration_root / "agent_prompt.md").write_text(evaluator_prompt)
+    result = {
+        "iteration_id": iteration_id,
+        "iteration_root": str(iteration_root),
+        "manifest_path": str(iteration_root / "manifest.json"),
+        "handoff_path": str(iteration_root / "handoff.md"),
+        "signal_sample_path": str(iteration_root / "signal_sample.json"),
+        "agent_prompt_path": str(iteration_root / "agent_prompt.md"),
+        "strategy_snapshot_path": str(snapshot_dir),
+        "sample_method": sample_method,
+        "signal_count": len(selected_signals),
+        "bundle_role": bundle_role,
+    }
+    if bundle_role == "strategy_builder":
+        builder_sample = _build_training_sample(
+            workspace_root=workspace_root,
+            session=session,
+            sample=sample,
+            selected_signals=selected_signals,
+        )
+        builder_prompt = _render_strategy_builder_prompt(
+            session=session,
+            iteration_id=iteration_id,
+            sample=sample,
+            builder_sample=builder_sample,
+            iteration_root=iteration_root,
+            strategy_path=artifact_root / "strategy_module" / "strategy.py",
+            snapshot_dir=snapshot_dir,
+        )
+        (iteration_root / "builder_training_sample.json").write_text(json.dumps(builder_sample, indent=2) + "\n")
+        (iteration_root / "strategy_builder_prompt.md").write_text(builder_prompt)
+        result["builder_prompt_path"] = str(iteration_root / "strategy_builder_prompt.md")
+        result["builder_training_sample_path"] = str(iteration_root / "builder_training_sample.json")
+    return result
+
+
+def list_stage1_iterations(*, workspace_root: Path, session: dict[str, Any]) -> list[dict[str, Any]]:
+    artifact_root = _artifact_root(workspace_root, session)
+    iterations_root = artifact_root / "iterations"
+    if not iterations_root.is_dir():
+        return []
+    return [
+        _summarize_iteration(iteration_root=path)
+        for path in sorted(iterations_root.glob("iter_*"), key=lambda item: item.name)
+        if path.is_dir()
+    ]
+
+
+def repair_stage1_iteration_bundle(*, workspace_root: Path, iteration_root: Path) -> dict[str, Any]:
+    artifact_root = iteration_root.parent.parent
+    session_manifest = _read_json_if_exists(artifact_root / "manifest.json") or {}
+    iteration_manifest = _read_json_if_exists(iteration_root / "manifest.json") or {}
+    session = {
+        "session_id": session_manifest.get("session_id", artifact_root.name),
+        "strategy_id": session_manifest.get("strategy_id", "unknown"),
+        "strategy_version": session_manifest.get("strategy_version", iteration_manifest.get("iteration_id", "unknown").split("_")[-1]),
+        "asset": session_manifest.get("asset", _asset_from_signal_set_key(session_manifest.get("signal_set_key"))),
+        "signal_engine_id": session_manifest.get("signal_engine_id", "unknown"),
+        "signal_set_id": session_manifest.get("signal_set_id", _signal_set_id_from_signal_set_key(session_manifest.get("signal_set_key"))),
+        "signal_set_key": session_manifest.get("signal_set_key"),
+        "artifact_root": str(artifact_root),
+    }
+    sample_path = iteration_root / "signal_sample.json"
+    sample = json.loads(sample_path.read_text())
+    repaired_signals = _repair_sample_signals(
+        workspace_root=workspace_root,
+        session=session,
+        signal_items=sample.get("signals", []),
+    )
+    repaired_sample = {
+        "schema_version": sample.get("schema_version", "0.1"),
+        "sample_method": sample.get("sample_method", iteration_manifest.get("sample_method")),
+        "signal_count": len(repaired_signals),
+        "signals": repaired_signals,
+        "selection_notes": sample.get("selection_notes")
+        or {
+            "ordering": "all signals in the selected Stage 1 window, emitted chronologically",
+            "ground_truth_hidden": True,
+            "future_candles_hidden": True,
+        },
+    }
+    sample_path.write_text(json.dumps(repaired_sample, indent=2) + "\n")
+
+    strategy_path = artifact_root / "strategy_module" / "strategy.py"
+    snapshot_dir = iteration_root / "source_artifacts" / "strategy_module_snapshot"
+    handoff = _render_handoff(
+        session=session,
+        iteration_id=iteration_manifest.get("iteration_id", iteration_root.name),
+        sample=repaired_sample,
+        iteration_root=iteration_root,
+    )
+    prompt = _render_evaluator_prompt(
+        session=session,
+        iteration_id=iteration_manifest.get("iteration_id", iteration_root.name),
+        sample=repaired_sample,
+        iteration_root=iteration_root,
+        strategy_path=strategy_path,
+        snapshot_dir=snapshot_dir,
+    )
+    (iteration_root / "handoff.md").write_text(handoff)
+    (iteration_root / "agent_prompt.md").write_text(prompt)
+
+    builder_sample_path = iteration_root / "builder_training_sample.json"
+    if builder_sample_path.exists():
+        builder_sample = json.loads(builder_sample_path.read_text())
+        repaired_builder_signals = _repair_sample_signals(
+            workspace_root=workspace_root,
+            session=session,
+            signal_items=builder_sample.get("signals", []),
+        )
+        repaired_builder_sample = {
+            **builder_sample,
+            "signal_count": len(repaired_builder_signals),
+            "signals": repaired_builder_signals,
+        }
+        builder_sample_path.write_text(json.dumps(repaired_builder_sample, indent=2) + "\n")
+        builder_prompt = _render_strategy_builder_prompt(
+            session=session,
+            iteration_id=iteration_manifest.get("iteration_id", iteration_root.name),
+            sample=repaired_sample,
+            builder_sample=repaired_builder_sample,
+            iteration_root=iteration_root,
+            strategy_path=strategy_path,
+            snapshot_dir=snapshot_dir,
+        )
+        (iteration_root / "strategy_builder_prompt.md").write_text(builder_prompt)
+
+    return {
+        "iteration_root": str(iteration_root),
+        "signal_count": len(repaired_signals),
+        "builder_signal_count": len(repaired_builder_signals) if builder_sample_path.exists() else None,
+    }
+
+
+def build_stage1_gate_summary(*, workspace_root: Path, session: dict[str, Any]) -> dict[str, Any]:
+    artifact_root = _artifact_root(workspace_root, session)
+    iterations = list_stage1_iterations(workspace_root=workspace_root, session=session)
+    latest_scores = _latest_role_scores(iterations)
+    final_refit = _final_refit_state(iterations)
+    roles = {
+        role: _role_gate_state(role=role, score=latest_scores.get(role))
+        for role in ("recent_regime_train", "forward_validation", "locked_recent_oos")
+    }
+    blockers = [
+        role_state["blocker"]
+        for role_state in roles.values()
+        if role_state.get("blocker")
+    ]
+    ready_to_freeze = not blockers
+    canonical = _canonical_readout_state(artifact_root)
+    status = "canonical_complete" if canonical["exists"] else "ready_to_freeze" if ready_to_freeze else "blocked"
+    if session.get("status") == "stage1a_frozen" and canonical["exists"]:
+        status = "stage1a_frozen"
+    return {
+        "session_id": session["session_id"],
+        "status": status,
+        "ready_to_freeze": ready_to_freeze,
+        "blockers": blockers,
+        "roles": roles,
+        "final_refit": final_refit,
+        "canonical_readout": canonical,
+        "downstream_contract": {
+            "stage2_stage3": "Use the MATCH subset from promotion/stage1a_canonical_full_cycle_scores.json.",
+            "stage4": "Use the full decision set from promotion/stage1a_canonical_full_cycle_decisions.json.",
+        },
+    }
+
+
+def _artifact_root(workspace_root: Path, session: dict[str, Any]) -> Path:
+    artifact_root = Path(session["artifact_root"])
+    return artifact_root if artifact_root.is_absolute() else workspace_root / artifact_root
+
+
+def _next_iteration_id(artifact_root: Path, strategy_version: str) -> str:
+    iterations_root = artifact_root / "iterations"
+    existing = [path.name for path in iterations_root.glob("iter_*") if path.is_dir()]
+    next_number = len(existing) + 1
+    return f"iter_{next_number:03d}_{strategy_version}"
+
+
+def _latest_role_scores(iterations: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    latest: dict[str, dict[str, Any]] = {}
+    for iteration in iterations:
+        for role, score in (iteration.get("scores") or {}).items():
+            latest[role] = {
+                **score,
+                "iteration_id": iteration["iteration_id"],
+                "sample_method": iteration.get("sample_method"),
+            }
+    return latest
+
+
+def _final_refit_state(iterations: list[dict[str, Any]]) -> dict[str, Any]:
+    for iteration in reversed(iterations):
+        if iteration.get("sample_method") == "final_refit_ab":
+            return {
+                "exists": True,
+                "iteration_id": iteration.get("iteration_id"),
+                "iteration_root": iteration.get("iteration_root"),
+                "signal_count": iteration.get("signal_count"),
+                "builder_prompt_path": iteration.get("builder_prompt_path"),
+                "builder_training_sample_path": iteration.get("builder_training_sample_path"),
+            }
+    return {
+        "exists": False,
+        "iteration_id": None,
+        "iteration_root": None,
+        "signal_count": 0,
+        "builder_prompt_path": None,
+        "builder_training_sample_path": None,
+    }
+
+
+def _role_gate_state(*, role: str, score: dict[str, Any] | None) -> dict[str, Any]:
+    label = SAMPLE_ROLE_ARTIFACTS[role]["title"]
+    if score is None:
+        return {
+            "role": role,
+            "label": label,
+            "status": "missing",
+            "blocker": f"{label} has not been scored.",
+            "score": None,
+        }
+    metrics = score.get("metrics", {})
+    passed = bool(metrics.get("passes_threshold"))
+    return {
+        "role": role,
+        "label": label,
+        "status": "pass" if passed else "fail",
+        "blocker": None if passed else f"{label} is below the Stage 1A agreement gate.",
+        "score": score,
+    }
+
+
+def _canonical_readout_state(artifact_root: Path) -> dict[str, Any]:
+    scores_path = artifact_root / "promotion" / "stage1a_canonical_full_cycle_scores.json"
+    decisions_path = artifact_root / "promotion" / "stage1a_canonical_full_cycle_decisions.json"
+    summary_path = artifact_root / "promotion" / "stage1a_canonical_full_cycle_summary.md"
+    frozen_strategy_path = artifact_root / "promotion" / "frozen_stage1a_strategy_module" / "strategy.py"
+    scores = _read_json_if_exists(scores_path)
+    return {
+        "exists": scores is not None and decisions_path.exists() and frozen_strategy_path.exists(),
+        "scores_path": str(scores_path) if scores_path.exists() else None,
+        "decisions_path": str(decisions_path) if decisions_path.exists() else None,
+        "summary_path": str(summary_path) if summary_path.exists() else None,
+        "frozen_strategy_path": str(frozen_strategy_path) if frozen_strategy_path.exists() else None,
+        "metrics": scores.get("metrics", {}) if scores else {},
+        "slice_metrics": scores.get("slice_metrics", {}) if scores else {},
+        "match_count": len(scores.get("match_set", [])) if scores else 0,
+    }
+
+
+def _copy_strategy_snapshot(source_dir: Path, snapshot_dir: Path) -> None:
+    if snapshot_dir.exists():
+        shutil.rmtree(snapshot_dir)
+    shutil.copytree(source_dir, snapshot_dir)
+
+
+def _summarize_iteration(*, iteration_root: Path) -> dict[str, Any]:
+    manifest = _read_json_if_exists(iteration_root / "manifest.json") or {}
+    audit_path = iteration_root / "audits" / "failure_audit.json"
+    audit = _read_json_if_exists(audit_path)
+    role_scores = _role_scores(iteration_root)
+    training_score = role_scores.get("recent_regime_train")
+    return {
+        "iteration_id": manifest.get("iteration_id", iteration_root.name),
+        "iteration_root": str(iteration_root),
+        "sample_method": manifest.get("sample_method"),
+        "signal_count": manifest.get("signal_count", manifest.get("sample_size")),
+        "status": manifest.get("status", "created"),
+        "bundle_role": "strategy_builder" if (iteration_root / "strategy_builder_prompt.md").exists() else "evaluator",
+        "manifest_path": str(iteration_root / "manifest.json"),
+        "signal_sample_path": str(iteration_root / "signal_sample.json"),
+        "agent_prompt_path": str(iteration_root / "agent_prompt.md"),
+        "builder_prompt_path": str(iteration_root / "strategy_builder_prompt.md")
+        if (iteration_root / "strategy_builder_prompt.md").exists()
+        else None,
+        "builder_training_sample_path": str(iteration_root / "builder_training_sample.json")
+        if (iteration_root / "builder_training_sample.json").exists()
+        else None,
+        "scores": role_scores,
+        "has_training_score": training_score is not None,
+        "training_score": training_score,
+        "has_failure_audit": audit is not None,
+        "failure_audit": {
+            "audit_json_path": str(audit_path),
+            "audit_md_path": str(iteration_root / "audits" / "failure_audit.md"),
+            "agent_prompt_path": str(iteration_root / "agent_failure_audit_prompt.md"),
+            "metrics": audit.get("metrics", {}),
+        }
+        if audit is not None
+        else None,
+    }
+
+
+def _role_scores(iteration_root: Path) -> dict[str, dict[str, Any]]:
+    scores = {}
+    for role, artifacts in SAMPLE_ROLE_ARTIFACTS.items():
+        score_path = iteration_root / "scores" / artifacts["scores"]
+        score = _read_json_if_exists(score_path)
+        if score is None:
+            continue
+        scores[role] = {
+            "scores_path": str(score_path),
+            "decisions_path": str(iteration_root / "decisions" / artifacts["decisions"]),
+            "summary_path": str(iteration_root / "summaries" / artifacts["summary"]),
+            "metrics": score.get("metrics", {}),
+        }
+    return scores
+
+
+def _read_json_if_exists(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    payload = json.loads(path.read_text())
+    return payload if isinstance(payload, dict) else None
+
+
+def _all_window_signals(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    selected: dict[str, dict[str, Any]] = {}
+    for signal in sorted(signals, key=lambda item: (_iso_timestamp(item["timestamp"]), item["signal_id"])):
+        timestamp = _iso_timestamp(signal["timestamp"])
+        current = selected.get(timestamp)
+        if current is None or _signal_rank(signal) > _signal_rank(current):
+            selected[timestamp] = signal
+    return list(selected.values())
+
+
+def _packet_path(workspace_root: Path, session: dict[str, Any], signal: dict[str, Any]) -> str:
+    signal_set_key = signal.get("signal_set_key", "")
+    if signal_set_key.count(":") >= 2:
+        _, asset, signal_set_id = signal_set_key.split(":", 2)
+    else:
+        asset = session["asset"]
+        signal_set_id = session["signal_set_id"]
+    packet_name = signal["signal_id"].split(":")[-1]
+    preferred = (
+        workspace_root
+        / "dev"
+        / "signals"
+        / signal.get("signal_engine_id", session["signal_engine_id"])
+        / asset
+        / signal_set_id
+        / "packets"
+        / f"{packet_name}.json"
+    )
+    if preferred.exists():
+        return str(preferred)
+    fallback = _discover_existing_packet_path(
+        workspace_root=workspace_root,
+        signal_engine_id=signal.get("signal_engine_id", session["signal_engine_id"]),
+        asset=asset,
+        packet_name=packet_name,
+    )
+    return str(fallback or preferred)
+
+
+def _packet_payload(signal: dict[str, Any]) -> dict[str, Any]:
+    payload = signal.get("payload")
+    if not isinstance(payload, dict):
+        return {}
+    blocked_keys = {
+        "future_ground_truth",
+        "ground_truth",
+        "natural_direction",
+        "first_move_direction",
+        "first_move_pct",
+    }
+    return {
+        key: value
+        for key, value in payload.items()
+        if key not in blocked_keys
+    }
+
+
+def _render_handoff(
+    *,
+    session: dict[str, Any],
+    iteration_id: str,
+    sample: dict[str, Any],
+    iteration_root: Path,
+) -> str:
+    signal_lines = "\n".join(
+        f"- {item['signal_id']} @ {item['timestamp']}"
+        for item in sample["signals"]
+    )
+    return f"""# Stage 1A Evaluator Handoff
+
+Session: {session['session_id']}
+Iteration: {iteration_id}
+Iteration root: {iteration_root}
+Strategy snapshot: {iteration_root / "source_artifacts" / "strategy_module_snapshot"}
+Stage: stage1a_directional_agreement
+Signal set: {session['signal_set_id']}
+Signal count: {sample['signal_count']}
+
+Process all listed signals sequentially, one at a time, using signal_sample.json as the checklist.
+
+Signal sample entries:
+{signal_lines}
+
+Rules:
+- Use only the embedded `packet` JSON in signal_sample.json and the strategy module snapshot.
+- Treat `packet_path` fields as legacy/debug metadata only; do not depend on global packet folders.
+- Evaluate only the listed signal_sample.json entries.
+- Preserve the listed order exactly.
+- Do not scan any signal folder for additional packets.
+- Do not use future outcomes.
+- Do not use ground truth, future candles, previous scores, proposed fixes, filenames, neighboring signals, scripts, formulas, or batch heuristics.
+- A decision is valid only after the embedded packet JSON has been read in full and evaluated directly against the strategy snapshot.
+
+Output JSON only under {iteration_root / "decisions" / "stage1a_directional_decisions.json"}.
+"""
+
+
+def _build_training_sample(
+    *,
+    workspace_root: Path,
+    session: dict[str, Any],
+    sample: dict[str, Any],
+    selected_signals: list[dict[str, Any]],
+) -> dict[str, Any]:
+    ground_truth_records = _load_ground_truth_records(workspace_root=workspace_root, session=session)
+    builder_signals = []
+    missing_labels = []
+    for item, signal in zip(sample["signals"], selected_signals, strict=True):
+        signal_id = item["signal_id"]
+        ground_truth = _find_ground_truth_record(ground_truth_records, signal_id)
+        if ground_truth is None:
+            missing_labels.append(signal_id)
+            continue
+        builder_signals.append(
+            {
+                **item,
+                "ground_truth": _training_ground_truth_view(ground_truth),
+                "payload_diagnostics": _payload_diagnostics(signal.get("payload", {})),
+            }
+        )
+    if missing_labels:
+        joined = ", ".join(missing_labels[:5])
+        suffix = "..." if len(missing_labels) > 5 else ""
+        raise ValueError(f"Missing Stage 0 training labels for selected signals: {joined}{suffix}")
+    return {
+        "schema_version": "0.1",
+        "session_id": session["session_id"],
+        "iteration_id": sample.get("iteration_id"),
+        "sample_method": sample["sample_method"],
+        "signal_count": len(builder_signals),
+        "ground_truth_visible": True,
+        "allowed_use": "strategy_builder_training_only",
+        "forbidden_use": ["forward_validation", "locked_oos", "evaluator_handoff"],
+        "signals": builder_signals,
+        "notes": {
+            "label_source": "Stage 0 natural direction records inside the training window",
+            "validation_oos_hidden": True,
+        },
+    }
+
+
+def _find_ground_truth_record(records: dict[str, dict[str, Any]], signal_id: str) -> dict[str, Any] | None:
+    for key in _signal_label_keys(signal_id):
+        if key in records:
+            return records[key]
+    return None
+
+
+def _signal_label_keys(signal_id: str) -> list[str]:
+    keys = [signal_id]
+    if ":" in signal_id:
+        keys.append(signal_id.split(":")[-1])
+    return keys
+
+
+def _repair_sample_signals(
+    *,
+    workspace_root: Path,
+    session: dict[str, Any],
+    signal_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    normalized_signals = []
+    signal_set_key = session.get("signal_set_key") or _session_signal_set_key(session)
+    for item in signal_items:
+        normalized_signals.append(
+            {
+                **item,
+                "signal_id": item["signal_id"],
+                "timestamp": item["timestamp"],
+                "payload": item.get("packet", {}),
+                "signal_engine_id": session["signal_engine_id"],
+                "signal_set_key": signal_set_key,
+            }
+        )
+    selected = _all_window_signals(normalized_signals)
+    return [
+        {
+            **{key: value for key, value in signal.items() if key not in {"payload", "signal_engine_id", "signal_set_key"}},
+            "signal_id": signal["signal_id"],
+            "timestamp": _iso_timestamp(signal["timestamp"]),
+            "packet_path": _packet_path(workspace_root, session, signal),
+            "packet": _packet_payload({"payload": signal.get("payload", {})}),
+        }
+        for signal in selected
+    ]
+
+
+def _signal_rank(signal: dict[str, Any]) -> tuple[int, int, str]:
+    signal_id = str(signal.get("signal_id") or "")
+    canonical_signal_id = _canonical_signal_id(signal)
+    return (
+        1 if signal_id == canonical_signal_id else 0,
+        1 if _signal_id_matches_signal_set(signal) else 0,
+        signal_id,
+    )
+
+
+def _canonical_signal_id(signal: dict[str, Any]) -> str:
+    signal_set_key = str(signal.get("signal_set_key") or "")
+    if signal_set_key.count(":") < 2:
+        return str(signal.get("signal_id") or "")
+    signal_engine_id, asset, signal_set_id = signal_set_key.split(":", 2)
+    timestamp = _iso_timestamp(signal["timestamp"]).replace("-", "").replace(":", "")
+    return f"{signal_engine_id}:{asset}:{signal_set_id}:{timestamp}"
+
+
+def _signal_id_matches_signal_set(signal: dict[str, Any]) -> bool:
+    signal_id = str(signal.get("signal_id") or "")
+    signal_set_key = str(signal.get("signal_set_key") or "")
+    if signal_set_key.count(":") < 2:
+        return False
+    _, _, signal_set_id = signal_set_key.split(":", 2)
+    return f":{signal_set_id}:" in signal_id
+
+
+def _discover_existing_packet_path(
+    *,
+    workspace_root: Path,
+    signal_engine_id: str,
+    asset: str,
+    packet_name: str,
+) -> Path | None:
+    packets_root = workspace_root / "dev" / "signals" / signal_engine_id / asset
+    if not packets_root.is_dir():
+        return None
+    matches = sorted(packets_root.glob(f"*/packets/{packet_name}.json"))
+    return matches[0] if matches else None
+
+
+def _session_signal_set_key(session: dict[str, Any]) -> str:
+    return f"{session['signal_engine_id']}:{session['asset']}:{session['signal_set_id']}"
+
+
+def _asset_from_signal_set_key(signal_set_key: Any) -> str:
+    if isinstance(signal_set_key, str) and signal_set_key.count(":") >= 2:
+        return signal_set_key.split(":", 2)[1]
+    return "unknown"
+
+
+def _signal_set_id_from_signal_set_key(signal_set_key: Any) -> str:
+    if isinstance(signal_set_key, str) and signal_set_key.count(":") >= 2:
+        return signal_set_key.split(":", 2)[2]
+    return "unknown"
+
+
+def _load_ground_truth_records(*, workspace_root: Path, session: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    stage0_root_value = session.get("stage0_artifact_root") or session.get("manifest", {}).get("stage0_artifact_root")
+    if not stage0_root_value:
+        raise ValueError("Stage 1 builder bundle requires stage0_artifact_root")
+    stage0_root = Path(stage0_root_value)
+    if not stage0_root.is_absolute():
+        stage0_root = workspace_root / stage0_root
+    ground_truth_root = stage0_root / "scores" / "ground_truth"
+    if not ground_truth_root.is_dir():
+        raise ValueError(f"Stage 0 ground truth directory not found: {ground_truth_root}")
+    records: dict[str, dict[str, Any]] = {}
+    for path in ground_truth_root.glob("*.json"):
+        if path.name == "distribution.json":
+            continue
+        payload = json.loads(path.read_text())
+        payloads = payload if isinstance(payload, list) else [payload]
+        for item in payloads:
+            if not isinstance(item, dict):
+                continue
+            signal_id = str(item.get("signal_id") or path.stem)
+            records[signal_id] = item
+    return records
+
+
+def _training_ground_truth_view(record: dict[str, Any]) -> dict[str, Any]:
+    fields = (
+        "signal_id",
+        "natural_direction",
+        "first_move_pct",
+        "max_travel_pct",
+        "opposite_max_pct",
+        "first_move_hours",
+        "reversed",
+        "status",
+        "significance_threshold_pct",
+    )
+    return {field: record[field] for field in fields if field in record}
+
+
+def _payload_diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        key: payload[key]
+        for key in (
+            "signal_type",
+            "direction_hint",
+            "votes",
+            "vote_count",
+            "timeframe",
+            "features",
+            "diagnostics",
+        )
+        if key in payload
+    }
+
+
+def _render_evaluator_prompt(
+    *,
+    session: dict[str, Any],
+    iteration_id: str,
+    sample: dict[str, Any],
+    iteration_root: Path,
+    strategy_path: Path,
+    snapshot_dir: Path,
+) -> str:
+    return f"""You are the evaluator/backtester for a Stage 1A strategy-development iteration.
+
+Read:
+- {iteration_root / "handoff.md"}
+- {iteration_root / "signal_sample.json"}
+- {snapshot_dir}
+
+Session: {session['session_id']}
+Iteration: {iteration_id}
+Strategy: {session['strategy_id']}@{session['strategy_version']}
+Session strategy file: {strategy_path}
+
+Your task is to evaluate exactly {sample['signal_count']} neutral signal packets and produce JSON decisions.
+Use only the embedded packet JSON in signal_sample.json and the strategy module snapshot. Do not use future outcomes, ground truth, score files, proposed fixes, global signal folders, or any packets not listed in signal_sample.json.
+"""
+
+
+def _render_strategy_builder_prompt(
+    *,
+    session: dict[str, Any],
+    iteration_id: str,
+    sample: dict[str, Any],
+    builder_sample: dict[str, Any],
+    iteration_root: Path,
+    strategy_path: Path,
+    snapshot_dir: Path,
+) -> str:
+    long_count = sum(
+        1 for item in builder_sample["signals"] if item.get("ground_truth", {}).get("natural_direction") == "LONG"
+    )
+    short_count = sum(
+        1 for item in builder_sample["signals"] if item.get("ground_truth", {}).get("natural_direction") == "SHORT"
+    )
+    final_refit = sample.get("sample_method") == "final_refit_ab"
+    sample_scope = "Training + Forward Validation final refit" if final_refit else "Training sample"
+    label_policy = (
+        "- Use training plus forward-validation natural_direction labels in builder_training_sample.json.\n"
+        "- Locked OOS labels and packets remain hidden until this refit is complete.\n"
+        "- After editing, create the locked OOS evaluator bundle for the one-shot promotion gate."
+        if final_refit
+        else "- Use training-only natural_direction labels in builder_training_sample.json."
+    )
+    forbidden_policy = (
+        "- Do not use locked OOS labels, packets, score files, or future candles.\n"
+        "- Do not modify signal packets, Stage 0 evidence, sample files, or evaluator handoff files.\n"
+        "- Do not claim promotion readiness from this final-refit bundle; locked OOS must still pass untouched."
+        if final_refit
+        else "- Do not use validation or locked OOS labels, packets, score files, or future candles.\n"
+        "- Do not modify signal packets, Stage 0 evidence, sample files, or evaluator handoff files.\n"
+        "- Do not claim promotion readiness from this training bundle; validation and locked OOS must be separate checks."
+    )
+    next_step = (
+        f"- After editing {strategy_path}, create the locked OOS evaluator bundle. Do not reopen the same cycle from locked OOS evidence."
+        if final_refit
+        else f"- After editing {strategy_path}, the user should click Score on this iteration, then create the next training or validation bundle as directed by the gate."
+    )
+    return f"""You are the strategy-builder agent for a Stage 1A deterministic strategy-script iteration.
+
+Session: {session['session_id']}
+Iteration: {iteration_id}
+Strategy: {session['strategy_id']}@{session['strategy_version']}
+Stage: Stage 1A directional agreement
+Iteration root: {iteration_root}
+Session strategy file to edit: {strategy_path}
+Read-only strategy snapshot for this iteration: {snapshot_dir}
+
+Read:
+- {iteration_root / "manifest.json"}
+- {iteration_root / "builder_training_sample.json"}
+- {strategy_path}
+- {snapshot_dir}
+
+Task:
+Edit {strategy_path} so the deterministic `decide(...)` function learns packet-evidence patterns that improve agreement with Stage 0 natural direction on the selected builder sample.
+
+{sample_scope}:
+- sample method: {sample['sample_method']}
+- signal count: {builder_sample['signal_count']}
+- label balance: LONG {long_count}, SHORT {short_count}
+
+Required decision contract:
+- Return a deterministic StrategyDecision-compatible object.
+- Stage 1A must choose a direction for scoreable signals.
+- Include confidence, reason_code, and diagnostics that explain packet evidence.
+- Do not add live execution, order routing, exchange calls, randomness, or network access.
+
+Allowed:
+{label_policy}
+- Inspect embedded training packet JSON in builder_training_sample.json/signal_sample.json and the current strategy module.
+- Update only the session strategy file: {strategy_path}
+- Treat {snapshot_dir} as read-only evidence of what this iteration started from.
+
+Forbidden:
+{forbidden_policy}
+
+Important:
+- New Stage 1 bundles automatically snapshot the current session strategy file into their own source_artifacts/strategy_module_snapshot folder.
+{next_step}
+
+After editing, summarize the changed deterministic rules and the training failure patterns they target in {iteration_root / "summaries" / "iteration_summary.md"}.
+"""
+
+
+def _iso_timestamp(value: Any) -> str:
+    if hasattr(value, "isoformat"):
+        return value.isoformat().replace("+00:00", "Z")
+    return str(value)

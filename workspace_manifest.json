@@ -1,0 +1,9 @@
+{
+  "schema_version": "motis_workspace_manifest.v1",
+  "name": "Motis Agentic Quant Terminal",
+  "directories": {
+    "dev": "dev",
+    "live": "live",
+    "artifacts": "artifacts"
+  }
+}

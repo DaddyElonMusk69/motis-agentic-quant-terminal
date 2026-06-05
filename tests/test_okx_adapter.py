@@ -86,6 +86,28 @@ def test_okx_cli_adapter_runs_json_command(tmp_path: Path):
     ]
 
 
+def test_okx_cli_adapter_wraps_market_candle_array_output(tmp_path: Path):
+    cli = tmp_path / "okx"
+    cli.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import json",
+                "print(json.dumps([['1780272000000', '100', '105', '99', '101', '12.5']]))",
+            ]
+        )
+    )
+    cli.chmod(0o755)
+    adapter = OKXAdapter(config={"backend": "okx_cli", "cli_path": str(cli), "mode": "demo"})
+
+    result = adapter.market_candles("BTC-USDT-SWAP", bar="5m", limit=2)
+
+    assert result == {
+        "code": "0",
+        "data": [["1780272000000", "100", "105", "99", "101", "12.5"]],
+    }
+
+
 def test_okx_cli_adapter_raises_on_nonzero_exit(tmp_path: Path):
     cli = tmp_path / "okx"
     cli.write_text(

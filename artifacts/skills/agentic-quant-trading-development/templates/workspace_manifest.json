@@ -1,0 +1,9 @@
+{
+  "workspace_name": "",
+  "schema_version": "0.1",
+  "purpose": "Agentic quant trading development and live execution scaffold",
+  "canonical_skill": "artifacts/skills/agentic-quant-trading-development/SKILL.md",
+  "signal_engine_root": "artifacts/signal_engine",
+  "strategy_skill_root": "artifacts/skills/strategies"
+}
+

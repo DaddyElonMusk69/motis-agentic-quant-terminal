@@ -1,0 +1,18 @@
+{
+  "vegas_ema": {
+    "signal_engine_id": "vegas_ema",
+    "replay_generator_path": "artifacts/signal_engine/scripts/signals/generate_training_session.py",
+    "live_scanner_path": "artifacts/signal_engine/scripts/signals/scan_okx_live_signals.py",
+    "dev_signals_root": "dev/signals/vegas_ema",
+    "live_signals_root": "live/signals/vegas_ema",
+    "signal_family": "vegas_ema"
+  },
+  "bollinger": {
+    "signal_engine_id": "bollinger",
+    "replay_generator_path": "artifacts/signal_engine/scripts/signals/generate_bollinger_training_session.py",
+    "live_scanner_path": "artifacts/signal_engine/scripts/signals/scan_okx_live_bollinger_signals.py",
+    "dev_signals_root": "dev/signals/bollinger",
+    "live_signals_root": "live/signals/bollinger",
+    "signal_family": "bollinger"
+  }
+}

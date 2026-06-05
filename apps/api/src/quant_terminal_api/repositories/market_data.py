@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, update
 from sqlalchemy.sql.dml import Insert
 
 from quant_terminal_api.db.models import data_sources, market_data_refs
@@ -58,3 +58,50 @@ class PostgresMarketDataRepository:
         with self.engine.connect() as connection:
             row = connection.execute(statement).mappings().first()
             return dict(row) if row else None
+
+    def get_raw_candle_ref(self, asset: str, timeframe: str = "5m") -> dict[str, Any] | None:
+        statement = (
+            select(market_data_refs)
+            .where(market_data_refs.c.asset == asset)
+            .where(market_data_refs.c.data_type == "candles")
+            .where(market_data_refs.c.timeframe == timeframe)
+            .where(market_data_refs.c.data_origin == "raw")
+            .order_by(market_data_refs.c.end_ts.desc())
+            .limit(1)
+        )
+        with self.engine.connect() as connection:
+            row = connection.execute(statement).mappings().first()
+            return dict(row) if row else None
+
+    def update_ref(self, registration: dict[str, Any]) -> None:
+        statement = (
+            update(market_data_refs)
+            .where(market_data_refs.c.dataset_id == registration["dataset_id"])
+            .values(
+                start_ts=registration.get("start_ts"),
+                end_ts=registration.get("end_ts"),
+                row_count=registration.get("row_count"),
+                storage_uri=registration.get("storage_uri"),
+                schema_descriptor=registration.get("schema_descriptor", {}),
+                quality_status=registration.get("quality_status", "unknown"),
+                ingestion_version=registration.get("ingestion_version"),
+            )
+        )
+        with self.engine.begin() as connection:
+            connection.execute(statement)
+
+    def list_derived_refs_for_raw(self, registration: dict[str, Any]) -> list[dict[str, Any]]:
+        statement = self.build_derived_refs_for_raw_statement(registration)
+        with self.engine.connect() as connection:
+            return [dict(row._mapping) for row in connection.execute(statement)]
+
+    def build_derived_refs_for_raw_statement(self, registration: dict[str, Any]):
+        return (
+            select(market_data_refs)
+            .where(market_data_refs.c.source_id == registration["source_id"])
+            .where(market_data_refs.c.asset == registration["asset"])
+            .where(market_data_refs.c.instrument == registration["instrument"])
+            .where(market_data_refs.c.data_type == registration["data_type"])
+            .where(market_data_refs.c.data_origin == "derived")
+            .order_by(market_data_refs.c.timeframe)
+        )

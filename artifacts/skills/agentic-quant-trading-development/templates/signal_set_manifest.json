@@ -1,0 +1,15 @@
+{
+  "signal_set_id": "",
+  "schema_version": "0.1",
+  "signal_engine_id": "",
+  "signal_family": "",
+  "asset": "",
+  "signal_engine_version": "",
+  "data_manifest": "",
+  "parameters": {},
+  "packet_count": 0,
+  "start_ts": "",
+  "end_ts": "",
+  "packets_path": "packets/",
+  "packet_filename_format": "YYYYMMDDTHHMMSSZ.json"
+}

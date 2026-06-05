@@ -10,7 +10,14 @@ from quant_terminal_sdk.parquet_store import write_candles
 
 
 class OKXCandleAdapter(Protocol):
-    def market_candles(self, inst_id: str, *, bar: str, limit: int) -> dict[str, Any]:
+    def market_candles(
+        self,
+        inst_id: str,
+        *,
+        bar: str,
+        limit: int,
+        after: str | None = None,
+    ) -> dict[str, Any]:
         ...
 
 
@@ -30,10 +37,16 @@ def normalize_okx_candle(candle: list[Any] | dict[str, Any]) -> dict[str, Any]:
         low = candle.get("l") or candle.get("low")
         close = candle.get("c") or candle.get("close")
         volume = candle.get("vol") or candle.get("volume")
+        vol_ccy = candle.get("volCcy") or candle.get("vol_ccy")
+        vol_ccy_quote = candle.get("volCcyQuote") or candle.get("vol_ccy_quote")
+        confirm = candle.get("confirm")
     else:
         timestamp, open_price, high, low, close, volume = candle[:6]
+        vol_ccy = candle[6] if len(candle) > 6 else None
+        vol_ccy_quote = candle[7] if len(candle) > 7 else None
+        confirm = candle[8] if len(candle) > 8 else None
 
-    return {
+    row = {
         "timestamp": _timestamp_ms_to_iso(str(timestamp)),
         "open": float(open_price),
         "high": float(high),
@@ -41,6 +54,13 @@ def normalize_okx_candle(candle: list[Any] | dict[str, Any]) -> dict[str, Any]:
         "close": float(close),
         "volume": float(volume),
     }
+    if vol_ccy is not None:
+        row["vol_ccy"] = float(vol_ccy)
+    if vol_ccy_quote is not None:
+        row["vol_ccy_quote"] = float(vol_ccy_quote)
+    if confirm is not None:
+        row["confirm"] = int(confirm)
+    return row
 
 
 def ingest_okx_candles(

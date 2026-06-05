@@ -1,0 +1,27 @@
+{
+  "schema_version": "walk_forward_universe.v0.1",
+  "created_at": "",
+  "walk_forward_month": "YYYY-MM",
+  "as_of_date": "YYYY-MM-DD",
+  "signal_engine_ids": [],
+  "train_window": {
+    "start": "",
+    "end": ""
+  },
+  "validation_window": {
+    "start": "",
+    "end": ""
+  },
+  "locked_oos_window": {
+    "start": "",
+    "end": ""
+  },
+  "path_a_threshold_pct": 80.0,
+  "files": {
+    "stage0_branch_decisions": "stage0_branch_decisions.json",
+    "tradable_universe": "tradable_universe.json",
+    "watchlist_universe": "watchlist_universe.json",
+    "monthly_summary": "summaries/monthly_universe.md"
+  },
+  "stage0_manifests": []
+}

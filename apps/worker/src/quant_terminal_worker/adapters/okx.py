@@ -82,7 +82,7 @@ class OKXAdapter:
         action: str,
         args: list[str] | None = None,
         timeout_seconds: int = 30,
-    ) -> dict[str, Any]:
+    ) -> Any:
         command = self.build_command(module, action, args)
         completed = subprocess.run(
             command,
@@ -99,16 +99,29 @@ class OKXAdapter:
         except json.JSONDecodeError as exc:
             raise OKXCLIError("OKX CLI returned non-JSON output") from exc
 
-        if not isinstance(parsed, dict):
-            raise OKXCLIError("OKX CLI returned JSON that was not an object")
         return parsed
 
-    def market_candles(self, inst_id: str, *, bar: str, limit: int) -> dict[str, Any]:
-        return self.run_json_command(
+    def market_candles(
+        self,
+        inst_id: str,
+        *,
+        bar: str,
+        limit: int,
+        after: str | None = None,
+    ) -> dict[str, Any]:
+        args = [inst_id, "--bar", bar, "--limit", str(limit)]
+        if after:
+            args.extend(["--after", after])
+        parsed = self.run_json_command(
             "market",
             "candles",
-            [inst_id, "--bar", bar, "--limit", str(limit)],
+            args,
         )
+        if isinstance(parsed, list):
+            return {"code": "0", "data": parsed}
+        if not isinstance(parsed, dict):
+            raise OKXCLIError("OKX CLI returned unsupported candle JSON")
+        return parsed
 
     def place_swap_order(self, request: SwapOrderRequest) -> dict[str, Any]:
         args = [
@@ -131,7 +144,10 @@ class OKXAdapter:
             args.extend(["--px", request.price])
         if request.reduce_only:
             args.append("--reduceOnly")
-        return self.run_json_command("swap", "place", args)
+        parsed = self.run_json_command("swap", "place", args)
+        if not isinstance(parsed, dict):
+            raise OKXCLIError("OKX CLI returned JSON that was not an object")
+        return parsed
 
     def _cli_path(self) -> str | None:
         configured = self.config.get("cli_path")
