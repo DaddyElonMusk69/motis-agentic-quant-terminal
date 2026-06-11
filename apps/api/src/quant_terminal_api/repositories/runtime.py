@@ -1225,6 +1225,52 @@ class RuntimeRepository:
             last_lifecycle_error={},
         )
 
+    def delete_archived_strategy_route(self, route_id: str) -> dict[str, Any] | None:
+        route = self.get_deployment_route(route_id)
+        if route is None:
+            return None
+        if not route.get("archived"):
+            raise ValueError("deployment route is not archived")
+        bundle_id = route.get("active_bundle_id")
+        if not bundle_id:
+            raise ValueError("archived route has no active bundle")
+        bundle = self.get_execution_bundle(bundle_id)
+        if bundle is None:
+            raise ValueError("execution bundle not found for archived route")
+
+        wake_filter = (wake_runs.c.route_id == route_id) | (wake_runs.c.bundle_id == bundle_id)
+        owner_filter = (owner_states.c.route_id == route_id) | (owner_states.c.bundle_id == bundle_id)
+
+        with self.engine.begin() as connection:
+            other_route_ref = connection.execute(
+                select(func.count())
+                .select_from(deployment_routes)
+                .where(deployment_routes.c.active_bundle_id == bundle_id)
+                .where(deployment_routes.c.route_id != route_id)
+            ).scalar_one()
+            if other_route_ref:
+                raise ValueError("execution bundle is still referenced by another route")
+
+            deleted_wake_count = int(
+                connection.execute(select(func.count()).select_from(wake_runs).where(wake_filter)).scalar_one() or 0
+            )
+            deleted_owner_state_count = int(
+                connection.execute(select(func.count()).select_from(owner_states).where(owner_filter)).scalar_one() or 0
+            )
+            connection.execute(wake_runs.delete().where(wake_filter))
+            connection.execute(owner_states.delete().where(owner_filter))
+            connection.execute(deployment_routes.delete().where(deployment_routes.c.route_id == route_id))
+            connection.execute(execution_bundles.delete().where(execution_bundles.c.bundle_id == bundle_id))
+
+        return {
+            "route_id": route_id,
+            "bundle_id": bundle_id,
+            "bundle_uri": bundle.get("bundle_uri"),
+            "strategy_module_ref": bundle.get("strategy_module_ref"),
+            "deleted_wake_count": deleted_wake_count,
+            "deleted_owner_state_count": deleted_owner_state_count,
+        }
+
     def record_wake_run(self, wake: dict[str, Any]) -> dict[str, Any]:
         values = {
             **wake,
@@ -1470,6 +1516,19 @@ class RuntimeRepository:
                     self._insert_stage0_universe_candidate_ignore_conflict(
                         {
                             **candidate,
+                            "last_error": candidate.get("last_error", {}),
+                        }
+                    )
+                )
+
+    def append_stage0_universe_candidates(self, universe_run_id: str, candidates: list[dict[str, Any]]) -> None:
+        with self.engine.begin() as connection:
+            for candidate in candidates:
+                connection.execute(
+                    self._insert_stage0_universe_candidate_ignore_conflict(
+                        {
+                            **candidate,
+                            "universe_run_id": universe_run_id,
                             "last_error": candidate.get("last_error", {}),
                         }
                     )

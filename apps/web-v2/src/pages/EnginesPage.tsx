@@ -5,6 +5,7 @@ import {
   createSignalSet,
   extendSignalPoolFromLocalCandles,
   fetchJob,
+  fetchJobs,
   fetchMarketDataCatalog,
   fetchSignalEngines,
   fetchSignals,
@@ -185,6 +186,12 @@ export function EnginesPage() {
     queryKey: ["signals", selectedSignalSet?.signal_set_key],
     queryFn: () => fetchSignals(selectedSignalSet!.signal_set_key, 5)
   });
+  const activeScopeKey = engineId && selectedSignalSet?.asset ? `signal_set:${engineId}:${selectedSignalSet.asset.toUpperCase()}` : null;
+  const latestScopeJobsQuery = useQuery({
+    enabled: Boolean(activeScopeKey) && !activeJobId,
+    queryKey: ["runtime-jobs", activeScopeKey],
+    queryFn: () => fetchJobs(activeScopeKey!, 10)
+  });
   const activeJobQuery = useQuery({
     enabled: Boolean(activeJobId),
     queryKey: ["runtime-job", activeJobId],
@@ -208,6 +215,16 @@ export function EnginesPage() {
       void queryClient.invalidateQueries({ queryKey: ["signals", result.signal_set_key] });
     }
   });
+
+  useEffect(() => {
+    if (activeJobId) {
+      return;
+    }
+    const job = latestScopeJobsQuery.data?.jobs.find((item) => ["queued", "running"].includes(item.status));
+    if (job) {
+      setActiveJobId(job.job_id);
+    }
+  }, [activeJobId, latestScopeJobsQuery.data?.jobs]);
 
   useEffect(() => {
     const job = activeJobQuery.data?.job;

@@ -4,11 +4,11 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.pool import StaticPool
 
 import quant_terminal_api.main as api_main
-from quant_terminal_api.db.models import metadata
+from quant_terminal_api.db.models import deployment_routes, execution_bundles, metadata, owner_states, wake_runs
 from quant_terminal_api.main import create_app
 from quant_terminal_api.repositories.runtime import RuntimeRepository
 
@@ -52,6 +52,10 @@ class StubRuntimeRepository:
         ]
 
     def list_signal_sets(self, signal_engine_id=None):
+        if self.signal_sets:
+            if signal_engine_id is None:
+                return list(self.signal_sets)
+            return [signal_set for signal_set in self.signal_sets if signal_set["signal_engine_id"] == signal_engine_id]
         assert signal_engine_id in {"vegas_ema", None}
         return [
             {
@@ -154,6 +158,14 @@ class StubRuntimeRepository:
         self.universe_candidates = candidates
         self.universe_runs[run["universe_run_id"]] = run
         self.universe_candidates_by_run[run["universe_run_id"]] = candidates
+
+    def append_stage0_universe_candidates(self, universe_run_id, candidates):
+        existing = list(self.universe_candidates_by_run.get(universe_run_id, self.universe_candidates))
+        existing_keys = {candidate["signal_set_key"] for candidate in existing}
+        appended = [candidate for candidate in candidates if candidate["signal_set_key"] not in existing_keys]
+        merged = [*existing, *appended]
+        self.universe_candidates = merged
+        self.universe_candidates_by_run[universe_run_id] = merged
 
     def list_stage0_universe_runs(self):
         if self.universe_runs:
@@ -326,9 +338,27 @@ class StubRuntimeRepository:
         return {}
 
     def signal_counts_by_signal_set_window(self, **kwargs):
+        if hasattr(self, "window_signal_counts"):
+            return self.window_signal_counts
+        if self.signal_sets:
+            return {
+                signal_set["signal_set_key"]: int(signal_set.get("packet_count", 0) or 0)
+                for signal_set in self.signal_sets
+            }
         return {"vegas_ema:BTC:2026-BTC-2h-dedupe-vote2": 88}
 
     def split_signal_counts_by_signal_set(self, **kwargs):
+        if hasattr(self, "split_window_signal_counts"):
+            return self.split_window_signal_counts
+        if self.signal_sets:
+            counts = {}
+            for signal_set in self.signal_sets:
+                packet_count = int(signal_set.get("packet_count", 0) or 0)
+                counts[signal_set["signal_set_key"]] = {
+                    "train": packet_count if packet_count > 0 else 0,
+                    "walk_forward": packet_count if packet_count > 0 else 0,
+                }
+            return counts
         return {
             "vegas_ema:BTC:2026-BTC-2h-dedupe-vote2": {
                 "train": 60,
@@ -1042,6 +1072,198 @@ def test_stage0_universe_run_delete_removes_linked_stage1_sessions():
     }
     assert repository.universe_run is None
     assert repository.stage1_sessions == []
+
+
+def test_stage0_universe_run_delete_blocks_when_linked_session_has_execution_bundle():
+    repository = StubRuntimeRepository()
+    repository.universe_run = {
+        "universe_run_id": "universe-march-may-vegas",
+        "window_start": "2026-03-01T00:00:00Z",
+        "window_end": "2026-05-30T23:59:59Z",
+        "forward_hours": 36,
+        "trigger_rate_threshold_pct": 85,
+        "config_hash": "hash",
+        "engine_filter": ["vegas_ema"],
+        "status": "created",
+        "summary": {},
+    }
+    repository.stage1_sessions = [
+        {
+            "session_id": "stage1-aave",
+            "source_universe_run_id": "universe-march-may-vegas",
+            "source_candidate_id": "candidate-aave",
+            "signal_set_key": "vegas_ema:AAVE:2026-AAVE-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "AAVE",
+            "signal_set_id": "2026-AAVE-2h-dedupe-vote2",
+            "strategy_id": "aave-vegas-tunnel-v01",
+            "strategy_version": "v0.1",
+            "train_start": "2026-03-01",
+            "train_end": "2026-04-30",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
+            "artifact_root": "/tmp/stage1",
+            "status": "stage1a_frozen",
+            "manifest": {"session_id": "stage1-aave"},
+        }
+    ]
+    repository.execution_bundles = [
+        {
+            "bundle_id": "bundle-aave",
+            "source_stage1_session_id": "stage1-aave",
+            "status": "promoted",
+        }
+    ]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.delete("/api/v1/research/stage0-universe-runs/universe-march-may-vegas")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Training pool has linked promoted execution bundles"
+    assert repository.universe_run is not None
+    assert repository.stage1_sessions[0]["session_id"] == "stage1-aave"
+
+
+def test_stage0_universe_run_lists_appendable_assets_for_same_engine_with_generated_signals():
+    repository = StubRuntimeRepository()
+    repository.universe_run = {
+        "universe_run_id": "universe-march-may-vegas",
+        "train_start": "2026-03-01",
+        "train_end": "2026-04-30",
+        "walk_forward_start": "2026-05-01",
+        "walk_forward_end": "2026-05-30",
+        "window_start": "2026-03-01T00:00:00Z",
+        "window_end": "2026-05-30T23:59:59Z",
+        "forward_hours": 36,
+        "trigger_rate_threshold_pct": 85,
+        "config_hash": "hash",
+        "engine_filter": ["vegas_ema"],
+        "status": "created",
+        "summary": {},
+    }
+    repository.universe_candidates = [
+        {
+            "candidate_id": "candidate-btc",
+            "universe_run_id": "universe-march-may-vegas",
+            "signal_set_key": "vegas_ema:BTC:2026-BTC-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "BTC",
+            "signal_set_id": "2026-BTC-2h-dedupe-vote2",
+            "packet_count": 329,
+            "trigger_rate_pct": None,
+            "branch_path": "pending",
+            "acceptance_status": "pending_stage0",
+            "duplicate_status": "new",
+            "existing_strategy_id": None,
+            "last_error": {},
+            "metrics": {},
+        }
+    ]
+    repository.signal_sets = [
+        {
+            "signal_set_key": "vegas_ema:ETH:2026-ETH-2h-dedupe-vote2",
+            "signal_set_id": "2026-ETH-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "ETH",
+            "instrument": "ETH-USDT-SWAP",
+            "start_ts": "2026-03-01T00:00:00Z",
+            "end_ts": "2026-06-01T00:00:00Z",
+            "packet_count": 280,
+            "payload_schema": "signal_packet.v2",
+            "source_path": "/legacy/vegas_ema/ETH/2026-ETH-2h-dedupe-vote2",
+            "manifest": {"parameters": {"vote_threshold": 2}},
+        },
+        {
+            "signal_set_key": "vegas_ema:SOL:2026-SOL-2h-dedupe-vote2",
+            "signal_set_id": "2026-SOL-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "SOL",
+            "instrument": "SOL-USDT-SWAP",
+            "start_ts": "2026-03-01T00:00:00Z",
+            "end_ts": "2026-06-01T00:00:00Z",
+            "packet_count": 0,
+            "payload_schema": "signal_packet.v2",
+            "source_path": "/legacy/vegas_ema/SOL/2026-SOL-2h-dedupe-vote2",
+            "manifest": {"parameters": {"vote_threshold": 2}},
+        },
+    ]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.get("/api/v1/research/stage0-universe-runs/universe-march-may-vegas/appendable-assets")
+
+    assert response.status_code == 200
+    assert response.json()["assets"] == ["ETH"]
+
+
+def test_stage0_universe_run_appends_new_tickers_without_rebuilding_existing_candidates():
+    repository = StubRuntimeRepository()
+    repository.universe_run = {
+        "universe_run_id": "universe-march-may-vegas",
+        "train_start": "2026-03-01",
+        "train_end": "2026-04-30",
+        "walk_forward_start": "2026-05-01",
+        "walk_forward_end": "2026-05-30",
+        "window_start": "2026-03-01T00:00:00Z",
+        "window_end": "2026-05-30T23:59:59Z",
+        "forward_hours": 36,
+        "trigger_rate_threshold_pct": 85,
+        "config_hash": "hash",
+        "engine_filter": ["vegas_ema"],
+        "status": "created",
+        "summary": {"total_candidates": 1, "pending_stage0": 1},
+    }
+    repository.universe_candidates = [
+        {
+            "candidate_id": "candidate-btc",
+            "universe_run_id": "universe-march-may-vegas",
+            "signal_set_key": "vegas_ema:BTC:2026-BTC-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "BTC",
+            "signal_set_id": "2026-BTC-2h-dedupe-vote2",
+            "packet_count": 329,
+            "trigger_rate_pct": None,
+            "branch_path": "pending",
+            "acceptance_status": "pending_stage0",
+            "duplicate_status": "new",
+            "existing_strategy_id": None,
+            "last_error": {},
+            "metrics": {},
+        }
+    ]
+    repository.signal_sets = [
+        {
+            "signal_set_key": "vegas_ema:ETH:2026-ETH-2h-dedupe-vote2",
+            "signal_set_id": "2026-ETH-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "ETH",
+            "instrument": "ETH-USDT-SWAP",
+            "start_ts": "2026-03-01T00:00:00Z",
+            "end_ts": "2026-06-01T00:00:00Z",
+            "packet_count": 280,
+            "payload_schema": "signal_packet.v2",
+            "source_path": "/legacy/vegas_ema/ETH/2026-ETH-2h-dedupe-vote2",
+            "manifest": {"parameters": {"vote_threshold": 2}},
+        }
+    ]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post(
+        "/api/v1/research/stage0-universe-runs/universe-march-may-vegas/append-assets",
+        json={"assets": ["ETH"]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["added_candidate_count"] == 1
+    assert {candidate["asset"] for candidate in payload["added_candidates"]} == {"ETH"}
+    assert {candidate["asset"] for candidate in repository.universe_candidates} == {"BTC", "ETH"}
+    assert repository.summary_refreshed is True
 
 
 def test_stage1_session_endpoint_creates_draft_from_accepted_stage0_candidate():
@@ -3851,6 +4073,124 @@ def test_trading_route_archive_hides_route_and_lists_archived_strategy(tmp_path,
     assert archived_response.json()["routes"][0]["route_id"] == route["route_id"]
     assert direct_response.status_code == 200
     assert direct_response.json()["route"]["archived"] is True
+
+
+def test_archived_strategy_delete_removes_route_bundle_history_and_artifacts(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'archive-delete.db'}")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    bundle = repository.create_execution_bundle(_execution_bundle(tmp_path))
+    route = repository.upsert_deployment_route_for_bundle(
+        bundle=bundle,
+        account_mode="live",
+        execution_adapter="okx",
+    )
+    repository.archive_deployment_route(route["route_id"], archived_at="2026-06-06T06:00:00Z")
+    repository.record_wake_run(
+        {
+            "wake_id": "wake-delete-1",
+            "route_id": route["route_id"],
+            "bundle_id": bundle["bundle_id"],
+            "status": "completed",
+            "branch": "entry_scan",
+            "blockers": [],
+            "exchange_snapshot": {},
+            "signal_scan_result": {},
+            "strategy_decision": {},
+            "order_intents": [],
+            "adapter_results": [],
+            "error": {},
+            "completed_at": "2026-06-06T06:05:00Z",
+        }
+    )
+    repository.create_owner_state(
+        {
+            "owner_state_id": "owner-delete-1",
+            "route_id": route["route_id"],
+            "bundle_id": bundle["bundle_id"],
+            "position_instance_id": "pos-delete-1",
+            "asset": "AAVE",
+            "instrument": "AAVE-USDT-SWAP",
+            "account_mode": "live",
+            "owner_strategy_id": "aave-vegas-tunnel-v01",
+            "owner_strategy_version": "v0.1",
+            "opened_from_signal_id": "signal-delete-1",
+            "status": "open",
+            "position_state": {"direction": "LONG", "legs": [{"leg": 1, "status": "submitted"}]},
+        }
+    )
+
+    class FakeAdapter:
+        def readiness_blockers(self):
+            return []
+
+        def snapshot(self, instrument):
+            return {
+                "instrument": instrument,
+                "positions": [],
+                "open_orders": [],
+                "protection_orders": [],
+            }
+
+    monkeypatch.setattr(api_main, "build_exchange_adapter", lambda route: FakeAdapter())
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.delete(f"/api/v1/trading/routes/{route['route_id']}/archived-strategy")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "deleted"
+    assert payload["route_id"] == route["route_id"]
+    assert payload["bundle_id"] == bundle["bundle_id"]
+    assert payload["deleted_wake_count"] == 1
+    assert payload["deleted_owner_state_count"] == 1
+    assert payload["artifact_deleted"] is True
+    assert repository.get_deployment_route(route["route_id"]) is None
+    assert repository.get_execution_bundle(bundle["bundle_id"]) is None
+    assert repository.list_wake_runs(route["route_id"]) == []
+    with repository.engine.connect() as connection:
+        assert connection.execute(
+            select(owner_states.c.owner_state_id).where(owner_states.c.route_id == route["route_id"])
+        ).first() is None
+    assert not Path(bundle["bundle_uri"]).exists()
+
+
+def test_archived_strategy_delete_blocks_when_exchange_exposure_exists(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'archive-delete-blocked.db'}")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    bundle = repository.create_execution_bundle(_execution_bundle(tmp_path))
+    route = repository.upsert_deployment_route_for_bundle(
+        bundle=bundle,
+        account_mode="live",
+        execution_adapter="okx",
+    )
+    repository.archive_deployment_route(route["route_id"], archived_at="2026-06-06T06:00:00Z")
+
+    class FakeAdapter:
+        def readiness_blockers(self):
+            return []
+
+        def snapshot(self, instrument):
+            return {
+                "instrument": instrument,
+                "positions": [{"instId": instrument, "pos": "1"}],
+                "open_orders": [],
+                "protection_orders": [],
+            }
+
+    monkeypatch.setattr(api_main, "build_exchange_adapter", lambda route: FakeAdapter())
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.delete(f"/api/v1/trading/routes/{route['route_id']}/archived-strategy")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Archived strategy still has live exchange exposure"
+    assert repository.get_deployment_route(route["route_id"]) is not None
+    assert repository.get_execution_bundle(bundle["bundle_id"]) is not None
+    assert Path(bundle["bundle_uri"]).exists()
 
 
 def test_trading_route_wakes_endpoint_paginates_history(tmp_path):

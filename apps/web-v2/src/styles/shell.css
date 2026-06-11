@@ -290,6 +290,7 @@
 
 .development-workbench {
   overflow: hidden;
+  position: relative;
 }
 
 .list-header,
@@ -894,9 +895,17 @@
 
 .signal-pool-card__top {
   align-items: center;
-  display: flex;
-  justify-content: space-between;
   gap: var(--space-2);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+}
+
+.signal-pool-card__top strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .workbench-header {
@@ -1304,16 +1313,22 @@
 
 .status-badge {
   align-items: center;
-  border: 1px solid currentColor;
+  background: color-mix(in oklch, currentColor 10%, transparent);
+  border: 1px solid color-mix(in oklch, currentColor 50%, var(--line-subtle));
   border-radius: var(--radius-sm);
   display: inline-flex;
+  flex: 0 0 auto;
   font-size: 11px;
   font-weight: 700;
   justify-content: center;
   line-height: 1;
+  max-width: 100%;
   min-height: 20px;
   min-width: 48px;
+  overflow: hidden;
   padding: 0 var(--space-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status-badge--pass {
@@ -1462,6 +1477,43 @@
   justify-content: space-between;
 }
 
+.progress-step {
+  align-items: center;
+  display: inline-flex;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.progress-step::before {
+  background: var(--status-info);
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--status-info) 14%, transparent);
+  content: "";
+  flex: 0 0 auto;
+  height: 6px;
+  width: 6px;
+}
+
+.progress-step--1::before {
+  background: var(--status-live);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--status-live) 14%, transparent);
+}
+
+.progress-step--2::before {
+  background: var(--status-info);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--status-info) 14%, transparent);
+}
+
+.progress-step--3::before {
+  background: var(--status-warn);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--status-warn) 14%, transparent);
+}
+
+.progress-step--4::before {
+  background: var(--status-pass);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--status-pass) 14%, transparent);
+}
+
 .worker-runtime {
   align-items: center;
   border: 1px solid var(--line-subtle);
@@ -1584,12 +1636,166 @@
   padding-right: 2px;
 }
 
+.development-pool-summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  line-height: 1.35;
+}
+
+.development-pool-summary strong,
+.development-pool-summary span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.development-pool-summary strong {
+  color: var(--ink-primary);
+}
+
 .development-candidate-card {
+  --development-stage-accent: var(--status-idle);
+  gap: var(--space-2);
   min-height: 106px;
+  padding-left: 20px;
+  position: relative;
+}
+
+.development-candidate-card--stage1 {
+  --development-stage-accent: var(--status-info);
+}
+
+.development-candidate-card--stage2 {
+  --development-stage-accent: var(--status-live);
+}
+
+.development-candidate-card--stage3 {
+  --development-stage-accent: var(--status-warn);
+}
+
+.development-candidate-card--stage4 {
+  --development-stage-accent: var(--status-pass);
+}
+
+.development-candidate-card::before {
+  background: var(--development-stage-accent);
+  border-radius: 999px;
+  content: "";
+  height: calc(100% - 20px);
+  left: 7px;
+  opacity: 0.72;
+  position: absolute;
+  top: 10px;
+  width: 3px;
+}
+
+.development-candidate-card .status-badge--pass,
+.development-candidate-card .status-badge--info,
+.development-candidate-card .status-badge--warn {
+  background: color-mix(in oklch, var(--development-stage-accent) 16%, transparent);
+  border-color: color-mix(in oklch, var(--development-stage-accent) 58%, var(--line-subtle));
+  color: var(--development-stage-accent);
+}
+
+.development-candidate-card > span,
+.development-candidate-card > small {
+  display: block;
+  line-height: 1.35;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .development-header {
   flex: 0 0 auto;
+}
+
+.development-stage-tag {
+  --development-stage-accent: var(--status-idle);
+  display: inline-flex;
+  min-width: 0;
+}
+
+.development-stage-tag--stage1 {
+  --development-stage-accent: var(--status-info);
+}
+
+.development-stage-tag--stage2 {
+  --development-stage-accent: var(--status-live);
+}
+
+.development-stage-tag--stage3 {
+  --development-stage-accent: var(--status-warn);
+}
+
+.development-stage-tag--stage4 {
+  --development-stage-accent: var(--status-pass);
+}
+
+.development-stage-tag .status-badge {
+  background: color-mix(in oklch, var(--development-stage-accent) 16%, transparent);
+  border-color: color-mix(in oklch, var(--development-stage-accent) 58%, var(--line-subtle));
+  color: var(--development-stage-accent);
+}
+
+.development-job-overlay {
+  background: color-mix(in oklch, var(--surface-panel) 94%, transparent);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 12px 36px color-mix(in oklch, black 18%, transparent);
+  display: grid;
+  gap: var(--space-2);
+  max-width: min(420px, calc(100% - 24px));
+  padding: var(--space-2);
+  position: absolute;
+  right: var(--space-3);
+  top: 64px;
+  z-index: 8;
+}
+
+.development-job-overlay.is-error {
+  border-color: color-mix(in oklch, var(--status-risk) 52%, var(--line-strong));
+}
+
+.development-job-overlay__status {
+  align-items: center;
+  display: grid;
+  gap: var(--space-2);
+  grid-template-columns: 18px minmax(0, 1fr);
+}
+
+.development-job-overlay__status svg {
+  color: var(--status-live);
+  height: 15px;
+  width: 15px;
+}
+
+.development-job-overlay__status div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.development-job-overlay__status strong,
+.development-job-overlay__status span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.development-job-overlay__status span {
+  color: var(--ink-muted);
+  font-size: 11px;
+}
+
+.development-job-overlay .worker-runtime {
+  background: transparent;
+  border-color: var(--line-subtle);
+  padding: var(--space-2);
 }
 
 .development-summary-strip {
@@ -1633,6 +1839,7 @@
 }
 
 .development-stage-tab {
+  --development-stage-accent: var(--status-idle);
   align-items: center;
   background: transparent;
   border: 1px solid var(--line-subtle);
@@ -1640,10 +1847,62 @@
   color: var(--ink-secondary);
   cursor: pointer;
   display: flex;
+  gap: var(--space-2);
   justify-content: space-between;
   min-height: 38px;
   min-width: 0;
-  padding: 0 var(--space-3);
+  padding: 0 var(--space-2);
+  position: relative;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.development-stage-tab::before {
+  background: var(--development-stage-accent);
+  border-radius: 999px;
+  content: "";
+  height: calc(100% - 12px);
+  left: 6px;
+  opacity: 0.75;
+  position: absolute;
+  top: 6px;
+  width: 3px;
+}
+
+.development-stage-tab strong {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  padding-left: var(--space-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.development-stage-tab .status-badge {
+  max-width: 112px;
+  min-width: 0;
+}
+
+.development-stage-tab--stage1 {
+  --development-stage-accent: var(--status-info);
+}
+
+.development-stage-tab--stage2 {
+  --development-stage-accent: var(--status-live);
+}
+
+.development-stage-tab--stage3 {
+  --development-stage-accent: var(--status-warn);
+}
+
+.development-stage-tab--stage4 {
+  --development-stage-accent: var(--status-pass);
+}
+
+.development-stage-tab .status-badge--pass,
+.development-stage-tab .status-badge--info {
+  background: color-mix(in oklch, var(--development-stage-accent) 16%, transparent);
+  border-color: color-mix(in oklch, var(--development-stage-accent) 58%, var(--line-subtle));
+  color: var(--development-stage-accent);
 }
 
 .development-stage-tab.is-active {

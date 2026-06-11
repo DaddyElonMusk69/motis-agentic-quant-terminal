@@ -11,7 +11,11 @@ def decide(context: dict[str, Any]) -> dict[str, Any]:
     signal = context.get("signal") if isinstance(context.get("signal"), dict) else {}
     payload = signal.get("payload") if isinstance(signal.get("payload"), dict) else {}
     evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+    if not evidence and isinstance(signal.get("evidence"), dict):
+        evidence = signal.get("evidence")
     charts = payload.get("charts") if isinstance(payload.get("charts"), dict) else {}
+    if not charts and isinstance(signal.get("charts"), dict):
+        charts = signal.get("charts")
     signal_id = str(signal.get("signal_id", "unknown"))
 
     five_minute = charts.get("5m")

@@ -4,6 +4,7 @@ import { Database, RefreshCw, Search, UploadCloud } from "lucide-react";
 import {
   fetchDatasetCandles,
   fetchJob,
+  fetchJobs,
   fetchMarketDataCatalog,
   isJobResponse,
   refreshMarketDataEma,
@@ -221,6 +222,14 @@ export function DataPage() {
       return !job || ["queued", "running"].includes(job.status) ? 1500 : false;
     }
   });
+  const activeScopeKey = refreshTarget
+    ? (refreshTarget.kind === "ema" ? `asset:${refreshTarget.asset}:ema` : `dataset:${refreshTarget.datasetId}`)
+    : null;
+  const latestScopeJobsQuery = useQuery({
+    enabled: Boolean(activeScopeKey) && !activeRefreshJobId,
+    queryKey: ["runtime-jobs", activeScopeKey],
+    queryFn: () => fetchJobs(activeScopeKey!, 10)
+  });
 
   const refreshMutation = useMutation({
     mutationFn: (request: RefreshRequest) => request.kind === "ema" ? refreshMarketDataEma(request.asset) : refreshMarketDataDataset(request.datasetId),
@@ -242,6 +251,16 @@ export function DataPage() {
   const refreshJob = refreshJobQuery.data?.job ?? null;
   const refreshJobRunning = Boolean(refreshJob && ["queued", "running"].includes(refreshJob.status));
   const isRefreshingType = (refreshMutation.isPending && refreshRequestKey(refreshMutation.variables) === refreshTargetKey) || refreshJobRunning;
+
+  useEffect(() => {
+    if (activeRefreshJobId) {
+      return;
+    }
+    const job = latestScopeJobsQuery.data?.jobs.find((item) => ["queued", "running"].includes(item.status));
+    if (job) {
+      setActiveRefreshJobId(job.job_id);
+    }
+  }, [activeRefreshJobId, latestScopeJobsQuery.data?.jobs]);
 
   useEffect(() => {
     if (!refreshJob || ["queued", "running"].includes(refreshJob.status)) {

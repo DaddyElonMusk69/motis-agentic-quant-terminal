@@ -8,6 +8,7 @@ import {
   deleteStage1ResearchSession,
   fetchDevelopmentQueue,
   fetchJob,
+  fetchJobs,
   fetchStage0UniverseRuns,
   fetchStage1AgentPrompt,
   fetchStage1Gate,
@@ -41,7 +42,8 @@ import {
   type Stage2CaptureRate,
   type Stage2PolicyValues,
   type Stage4CandidateResult,
-  type Stage3GridSetup
+  type Stage3GridSetup,
+  type RuntimeJob
 } from "../app/api";
 import { formatNumber } from "../app/format";
 import { queryClient } from "../app/queryClient";
@@ -108,6 +110,39 @@ type DisplayExecutionSetup = {
   };
   side_policies?: Record<ExitSide, DisplaySidePolicy>;
 };
+
+function restoreDevelopmentJob(job: RuntimeJob): ActiveDevelopmentJob | null {
+  const payload = job.payload ?? {};
+  const sessionId = typeof payload.session_id === "string" ? payload.session_id : undefined;
+  if (job.job_type === "stage1_score") {
+    return { action: "score", jobId: job.job_id, label: "Scoring iteration", sessionId };
+  }
+  if (job.job_type === "stage1_canonical") {
+    return { action: "canonical", jobId: job.job_id, label: "Freezing Stage 1", sessionId };
+  }
+  if (job.job_type === "stage2_capture_curve") {
+    return { action: "stage2", jobId: job.job_id, label: "Running Stage 2 capture", sessionId };
+  }
+  if (job.job_type === "stage3_policy_step") {
+    const step = typeof payload.step === "string" ? payload.step : "";
+    if (step === "fixed_sl") {
+      return { action: "stage3_fixed", jobId: job.job_id, label: "Testing fixed SL", sessionId };
+    }
+    if (step === "exact_protection") {
+      return { action: "stage3_exact", jobId: job.job_id, label: "Testing protection", sessionId };
+    }
+    if (step === "local_variants" || step === "grid_search") {
+      return { action: "stage3_local", jobId: job.job_id, label: "Testing local variants", sessionId };
+    }
+  }
+  if (job.job_type === "stage3_pyramid") {
+    return { action: "stage3_pyramid", jobId: job.job_id, label: "Testing pyramiding", sessionId };
+  }
+  if (job.job_type === "stage4_realized_expectancy") {
+    return { action: "stage4", jobId: job.job_id, label: "Running Stage 4 backtest", sessionId };
+  }
+  return null;
+}
 
 const stage1Roles: Stage1SampleRole[] = ["training", "walk_forward_test"];
 
@@ -215,6 +250,26 @@ function normalizeResearchStage(value: string | null | undefined): ResearchStage
     return "stage4";
   }
   return "stage1";
+}
+
+function developmentVisualStage(row: DevelopmentQueueRow | undefined): ResearchStageId {
+  if (!row) {
+    return "stage1";
+  }
+  if (row.development_status === "stage4_complete") {
+    return "stage4";
+  }
+  if (["stage3_grid_complete", "stage3_complete"].includes(row.development_status)) {
+    return "stage3";
+  }
+  if (["stage1_frozen", "stage2_complete", "stage2_policy_promoted"].includes(row.development_status)) {
+    return "stage2";
+  }
+  return normalizeResearchStage(row.current_stage);
+}
+
+function developmentStageClass(prefix: string, stage: ResearchStageId): string {
+  return `${prefix}--${stage}`;
 }
 
 function stage1RoleForIteration(iteration: Pick<Stage1IterationSummary, "sample_method">): Stage1SampleRole {
@@ -531,6 +586,12 @@ export function ResearchDevelopmentPage() {
       return !job || ["queued", "running"].includes(job.status) ? 1500 : false;
     }
   });
+  const activeScopeKey = session?.session_id ? `stage1_session:${session.session_id}` : null;
+  const latestScopeJobsQuery = useQuery({
+    enabled: Boolean(activeScopeKey) && !activeJob?.jobId,
+    queryKey: ["runtime-jobs", activeScopeKey],
+    queryFn: () => fetchJobs(activeScopeKey!, 10)
+  });
 
   const gate = gateQuery.data?.gate ?? row?.stage1_gate ?? null;
   const iterations = iterationsQuery.data?.iterations ?? [];
@@ -669,6 +730,20 @@ export function ResearchDevelopmentPage() {
     mutationFn: promoteExecutionBundle,
     onSuccess: (_result, sessionId) => invalidateDevelopment(sessionId, pool?.universe_run_id)
   });
+
+  useEffect(() => {
+    if (activeJob?.jobId) {
+      return;
+    }
+    const job = latestScopeJobsQuery.data?.jobs.find((item) => ["queued", "running"].includes(item.status));
+    if (!job) {
+      return;
+    }
+    const restored = restoreDevelopmentJob(job);
+    if (restored) {
+      setActiveJob(restored);
+    }
+  }, [activeJob?.jobId, latestScopeJobsQuery.data?.jobs]);
 
   useEffect(() => {
     if (!searchParams.get("pool") && pool?.universe_run_id) {
@@ -926,29 +1001,36 @@ export function ResearchDevelopmentPage() {
                 ))}
               </select>
             </label>
-            <div className="state-line">
+            <div className="state-line development-pool-summary">
               <strong>{pool ? shortPoolId(pool.universe_run_id) : "No pool"}</strong>
               <span>{splitWindowLine(pool)}</span>
             </div>
             {queueQuery.isLoading || sessionsQuery.isLoading ? <div className="state-line">Loading development queue...</div> : null}
             {acceptedRows.length === 0 && !queueQuery.isLoading ? <div className="state-line">No accepted candidates in this training pool.</div> : null}
             <div className="development-candidate-list">
-              {acceptedRows.map((candidate) => (
-                <button
-                  className={candidate.candidate_id === row?.candidate_id ? "development-candidate-card is-selected" : "development-candidate-card"}
-                  key={candidate.candidate_id}
-                  onClick={() => updateDevelopmentUrl({ pool: candidate.universe_run_id, candidate: candidate.candidate_id, stage: normalizeResearchStage(candidate.current_stage) })}
-                  type="button"
-                >
-                  <div className="signal-pool-card__top">
-                    <strong>{candidate.asset}</strong>
-                    <StatusBadge tone={stageTone(candidate)}>{developmentLabel(candidate)}</StatusBadge>
-                  </div>
-                  <span>{candidate.signal_engine_id} · {candidate.strategy_id ?? "base strategy"}</span>
-                  <small>Trigger {candidate.trigger_rate_pct === null ? "n/a" : `${candidate.trigger_rate_pct}%`} · {formatNumber(candidate.stage0_evaluated_signal_count ?? candidate.packet_count)} signals</small>
-                  <small>{candidate.next_action.label}</small>
-                </button>
-              ))}
+              {acceptedRows.map((candidate) => {
+                const candidateStage = developmentVisualStage(candidate);
+                return (
+                  <button
+                    className={[
+                      "development-candidate-card",
+                      developmentStageClass("development-candidate-card", candidateStage),
+                      candidate.candidate_id === row?.candidate_id ? "is-selected" : ""
+                    ].filter(Boolean).join(" ")}
+                    key={candidate.candidate_id}
+                    onClick={() => updateDevelopmentUrl({ pool: candidate.universe_run_id, candidate: candidate.candidate_id, stage: candidateStage })}
+                    type="button"
+                  >
+                    <div className="signal-pool-card__top">
+                      <strong>{candidate.asset}</strong>
+                      <StatusBadge tone={stageTone(candidate)}>{developmentLabel(candidate)}</StatusBadge>
+                    </div>
+                    <span>{candidate.signal_engine_id} · {candidate.strategy_id ?? "base strategy"}</span>
+                    <small>Trigger {candidate.trigger_rate_pct === null ? "n/a" : `${candidate.trigger_rate_pct}%`} · {formatNumber(candidate.stage0_evaluated_signal_count ?? candidate.packet_count)} signals</small>
+                    <small>{candidate.next_action.label}</small>
+                  </button>
+                );
+              })}
             </div>
           </>
         }
@@ -976,7 +1058,11 @@ export function ResearchDevelopmentPage() {
                     {deleteSessionMutation.isPending ? "Resetting" : "Reset Session"}
                   </button>
                 ) : null}
-                {row ? <StatusBadge tone={stageTone(row)}>{developmentLabel(row)}</StatusBadge> : null}
+                {row ? (
+                  <span className={["development-stage-tag", developmentStageClass("development-stage-tag", developmentVisualStage(row))].join(" ")}>
+                    <StatusBadge tone={stageTone(row)}>{developmentLabel(row)}</StatusBadge>
+                  </span>
+                ) : null}
                 <button
                   className="button button--primary"
                   disabled={activeStage === "stage1" ? stage1PrimaryAction.disabled || sessionJobRunning : (!row || Boolean(row.next_action.disabled) || createSessionMutation.isPending || createIterationMutation.isPending || sessionJobRunning)}
@@ -991,13 +1077,16 @@ export function ResearchDevelopmentPage() {
 
             {visibleErrors.map((error) => <div className="state-line state-line--error" key={error.message}>{error.message}</div>)}
             {activeJob && trackedJob ? (
-              <>
-                <div className={trackedJob.status === "failed" ? "state-line state-line--error" : "state-line"}>
+              <div className={trackedJob.status === "failed" ? "development-job-overlay is-error" : "development-job-overlay"}>
+                <div className="development-job-overlay__status">
                   <RefreshCw aria-hidden="true" className={trackedJobRunning ? "spin-icon" : undefined} />
-                  <span>{activeJob.label}: {trackedJob.current_step ?? trackedJob.status}</span>
+                  <div>
+                    <strong>{activeJob.label}</strong>
+                    <span>{trackedJob.current_step ?? trackedJob.status}</span>
+                  </div>
                 </div>
                 <WorkerRuntimeNotice active={trackedJobRunning} job={trackedJob} />
-              </>
+              </div>
             ) : null}
 
             <div className="development-summary-strip">
@@ -1269,7 +1358,17 @@ function StageTabs({
   return (
     <div className="development-stage-tabs" role="tablist" aria-label="Development stages">
       {stages.map((stage) => (
-        <button className={activeStage === stage.id ? "development-stage-tab is-active" : "development-stage-tab"} key={stage.id} onClick={() => onStageChange(stage.id)} type="button">
+        <button
+          className={[
+            "development-stage-tab",
+            developmentStageClass("development-stage-tab", stage.id),
+            `development-stage-tab--${stage.tone}`,
+            activeStage === stage.id ? "is-active" : ""
+          ].filter(Boolean).join(" ")}
+          key={stage.id}
+          onClick={() => onStageChange(stage.id)}
+          type="button"
+        >
           <strong>{stage.label}</strong>
           <StatusBadge tone={stage.tone}>{stage.state}</StatusBadge>
         </button>
@@ -1502,7 +1601,7 @@ function StageRunProgress({ detail, steps, title }: { detail: string; steps: str
         <span />
       </div>
       <div className="progress-steps">
-        {steps.map((step) => <span key={step}>{step}</span>)}
+        {steps.map((step, index) => <span className={`progress-step progress-step--${index + 1}`} key={step}>{step}</span>)}
       </div>
     </div>
   );

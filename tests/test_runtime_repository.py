@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import create_engine, insert, select, update
 
-from quant_terminal_api.db.models import decisions, metadata, signal_sets, signals, stage1_research_sessions
+from quant_terminal_api.db.models import decisions, deployment_routes, execution_bundles, metadata, owner_states, signal_sets, signals, stage1_research_sessions, wake_runs
 from quant_terminal_api.repositories.runtime import RuntimeRepository
 
 
@@ -1423,6 +1423,90 @@ def test_runtime_repository_archives_deployment_routes_out_of_active_list():
     assert archived["scheduler_status"] == "stopped"
     assert archived["auto_submit_enabled"] is False
     assert archived["next_wake_at"] is None
+
+
+def test_runtime_repository_deletes_archived_strategy_route_and_bundle_history():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    bundle = {
+        "bundle_id": "aave-vegas-bundle-delete",
+        "asset": "AAVE",
+        "instrument": "AAVE-USDT-SWAP",
+        "signal_engine_id": "vegas_ema",
+        "signal_engine_version": "0.1",
+        "strategy_id": "aave-vegas",
+        "strategy_version": "v0.1",
+        "source_stage1_session_id": "stage1-aave-vegas",
+        "source_stage4_result_path": "stage4-vegas.json",
+        "bundle_uri": "artifacts/execution_bundles/aave-vegas-delete",
+        "strategy_module_ref": "artifacts/execution_bundles/aave-vegas-delete/strategy.py",
+        "execution_setup": {},
+        "risk_limits": {"max_notional_usd": 1000},
+        "evidence_refs": {},
+        "content_hash": "vegas-delete",
+        "status": "promoted",
+    }
+    stored_bundle = repository.create_execution_bundle(bundle)
+    route = repository.upsert_deployment_route_for_bundle(
+        bundle=stored_bundle,
+        account_mode="live",
+        execution_adapter="okx",
+    )
+    repository.archive_deployment_route(route["route_id"], archived_at="2026-06-06T06:00:00Z")
+    repository.record_wake_run(
+        {
+            "wake_id": "wake-delete-1",
+            "route_id": route["route_id"],
+            "bundle_id": stored_bundle["bundle_id"],
+            "status": "completed",
+            "branch": "entry_scan",
+            "blockers": [],
+            "exchange_snapshot": {},
+            "signal_scan_result": {},
+            "strategy_decision": {},
+            "order_intents": [],
+            "adapter_results": [],
+            "error": {},
+            "completed_at": "2026-06-06T06:05:00Z",
+        }
+    )
+    repository.create_owner_state(
+        {
+            "owner_state_id": "owner-delete-1",
+            "route_id": route["route_id"],
+            "bundle_id": stored_bundle["bundle_id"],
+            "position_instance_id": "pos-delete-1",
+            "asset": "AAVE",
+            "instrument": "AAVE-USDT-SWAP",
+            "account_mode": "live",
+            "owner_strategy_id": "aave-vegas",
+            "owner_strategy_version": "v0.1",
+            "opened_from_signal_id": "signal-1",
+            "status": "open",
+            "position_state": {"direction": "LONG", "legs": [{"leg": 1, "status": "submitted"}]},
+        }
+    )
+
+    summary = repository.delete_archived_strategy_route(route["route_id"])
+
+    assert summary["route_id"] == route["route_id"]
+    assert summary["bundle_id"] == stored_bundle["bundle_id"]
+    assert summary["deleted_wake_count"] == 1
+    assert summary["deleted_owner_state_count"] == 1
+    with repository.engine.connect() as connection:
+        assert connection.execute(
+            select(deployment_routes.c.route_id).where(deployment_routes.c.route_id == route["route_id"])
+        ).first() is None
+        assert connection.execute(
+            select(execution_bundles.c.bundle_id).where(execution_bundles.c.bundle_id == stored_bundle["bundle_id"])
+        ).first() is None
+        assert connection.execute(
+            select(wake_runs.c.wake_id).where(wake_runs.c.route_id == route["route_id"])
+        ).first() is None
+        assert connection.execute(
+            select(owner_states.c.owner_state_id).where(owner_states.c.route_id == route["route_id"])
+        ).first() is None
 
 
 def test_runtime_repository_paginates_wake_runs_and_counts_total():

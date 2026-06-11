@@ -2,13 +2,16 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Play, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import {
+  appendStage0UniverseAssets,
   createStage0UniverseRun,
   deleteStage0UniverseRun,
   executeStage0CandidateBatch,
   fetchDevelopmentQueue,
   fetchJob,
+  fetchJobs,
   fetchSignalEngines,
   fetchSignalSets,
+  fetchStage0UniverseAppendableAssets,
   fetchStage0UniverseCandidates,
   fetchStage0UniverseRuns,
   isJobResponse,
@@ -160,6 +163,8 @@ export function ResearchStage0Page() {
   const [triggerRateThresholdPct, setTriggerRateThresholdPct] = useState(85);
   const [autoRunPoolId, setAutoRunPoolId] = useState<string | null>(null);
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [appendModalOpen, setAppendModalOpen] = useState(false);
+  const [appendSelectedTickers, setAppendSelectedTickers] = useState<string[]>([]);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
 
   const enginesQuery = useQuery({ queryKey: ["signal-engines"], queryFn: fetchSignalEngines });
@@ -177,6 +182,11 @@ export function ResearchStage0Page() {
     queryKey: ["stage0-universe-candidates", selectedRun?.universe_run_id],
     queryFn: () => fetchStage0UniverseCandidates(selectedRun!.universe_run_id)
   });
+  const appendableAssetsQuery = useQuery({
+    enabled: appendModalOpen && Boolean(selectedRun?.universe_run_id),
+    queryKey: ["stage0-universe-appendable-assets", selectedRun?.universe_run_id],
+    queryFn: () => fetchStage0UniverseAppendableAssets(selectedRun!.universe_run_id)
+  });
   const activeJobQuery = useQuery({
     enabled: Boolean(activeJobId),
     queryKey: ["runtime-job", activeJobId],
@@ -185,6 +195,12 @@ export function ResearchStage0Page() {
       const job = query.state.data?.job;
       return !job || ["queued", "running"].includes(job.status) ? 1500 : false;
     }
+  });
+  const activeScopeKey = selectedRun?.universe_run_id ? `stage0:${selectedRun.universe_run_id}` : null;
+  const latestScopeJobsQuery = useQuery({
+    enabled: Boolean(activeScopeKey) && !activeJobId,
+    queryKey: ["runtime-jobs", activeScopeKey],
+    queryFn: () => fetchJobs(activeScopeKey!, 10)
   });
 
   const queueRows = queueQuery.data?.queue ?? [];
@@ -231,11 +247,33 @@ export function ResearchStage0Page() {
     }
   });
 
+  const appendAssetsMutation = useMutation({
+    mutationFn: appendStage0UniverseAssets,
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: ["stage0-universe-runs"] });
+      void queryClient.invalidateQueries({ queryKey: ["development-queue", result.run.universe_run_id] });
+      void queryClient.invalidateQueries({ queryKey: ["stage0-universe-candidates", result.run.universe_run_id] });
+      void queryClient.invalidateQueries({ queryKey: ["stage0-universe-appendable-assets", result.run.universe_run_id] });
+      setAppendSelectedTickers([]);
+      setAppendModalOpen(false);
+    }
+  });
+
   useEffect(() => {
     if (!selectedEngineId && enginesQuery.data?.engines[0]?.signal_engine_id) {
       setSelectedEngineId(enginesQuery.data.engines[0].signal_engine_id);
     }
   }, [enginesQuery.data?.engines, selectedEngineId]);
+
+  useEffect(() => {
+    if (activeJobId) {
+      return;
+    }
+    const job = latestScopeJobsQuery.data?.jobs.find((item) => ["queued", "running"].includes(item.status));
+    if (job) {
+      setActiveJobId(job.job_id);
+    }
+  }, [activeJobId, latestScopeJobsQuery.data?.jobs]);
 
   useEffect(() => {
     const job = activeJobQuery.data?.job;
@@ -250,6 +288,10 @@ export function ResearchStage0Page() {
     const timeout = window.setTimeout(() => setActiveJobId(null), job.status === "completed" ? 2500 : 5000);
     return () => window.clearTimeout(timeout);
   }, [activeJobQuery.data?.job?.status, selectedRun?.universe_run_id]);
+
+  useEffect(() => {
+    setAppendSelectedTickers([]);
+  }, [appendModalOpen, selectedRun?.universe_run_id]);
 
   useEffect(() => {
     if (
@@ -278,6 +320,17 @@ export function ResearchStage0Page() {
   const activeJob = activeJobQuery.data?.job ?? null;
   const activeJobRunning = Boolean(activeJob && ["queued", "running"].includes(activeJob.status));
   const isScoring = executePoolMutation.isPending || activeJobRunning;
+  const appendableAssets = appendableAssetsQuery.data?.assets ?? [];
+  const appendSelectedSet = useMemo(() => new Set(appendSelectedTickers), [appendSelectedTickers]);
+  const allAppendableSelected = appendableAssets.length > 0 && appendableAssets.every((asset) => appendSelectedSet.has(asset));
+
+  const toggleAppendTicker = (asset: string) => {
+    setAppendSelectedTickers((current) => current.includes(asset) ? current.filter((item) => item !== asset) : [...current, asset]);
+  };
+
+  const toggleAllAppendableTickers = () => {
+    setAppendSelectedTickers(allAppendableSelected ? [] : appendableAssets);
+  };
 
   return (
     <div className="page page--workspace">
@@ -343,6 +396,15 @@ export function ResearchStage0Page() {
               </div>
               <div className="header-actions">
                 <StatusBadge tone={progress.pending > 0 ? "warn" : "pass"}>{progress.pending > 0 ? "Pending" : "Complete"}</StatusBadge>
+                <button
+                  className="button button--secondary"
+                  disabled={!selectedRun}
+                  onClick={() => setAppendModalOpen(true)}
+                  type="button"
+                >
+                  <Plus aria-hidden="true" />
+                  Add Tickers
+                </button>
                 <button
                   className="button button--secondary"
                   disabled={!selectedRun || progress.pending <= 0 || isScoring}
@@ -569,6 +631,74 @@ export function ResearchStage0Page() {
                 </button>
               </div>
             </footer>
+          </section>
+        </div>
+      ) : null}
+      {appendModalOpen && selectedRun ? (
+        <div className="terminal-modal-backdrop">
+          <section className="terminal-modal add-ticker-modal" role="dialog" aria-modal="true" aria-labelledby="append-training-pool-title">
+            <header className="terminal-modal__header">
+              <div>
+                <span className="eyebrow">{poolDisplayName(selectedRun)}</span>
+                <h2 id="append-training-pool-title">Add Tickers</h2>
+              </div>
+              <button className="icon-button" onClick={() => setAppendModalOpen(false)} type="button" aria-label="Close add tickers dialog">
+                <X aria-hidden="true" />
+              </button>
+            </header>
+            <div className="add-ticker-toolbar">
+              <div>
+                <strong>{appendSelectedTickers.length} selected</strong>
+                <span>{appendableAssets.length} tickers already aligned to this engine and signal window</span>
+              </div>
+              <div className="header-actions">
+                <button
+                  className="button button--secondary"
+                  disabled={appendableAssets.length === 0 || appendAssetsMutation.isPending}
+                  onClick={toggleAllAppendableTickers}
+                  type="button"
+                >
+                  {allAppendableSelected ? "Clear" : "Select All Ready"}
+                </button>
+                <button
+                  className="button button--primary"
+                  disabled={appendSelectedTickers.length === 0 || appendAssetsMutation.isPending}
+                  onClick={() => appendAssetsMutation.mutate({
+                    universe_run_id: selectedRun.universe_run_id,
+                    assets: appendSelectedTickers
+                  })}
+                  type="button"
+                >
+                  {appendAssetsMutation.isPending ? "Appending" : `Append ${appendSelectedTickers.length || ""}`.trim()}
+                </button>
+              </div>
+            </div>
+            <div className="add-ticker-list">
+              {appendableAssetsQuery.isLoading ? <div className="state-line">Loading eligible tickers...</div> : null}
+              {appendableAssetsQuery.error ? <div className="state-line state-line--error">{appendableAssetsQuery.error.message}</div> : null}
+              {appendableAssets.map((asset) => {
+                const selected = appendSelectedSet.has(asset);
+                return (
+                  <button
+                    className={["ticker-option", selected ? "is-selected" : ""].filter(Boolean).join(" ")}
+                    disabled={appendAssetsMutation.isPending}
+                    key={asset}
+                    onClick={() => toggleAppendTicker(asset)}
+                    type="button"
+                  >
+                    <div>
+                      <strong>{asset}</strong>
+                      <span>Generated signal set aligned to this pool</span>
+                    </div>
+                    <StatusBadge tone="pass">{selected ? "Selected" : "Ready"}</StatusBadge>
+                  </button>
+                );
+              })}
+              {!appendableAssetsQuery.isLoading && !appendableAssetsQuery.error && appendableAssets.length === 0 ? (
+                <div className="state-line">No additional aligned tickers are available for this pool.</div>
+              ) : null}
+              {appendAssetsMutation.error ? <div className="state-line state-line--error">{appendAssetsMutation.error.message}</div> : null}
+            </div>
           </section>
         </div>
       ) : null}

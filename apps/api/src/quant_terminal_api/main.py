@@ -202,6 +202,10 @@ class Stage0UniverseRunRequest(BaseModel):
     assets: list[str] = Field(default_factory=list)
 
 
+class Stage0UniverseAppendAssetsRequest(BaseModel):
+    assets: list[str] = Field(default_factory=list)
+
+
 class ExecuteStage0CandidateRequest(BaseModel):
     candidate_id: str
 
@@ -1277,6 +1281,48 @@ def create_app(
             raise HTTPException(status_code=404, detail="deployment route not found")
         return {"route": _relative_nested_paths(Path.cwd(), route)}
 
+    @app.delete("/api/v1/trading/routes/{route_id}/archived-strategy")
+    def delete_archived_trading_route(route_id: str) -> dict[str, Any]:
+        repository = get_runtime_repository()
+        route = repository.get_deployment_route(route_id)
+        if route is None:
+            raise HTTPException(status_code=404, detail="deployment route not found")
+        if not route.get("archived"):
+            raise HTTPException(status_code=409, detail="Only archived strategies can be deleted")
+        if not route.get("active_bundle_id"):
+            raise HTTPException(status_code=409, detail="Archived strategy has no active bundle")
+        try:
+            adapter = build_execution_adapter(route)
+            readiness_blockers = list(adapter.readiness_blockers()) if hasattr(adapter, "readiness_blockers") else []
+        except HTTPException as exc:
+            raise HTTPException(status_code=409, detail="Unable to verify archived strategy exchange exposure") from exc
+        if readiness_blockers:
+            raise HTTPException(status_code=409, detail="Unable to verify archived strategy exchange exposure")
+        try:
+            snapshot = adapter.snapshot(route["instrument"])
+        except ExchangeAdapterError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Unable to verify archived strategy exchange exposure: {_sanitize_exchange_error(str(exc))}",
+            ) from exc
+        if any(snapshot.get(key) for key in ("positions", "open_orders", "protection_orders")):
+            raise HTTPException(status_code=409, detail="Archived strategy still has live exchange exposure")
+        try:
+            deleted = repository.delete_archived_strategy_route(route_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if deleted is None:
+            raise HTTPException(status_code=404, detail="deployment route not found")
+        artifact_deleted = _delete_filesystem_path(deleted.get("bundle_uri"))
+        return {
+            "status": "deleted",
+            "route_id": route_id,
+            "bundle_id": deleted["bundle_id"],
+            "deleted_wake_count": deleted["deleted_wake_count"],
+            "deleted_owner_state_count": deleted["deleted_owner_state_count"],
+            "artifact_deleted": artifact_deleted,
+        }
+
     @app.post("/api/v1/trading/routes/{route_id}/arm")
     def arm_trading_route(route_id: str) -> dict[str, Any]:
         return _update_trading_route_gate(route_id, manually_armed=True)
@@ -1424,19 +1470,19 @@ def create_app(
         iteration_root = artifact_root / "iterations" / iteration_id
         if not iteration_root.is_dir():
             raise HTTPException(status_code=404, detail="Stage 1 iteration not found")
-        enqueuer = getattr(repository, "enqueue_job", None)
-        if callable(enqueuer):
-            job = enqueuer(
-                job_type="stage1_score",
-                scope_key=f"stage1_session:{session_id}",
-                payload={
-                    "session_id": session_id,
-                    "iteration_id": iteration_id,
-                    "sample_role": sample_role,
-                },
-                current_step="queued",
-            )
-            return {"accepted": True, "job": _relative_nested_paths(Path.cwd(), job)}
+        queued = enqueue_runtime_job(
+            repository,
+            job_type="stage1_score",
+            scope_key=f"stage1_session:{session_id}",
+            payload={
+                "session_id": session_id,
+                "iteration_id": iteration_id,
+                "sample_role": sample_role,
+            },
+            current_step="queued",
+        )
+        if queued:
+            return queued
         try:
             score = run_stage1a_score(iteration_root=iteration_root, sample_role=sample_role)
         except ValueError as exc:
@@ -1537,6 +1583,57 @@ def create_app(
     @app.get("/api/v1/research/stage0-universe-runs/{universe_run_id}/candidates")
     def list_stage0_universe_candidates(universe_run_id: str) -> dict[str, Any]:
         return {"candidates": get_runtime_repository().list_stage0_universe_candidates(universe_run_id)}
+
+    @app.get("/api/v1/research/stage0-universe-runs/{universe_run_id}/appendable-assets")
+    def list_stage0_universe_appendable_assets(universe_run_id: str) -> dict[str, Any]:
+        repository = get_runtime_repository()
+        universe_run = repository.get_stage0_universe_run(universe_run_id)
+        if universe_run is None:
+            raise HTTPException(status_code=404, detail="stage0 universe run not found")
+        candidates = _stage0_universe_append_candidates(repository=repository, universe_run=universe_run, asset_symbols=None)
+        existing_keys = {candidate["signal_set_key"] for candidate in repository.list_stage0_universe_candidates(universe_run_id)}
+        assets = sorted({candidate["asset"] for candidate in candidates if candidate["signal_set_key"] not in existing_keys})
+        return {"assets": assets}
+
+    @app.post("/api/v1/research/stage0-universe-runs/{universe_run_id}/append-assets")
+    def append_stage0_universe_assets(
+        universe_run_id: str,
+        request: Stage0UniverseAppendAssetsRequest,
+    ) -> dict[str, Any]:
+        repository = get_runtime_repository()
+        universe_run = repository.get_stage0_universe_run(universe_run_id)
+        if universe_run is None:
+            raise HTTPException(status_code=404, detail="stage0 universe run not found")
+        normalized_assets = sorted({asset.strip().upper() for asset in request.assets if asset.strip()})
+        if not normalized_assets:
+            raise HTTPException(status_code=400, detail="No assets requested")
+        candidates = _stage0_universe_append_candidates(
+            repository=repository,
+            universe_run=universe_run,
+            asset_symbols=normalized_assets,
+        )
+        existing_keys = {candidate["signal_set_key"] for candidate in repository.list_stage0_universe_candidates(universe_run_id)}
+        added_candidates = [candidate for candidate in candidates if candidate["signal_set_key"] not in existing_keys]
+        appendable_assets = {candidate["asset"] for candidate in added_candidates}
+        invalid_assets = [asset for asset in normalized_assets if asset not in appendable_assets]
+        if invalid_assets:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No generated signals available for selected pool engine/window: {', '.join(invalid_assets)}",
+            )
+        appender = getattr(repository, "append_stage0_universe_candidates", None)
+        if not callable(appender):
+            raise HTTPException(status_code=501, detail="Stage 0 universe append is not supported by this repository")
+        appender(universe_run_id, added_candidates)
+        repository.refresh_stage0_universe_summary(universe_run_id)
+        refreshed_run = repository.get_stage0_universe_run(universe_run_id) or universe_run
+        refreshed_candidates = repository.list_stage0_universe_candidates(universe_run_id)
+        return {
+            "run": refreshed_run,
+            "candidates": refreshed_candidates,
+            "added_candidates": added_candidates,
+            "added_candidate_count": len(added_candidates),
+        }
 
     @app.get("/api/v1/research/cycles/{universe_run_id}/development-queue")
     def get_development_queue(universe_run_id: str) -> dict[str, Any]:
@@ -1683,13 +1780,15 @@ def create_app(
         universe_run = get_runtime_repository().get_stage0_universe_run(universe_run_id)
         if universe_run is None:
             raise HTTPException(status_code=404, detail="stage0 universe run not found")
+        repository = get_runtime_repository()
         linked_sessions = [
             session
-            for session in get_runtime_repository().list_stage1_research_sessions()
+            for session in repository.list_stage1_research_sessions()
             if session.get("source_universe_run_id") == universe_run_id
         ]
+        _ensure_stage0_universe_run_deletable(repository=repository, linked_sessions=linked_sessions)
         linked_session_ids = [session["session_id"] for session in linked_sessions]
-        get_runtime_repository().delete_stage0_universe_run(universe_run_id)
+        repository.delete_stage0_universe_run(universe_run_id)
         return {
             "status": "deleted",
             "universe_run_id": universe_run_id,
@@ -1874,6 +1973,52 @@ def _date_string(value: Any) -> str:
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return str(value)
+
+
+def _stage0_universe_append_candidates(
+    *,
+    repository: Any,
+    universe_run: dict[str, Any],
+    asset_symbols: list[str] | None,
+) -> list[dict[str, Any]]:
+    engine_ids = list(universe_run.get("engine_filter") or [])
+    signal_sets_for_engines: list[dict[str, Any]] = []
+    if engine_ids:
+        for engine_id in engine_ids:
+            signal_sets_for_engines.extend(repository.list_signal_sets(engine_id))
+    else:
+        signal_sets_for_engines = repository.list_signal_sets()
+    window_start = _date_string(universe_run["window_start"])
+    window_end = _date_string(universe_run["window_end"])
+    universe = build_stage0_universe(
+        universe_run_id=str(universe_run["universe_run_id"]),
+        window_start=window_start,
+        window_end=window_end,
+        forward_hours=int(universe_run["forward_hours"]),
+        trigger_rate_threshold_pct=float(universe_run["trigger_rate_threshold_pct"]),
+        train_start=_date_string(universe_run.get("train_start")) if universe_run.get("train_start") else None,
+        train_end=_date_string(universe_run.get("train_end")) if universe_run.get("train_end") else None,
+        walk_forward_start=_date_string(universe_run.get("walk_forward_start")) if universe_run.get("walk_forward_start") else None,
+        walk_forward_end=_date_string(universe_run.get("walk_forward_end")) if universe_run.get("walk_forward_end") else None,
+        signal_sets=signal_sets_for_engines,
+        asset_symbols=asset_symbols,
+        metrics_by_signal_set=repository.stage0_metrics_by_signal_set(),
+        existing_rnd_by_signal_set=repository.existing_rnd_by_signal_set(),
+        signal_counts_by_signal_set=repository.signal_counts_by_signal_set_window(
+            window_start=window_start,
+            window_end=window_end,
+            engine_ids=engine_ids,
+        ),
+        split_signal_counts_by_signal_set=repository.split_signal_counts_by_signal_set(
+            train_start=_date_string(universe_run.get("train_start")) if universe_run.get("train_start") else None,
+            train_end=_date_string(universe_run.get("train_end")) if universe_run.get("train_end") else None,
+            walk_forward_start=_date_string(universe_run.get("walk_forward_start")) if universe_run.get("walk_forward_start") else None,
+            walk_forward_end=_date_string(universe_run.get("walk_forward_end")) if universe_run.get("walk_forward_end") else None,
+            engine_ids=engine_ids,
+        ),
+        engine_ids=engine_ids,
+    )
+    return universe["candidates"]
 
 
 def _resolve_stage1_seed_strategy(
@@ -2618,6 +2763,36 @@ def _ensure_stage1_session_resettable(*, repository: Any, session: dict[str, Any
         ]
     if bundles:
         raise HTTPException(status_code=409, detail="Stage 1 session has a promoted execution bundle")
+
+
+def _ensure_stage0_universe_run_deletable(*, repository: Any, linked_sessions: list[dict[str, Any]]) -> None:
+    finder = getattr(repository, "list_execution_bundles_for_stage1_session", None)
+    for session in linked_sessions:
+        if callable(finder):
+            bundles = finder(session["session_id"])
+        else:
+            bundles = [
+                bundle
+                for bundle in repository.list_execution_bundles()
+                if bundle.get("source_stage1_session_id") == session["session_id"]
+            ]
+        if bundles:
+            raise HTTPException(status_code=409, detail="Training pool has linked promoted execution bundles")
+
+
+def _delete_filesystem_path(path_value: Any) -> bool:
+    if path_value in (None, ""):
+        return False
+    path = Path(str(path_value))
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    if not path.exists():
+        return False
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+    return True
 
 
 def _next_action(

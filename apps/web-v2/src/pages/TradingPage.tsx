@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Archive, CheckCircle2, ChevronLeft, ChevronRight, Clock, Play, RefreshCw, Send, Square, X } from "lucide-react";
+import { AlertTriangle, Archive, CheckCircle2, ChevronLeft, ChevronRight, Clock, Play, RefreshCw, Send, Square, Trash2, X } from "lucide-react";
 import {
   archiveTradingRoute,
+  deleteArchivedTradingRoute,
   fetchArchivedTradingRoutes,
   fetchRouteExchangeHealth,
   fetchRouteWakes,
@@ -461,6 +462,13 @@ export function TradingPage() {
       }
     }
   });
+  const deleteArchivedMutation = useMutation({
+    mutationFn: deleteArchivedTradingRoute,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["trading-routes"] });
+      void queryClient.invalidateQueries({ queryKey: ["trading-routes", "archived"] });
+    }
+  });
 
   const wakes = wakesQuery.data?.wakes ?? [];
   const latestWake = wakePage === 0 ? wakes[0] ?? null : latestWakesQuery.data?.wakes[0] ?? null;
@@ -775,8 +783,18 @@ export function TradingPage() {
       />
       {archivedOpen ? (
         <ArchivedStrategiesModal
+          deleteBusyRouteId={deleteArchivedMutation.isPending ? deleteArchivedMutation.variables : null}
           loading={archivedRoutesQuery.isLoading}
           onClose={() => setArchivedOpen(false)}
+          onDelete={(targetRoute) => {
+            if (
+              window.confirm(
+                `Delete archived strategy ${targetRoute.asset} / ${targetRoute.signal_engine_id}? This permanently deletes the archived route, execution bundle, wake history, owner state history, and bundle artifacts.`
+              )
+            ) {
+              deleteArchivedMutation.mutate(targetRoute.route_id);
+            }
+          }}
           routes={archivedRoutes}
         />
       ) : null}
@@ -868,9 +886,11 @@ function RouteCard({
   );
 }
 
-function ArchivedStrategiesModal({ loading, onClose, routes }: {
+function ArchivedStrategiesModal({ deleteBusyRouteId, loading, onClose, onDelete, routes }: {
+  deleteBusyRouteId: string | null;
   loading: boolean;
   onClose: () => void;
+  onDelete: (route: DeploymentRoute) => void;
   routes: DeploymentRoute[];
 }) {
   return (
@@ -895,7 +915,22 @@ function ArchivedStrategiesModal({ loading, onClose, routes }: {
                 { key: "instrument", header: "Instrument", render: (item) => item.instrument },
                 { key: "promoted", header: "Promoted", render: (item) => <span className="mono">{formatTimestamp(promotedTimestamp(item))}</span> },
                 { key: "age", header: "Age", render: (item) => trainingAgeLabel(item) },
-                { key: "archived", header: "Archived", render: (item) => <span className="mono">{formatTimestamp(item.archived_at)}</span> }
+                { key: "archived", header: "Archived", render: (item) => <span className="mono">{formatTimestamp(item.archived_at)}</span> },
+                {
+                  key: "actions",
+                  header: "",
+                  render: (item) => (
+                    <button
+                      className="button button--danger"
+                      disabled={deleteBusyRouteId === item.route_id}
+                      onClick={() => onDelete(item)}
+                      type="button"
+                    >
+                      <Trash2 aria-hidden="true" />
+                      {deleteBusyRouteId === item.route_id ? "Deleting" : "Delete"}
+                    </button>
+                  )
+                }
               ]}
               getRowKey={(item) => item.route_id}
               rows={routes}

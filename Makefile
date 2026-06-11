@@ -1,4 +1,4 @@
-.PHONY: dev-api dev-worker dev-worker-legacy dev-web test compose-up compose-down
+.PHONY: dev-api dev-worker dev-worker-legacy dev-web dev-stack stop-stack test compose-up compose-down
 
 PYTHONPATH := packages/strategy_sdk/src:packages/engine_sdk/src:packages/strategy_modules/src:apps/api/src:apps/worker/src
 CELERY_BROKER_URL ?= redis://127.0.0.1:6379/0
@@ -17,6 +17,12 @@ dev-worker-legacy:
 
 dev-web:
 	npm --workspace apps/web run dev -- --host 0.0.0.0
+
+dev-stack:
+	ops/scripts/start_dev_stack.sh
+
+stop-stack:
+	ops/scripts/stop_dev_stack.sh
 
 test:
 	PYTHONPATH=$(PYTHONPATH) python3 -m pytest tests -q

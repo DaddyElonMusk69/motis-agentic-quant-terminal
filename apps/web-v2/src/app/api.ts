@@ -87,6 +87,7 @@ export type WorkerRuntimeStatus = {
 export type AsyncJobResponse = {
   accepted: true;
   job: RuntimeJob;
+  dispatch?: Record<string, unknown>;
 };
 
 export function isJobResponse(value: unknown): value is AsyncJobResponse {
@@ -208,6 +209,17 @@ export type Stage0UniverseCandidate = {
 export type Stage0UniverseResponse = {
   run: Stage0UniverseRun;
   candidates: Stage0UniverseCandidate[];
+};
+
+export type Stage0UniverseAppendableAssetsResponse = {
+  assets: string[];
+};
+
+export type Stage0UniverseAppendAssetsResponse = {
+  run: Stage0UniverseRun;
+  candidates: Stage0UniverseCandidate[];
+  added_candidates: Stage0UniverseCandidate[];
+  added_candidate_count: number;
 };
 
 export type Stage0ExecutionResponse = {
@@ -893,6 +905,11 @@ export function fetchJob(jobId: string): Promise<{ job: RuntimeJob }> {
   return requestJson<{ job: RuntimeJob }>(`/api/v1/jobs/${jobId}`);
 }
 
+export function fetchJobs(scopeKey: string, limit = 10): Promise<{ jobs: RuntimeJob[] }> {
+  const params = new URLSearchParams({ scope_key: scopeKey, limit: String(limit) });
+  return requestJson<{ jobs: RuntimeJob[] }>(`/api/v1/jobs?${params.toString()}`);
+}
+
 export function fetchWorkerRuntimeStatus(): Promise<{ worker_runtime: WorkerRuntimeStatus }> {
   return requestJson<{ worker_runtime: WorkerRuntimeStatus }>("/api/v1/jobs/runtime");
 }
@@ -946,6 +963,12 @@ export function fetchStage0UniverseCandidates(universeRunId: string): Promise<{ 
   return requestJson<{ candidates: Stage0UniverseCandidate[] }>(`/api/v1/research/stage0-universe-runs/${universeRunId}/candidates`);
 }
 
+export function fetchStage0UniverseAppendableAssets(universeRunId: string): Promise<Stage0UniverseAppendableAssetsResponse> {
+  return requestJson<Stage0UniverseAppendableAssetsResponse>(
+    `/api/v1/research/stage0-universe-runs/${universeRunId}/appendable-assets`
+  );
+}
+
 export function fetchDevelopmentQueue(universeRunId: string): Promise<{ universe_run: Stage0UniverseRun; queue: DevelopmentQueueRow[] }> {
   return requestJson<{ universe_run: Stage0UniverseRun; queue: DevelopmentQueueRow[] }>(`/api/v1/research/cycles/${universeRunId}/development-queue`);
 }
@@ -993,6 +1016,20 @@ export function deleteStage0UniverseRun(universeRunId: string): Promise<Stage0Un
   return requestJson<Stage0UniverseDeleteResponse>(`/api/v1/research/stage0-universe-runs/${universeRunId}`, {
     method: "DELETE"
   });
+}
+
+export function appendStage0UniverseAssets(request: {
+  universe_run_id: string;
+  assets: string[];
+}): Promise<Stage0UniverseAppendAssetsResponse> {
+  return requestJson<Stage0UniverseAppendAssetsResponse>(
+    `/api/v1/research/stage0-universe-runs/${request.universe_run_id}/append-assets`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ assets: request.assets })
+    }
+  );
 }
 
 export function fetchStage1ResearchSessions(): Promise<{ sessions: Stage1ResearchSession[] }> {
@@ -1191,6 +1228,21 @@ export function fetchArchivedTradingRoutes(): Promise<{ routes: DeploymentRoute[
 export function archiveTradingRoute(routeId: string): Promise<{ route: DeploymentRoute }> {
   return requestJson<{ route: DeploymentRoute }>(`/api/v1/trading/routes/${routeId}/archive`, {
     method: "POST"
+  });
+}
+
+export type ArchivedStrategyDeleteResponse = {
+  status: "deleted";
+  route_id: string;
+  bundle_id: string;
+  deleted_wake_count: number;
+  deleted_owner_state_count: number;
+  artifact_deleted: boolean;
+};
+
+export function deleteArchivedTradingRoute(routeId: string): Promise<ArchivedStrategyDeleteResponse> {
+  return requestJson<ArchivedStrategyDeleteResponse>(`/api/v1/trading/routes/${routeId}/archived-strategy`, {
+    method: "DELETE"
   });
 }
 

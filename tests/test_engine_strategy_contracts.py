@@ -306,6 +306,31 @@ def test_5m_vegas_hft_base_enters_with_aligned_context():
     assert decision["diagnostics"]["matched_ema_count"] == 3
 
 
+def test_5m_vegas_hft_base_accepts_top_level_packet_shape():
+    strategy = importlib.import_module("quant_terminal_strategies.vegas_ema_5m_hft_base")
+
+    decision = strategy.decide(
+        {
+            "signal": {
+                "signal_id": "vegas_ema_5m_cluster:ETH:test:20260608T060000Z",
+                **_cluster_payload(
+                    matched_periods=[36, 43, 144],
+                    five_minute_closes=[100, 100.2, 100.4, 100.7],
+                    two_hour_closes=[98, 99, 100, 101],
+                    one_day_closes=[90, 94, 98, 102],
+                    ema_values={"36": "101.0", "43": "100.8", "144": "100.2", "169": "99.8", "576": "99.0", "676": "98.8"},
+                ),
+            },
+            "runtime_mode": "backtest",
+        }
+    )
+
+    assert decision["action"] == "ENTER"
+    assert decision["direction"] == "LONG"
+    assert decision["reason_code"] == "aligned_5m_cluster_with_2h_1d_context"
+    assert decision["diagnostics"]["matched_ema_count"] == 3
+
+
 def test_5m_vegas_hft_base_skips_without_required_context():
     strategy = importlib.import_module("quant_terminal_strategies.vegas_ema_5m_hft_base")
 

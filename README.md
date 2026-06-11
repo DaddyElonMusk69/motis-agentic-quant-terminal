@@ -54,11 +54,22 @@ skills/stage1a-training-optimizer/SKILL.md
 ```bash
 cp .env.example .env
 python3 -m pytest tests -q
+npm install
 # Start Redis separately when using the Celery job backend, or use compose-up.
+make dev-stack
+```
+
+`make dev-stack` starts the API, Celery worker, and v2 frontend in the
+background. Runtime files are written under `.run/`, logs under `.run/logs/`,
+and the v2 frontend is served at `http://127.0.0.1:5174`. Stop the local stack
+with `make stop-stack`.
+
+Manual service commands remain available:
+
+```bash
 make dev-api
 make dev-worker
-npm install
-make dev-web
+VITE_API_BASE_URL=http://127.0.0.1:8000 npm --workspace apps/web-v2 run dev -- --host 127.0.0.1 --port 5174 --strictPort
 ```
 
 `make dev-worker` runs the Celery-backed concurrent job worker. Use
@@ -66,12 +77,6 @@ make dev-web
 live/execution workers isolated with `CELERY_QUEUES=execution,default` when needed.
 The previous single-job Postgres polling worker remains available as
 `make dev-worker-legacy`.
-
-Current v2 frontend:
-
-```bash
-VITE_API_BASE_URL=http://127.0.0.1:8000 npm --workspace apps/web-v2 run dev -- --host 127.0.0.1 --port 5174 --strictPort
-```
 
 Useful verification commands:
 
