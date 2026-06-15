@@ -41,7 +41,12 @@ def _record_celery_worker_heartbeat(sender: object, *, status: str) -> None:
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         return
-    hostname = getattr(sender, "hostname", None) or "unknown"
+    hostname = getattr(sender, "hostname", None)
+    if not hostname:
+        eventer = getattr(sender, "eventer", None)
+        hostname = getattr(eventer, "hostname", None)
+    if not hostname:
+        return
     worker_id = f"celery-{hostname}"
     try:
         RuntimeRepository(database_url).record_worker_heartbeat(

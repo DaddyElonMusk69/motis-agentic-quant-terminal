@@ -334,6 +334,9 @@ class StubRuntimeRepository:
             return self.candle_refs.get((asset.upper(), data_type, origin, timeframe))
         return self.candle_ref
 
+    def get_data_ref(self, *, asset, timeframe, origin, data_type):
+        return self.get_candle_ref(asset=asset, timeframe=timeframe, origin=origin, data_type=data_type)
+
     def existing_rnd_by_signal_set(self):
         return {}
 
@@ -652,6 +655,61 @@ def test_signal_pool_create_adds_canonical_pool_for_data_asset(tmp_path, monkeyp
     assert signal_set["packet_count"] == 0
     assert signal_set["manifest"]["parameters"] == {"vote_threshold": 2}
     assert signal_set["manifest"]["data_refs"] == ["AAVE-raw-5m", "AAVE-derived-4h"]
+
+
+def test_signal_pool_create_accepts_feature_required_data_refs(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    registry_root = tmp_path / "artifacts" / "signal_engine"
+    registry_root.mkdir(parents=True)
+    (registry_root / "engine_registry.json").write_text(
+        json.dumps(
+            {
+                "feature_engine": {
+                    "signal_engine_id": "feature_engine",
+                    "version": "0.1",
+                    "name": "Feature Engine",
+                    "description": "Feature-backed contract engine",
+                    "code_ref": {},
+                    "required_data": [
+                        {"data_type": "candles", "origin": "raw", "timeframe": "5m"},
+                        {"data_type": "feature_base_candle", "origin": "derived", "timeframe": "5m"},
+                    ],
+                    "output_envelope_version": "signal_packet.v2",
+                    "runtime_entrypoint": "quant_terminal_worker.signal_engines.vegas_ema_recursive_features:generate_training_signals",
+                    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.vegas_ema_recursive_features:scan_live_signal",
+                    "configuration_schema": {"default_parameters": {"feature_timeframes": ["5m"]}},
+                }
+            }
+        )
+    )
+    repository = StubRuntimeRepository()
+    repository.signal_engines = []
+    repository.candle_refs = {
+        ("AAVE", "candles", "raw", "5m"): {
+            "asset": "AAVE",
+            "instrument": "AAVE-USDT-SWAP",
+            "dataset_id": "AAVE-raw-5m",
+            "data_type": "candles",
+            "data_origin": "raw",
+            "timeframe": "5m",
+        },
+        ("AAVE", "feature_base_candle", "derived", "5m"): {
+            "asset": "AAVE",
+            "instrument": "AAVE-USDT-SWAP",
+            "dataset_id": "AAVE-feature-base-5m",
+            "data_type": "feature_base_candle",
+            "data_origin": "derived",
+            "timeframe": "5m",
+        },
+    }
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post("/api/v1/signal-engines/feature_engine/signal-sets", json={"asset": "AAVE"})
+
+    assert response.status_code == 200
+    signal_set = response.json()["signal_set"]
+    assert signal_set["signal_set_key"] == "feature_engine:AAVE:AAVE-feature_engine-canonical"
+    assert signal_set["manifest"]["data_refs"] == ["AAVE-raw-5m", "AAVE-feature-base-5m"]
 
 
 def test_signal_pool_extend_endpoint_uses_local_extension_service():

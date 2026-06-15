@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
+
+from quant_terminal_worker.ingestion.feature_enrichment import FEATURE_FAMILIES, enrich_feature_family_datasets
+
+
+FEATURE_DATA_TYPE_TO_FAMILY = {family.data_type: key for key, family in FEATURE_FAMILIES.items()}
 
 
 def warm_route_data(
@@ -10,6 +16,8 @@ def warm_route_data(
     market_data_repository: Any,
     fill_service: Any,
     adapter: Any,
+    feature_service: Any | None = None,
+    workspace_root: Path | None = None,
 ) -> dict[str, Any]:
     route = runtime_repository.get_deployment_route(route_id)
     if route is None:
@@ -40,11 +48,12 @@ def warm_route_data(
     blocked = False
 
     for requirement in required_data:
-        if requirement.get("data_type") != "candles":
+        data_type = requirement.get("data_type")
+        if data_type != "candles" and data_type not in FEATURE_DATA_TYPE_TO_FAMILY:
             requirement_results.append(_requirement_result(requirement, "blocked", "unsupported_data_type"))
             blocked = True
             continue
-        if requirement.get("origin") != "raw":
+        if data_type != "candles" or requirement.get("origin") != "raw":
             continue
 
         timeframe = requirement.get("timeframe") or "5m"
@@ -104,6 +113,64 @@ def warm_route_data(
             }
         )
 
+    for requirement in required_data:
+        data_type = requirement.get("data_type")
+        if data_type not in FEATURE_DATA_TYPE_TO_FAMILY:
+            continue
+        if requirement.get("origin") != "derived":
+            requirement_results.append(_requirement_result(requirement, "blocked", "feature_data_must_be_derived"))
+            blocked = True
+            continue
+        family = FEATURE_DATA_TYPE_TO_FAMILY[str(data_type)]
+        service = feature_service or enrich_feature_family_datasets
+        target_root = (workspace_root or Path(".")) / ".data" / "market-data"
+        feature_result = service(
+            repository=market_data_repository,
+            asset=route["asset"],
+            family=family,
+            target_root=target_root,
+        )
+        matching_feature = next(
+            (
+                item
+                for item in feature_result.get("features", [])
+                if item.get("data_type") == data_type and item.get("timeframe") == requirement.get("timeframe")
+            ),
+            None,
+        )
+        if matching_feature is None:
+            matching_ref = _get_ref(
+                market_data_repository,
+                asset=route["asset"],
+                timeframe=requirement.get("timeframe"),
+                origin="derived",
+                data_type=str(data_type),
+            )
+            if matching_ref is not None:
+                matching_feature = {
+                    "dataset_id": matching_ref["dataset_id"],
+                    "timeframe": matching_ref.get("timeframe"),
+                    "row_count": matching_ref.get("row_count"),
+                    "data_type": matching_ref.get("data_type"),
+                }
+        if matching_feature is None:
+            requirement_results.append(
+                {
+                    **_requirement_result(requirement, "blocked", "feature_refresh_produced_no_matching_dataset"),
+                    "feature_result": feature_result,
+                }
+            )
+            blocked = True
+            continue
+        requirement_results.append(
+            {
+                **_requirement_result(requirement, "feature_enriched"),
+                "dataset_id": matching_feature["dataset_id"],
+                "family": family,
+                "feature_result": feature_result,
+            }
+        )
+
     if blocked:
         return _blocked(route=route, requirements=requirement_results)
 
@@ -146,6 +213,13 @@ def _requirement_result(
     if reason is not None:
         result["reason"] = reason
     return result
+
+
+def _get_ref(repository: Any, *, asset: str, timeframe: str | None, origin: str, data_type: str) -> dict[str, Any] | None:
+    getter = getattr(repository, "get_candle_ref", None)
+    if not callable(getter):
+        return None
+    return getter(asset=asset, timeframe=timeframe, origin=origin, data_type=data_type)
 
 
 def _blocked(*, route: dict[str, Any], requirements: list[dict[str, Any]]) -> dict[str, Any]:

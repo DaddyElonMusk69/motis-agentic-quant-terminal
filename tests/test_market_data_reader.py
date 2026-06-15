@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from quant_terminal_sdk.market_data_reader import MarketDataReader
 
@@ -93,6 +94,26 @@ def test_market_data_reader_preserves_extra_parquet_columns_for_engine_rows(tmp_
     assert len(rows) == 1
     assert rows[0]["timestamp"].tzinfo is UTC
     assert rows[0]["ema_676"] == "99.5"
+
+
+def test_market_data_reader_reports_corrupt_parquet_shard(tmp_path: Path):
+    storage_uri = tmp_path / ".data" / "market-data" / "origin=raw" / "source=okx" / "type=candles" / "asset=BNB" / "timeframe=5m"
+    month_path = storage_uri / "year=2026" / "month=04" / "data.parquet"
+    month_path.parent.mkdir(parents=True)
+    month_path.write_bytes(b"bad!")
+    reader = MarketDataReader(
+        repository=FakeRepository(
+            {
+                "dataset_id": "bnb-raw-5m",
+                "storage_backend": "parquet",
+                "storage_uri": str(storage_uri),
+            }
+        ),
+        workspace_root=tmp_path,
+    )
+
+    with pytest.raises(ValueError, match="Corrupt parquet shard for bnb-raw-5m"):
+        reader.get_candles(asset="bnb", timeframe="5m", origin="raw")
 
 
 def _row(timestamp: str, *, close: int, confirm: int) -> dict[str, object]:

@@ -79,7 +79,7 @@ start_service() {
   echo "Starting ${name}..."
   (
     cd "${ROOT_DIR}"
-    exec "$@"
+    exec nohup "$@"
   ) >"${LOG_DIR}/${name}.log" 2>&1 &
   echo "$!" >"${pid_file}"
   sleep 0.5

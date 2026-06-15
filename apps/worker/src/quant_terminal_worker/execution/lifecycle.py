@@ -32,6 +32,7 @@ def run_route_lifecycle_cycle(
         market_data_repository=market_data_repository,
         fill_service=fill_service,
         adapter=adapter,
+        workspace_root=workspace_root,
     )
     if warmup.get("status") == "blocked":
         route_after_block = _record_route_cycle(
@@ -96,9 +97,9 @@ def run_route_lifecycle_cycle(
 def next_wake_at(route: dict[str, Any], *, from_time: datetime | None = None) -> datetime:
     base = from_time or datetime.now(UTC)
     try:
-        minutes = int(route.get("cron_interval_minutes") or 15)
+        minutes = int(route.get("cron_interval_minutes") or 5)
     except (TypeError, ValueError):
-        minutes = 15
+        minutes = 5
     return base + timedelta(minutes=max(1, minutes))
 
 
@@ -109,6 +110,7 @@ def _warm_market_data(
     market_data_repository: Any,
     fill_service: Any,
     adapter: Any,
+    workspace_root: Path,
 ) -> dict[str, Any]:
     non_data_blockers = [blocker for blocker in route.get("blockers", []) if blocker != "data_not_warmed"]
     if non_data_blockers:
@@ -130,6 +132,7 @@ def _warm_market_data(
         market_data_repository=market_data_repository,
         fill_service=fill_service,
         adapter=adapter,
+        workspace_root=workspace_root,
     )
 
 

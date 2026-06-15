@@ -19,6 +19,7 @@ def extend_signal_pool_from_local_candles(
     signal_engine_id: str,
     asset: str,
     target_end: str | None = None,
+    progress_callback: Any | None = None,
 ) -> dict[str, Any]:
     root = Path(workspace_root)
     asset = asset.upper()
@@ -105,6 +106,8 @@ def extend_signal_pool_from_local_candles(
             if stream_state["final_signal_end"] is None or timestamp > stream_state["final_signal_end"]:
                 stream_state["final_signal_end"] = timestamp
         stream_state["appended_packet_count"] += len(new_packets)
+        if callable(progress_callback):
+            progress_callback(f"packets {stream_state['appended_packet_count']} appended")
 
     training_output = resolved.generate_training_signals(
         EngineTrainingContext(
@@ -194,9 +197,10 @@ def _append_packets_to_signal_set(
     asset = signal_set["asset"]
     instrument = signal_set.get("instrument") or f"{asset}-USDT-SWAP"
     version = signal_set.get("signal_engine_version") or SIGNAL_ENGINE_VERSION
+    rows = []
     for packet in packets:
         timestamp = _parse_timestamp(str(packet["timestamp"]))
-        repository.upsert_signal(
+        rows.append(
             {
                 "signal_id": _build_signal_id(
                     signal_engine_id=signal_engine_id,
@@ -215,6 +219,12 @@ def _append_packets_to_signal_set(
                 "payload": packet,
             }
         )
+    bulk_upsert = getattr(repository, "upsert_signals", None)
+    if callable(bulk_upsert):
+        bulk_upsert(rows)
+    else:
+        for row in rows:
+            repository.upsert_signal(row)
     return {
         "status": "imported",
         "signal_engine_id": signal_engine_id,

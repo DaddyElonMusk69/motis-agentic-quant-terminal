@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Archive, CheckCircle2, ChevronLeft, ChevronRight, Clock, Play, RefreshCw, Send, Square, Trash2, X } from "lucide-react";
+import { AlertTriangle, Archive, CheckCircle2, ChevronLeft, ChevronRight, Clock, Play, RefreshCw, Send, Settings, Square, Trash2, X } from "lucide-react";
 import {
   archiveTradingRoute,
   deleteArchivedTradingRoute,
@@ -830,38 +830,58 @@ function RouteCard({
   warmup: DataWarmupReport | null;
 }) {
   const status = routeStatus(route);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const legs = pyramidMaxLegs(route);
+  const sizing = effectiveRouteSizing(route);
+  const margin = Number(sizing.margin_allocation_pct ?? 0);
+  const perLegMarginPct = legs > 0 ? margin / legs : margin;
+  const tpSlRows = routeTpSlRows(route);
+  const setupLine = [
+    tpSlRows.map((r) => r.value).join(" / "),
+    `${formatNumber(legs)} legs`,
+    `${formatPercent(perLegMarginPct)} @ ${formatNumber(sizing.leverage)}x`
+  ].join(" · ");
+
+  const cardClass = [
+    "route-card-v2",
+    `route-card-v2--${status.state}`,
+    selected ? "is-selected" : ""
+  ].filter(Boolean).join(" ");
+
   return (
-    <article className={selected ? "route-card-v2 is-selected" : "route-card-v2"}>
-      <button className="route-card-v2__select" onClick={onSelect} type="button">
+    <article className={cardClass}>
+      <button className="route-card-v2__header" onClick={onSelect} type="button">
         <div className="signal-pool-card__top">
           <strong>{route.asset} / {route.signal_engine_id}</strong>
           <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
         </div>
-        <span>{route.strategy_id} · {route.account_mode}</span>
-        <small>{route.instrument}</small>
-        <div className="route-card-v2__facts">
-          <span>{executionInterval(route)}</span>
-          <span>{executionAccount(route)}</span>
-          <span>Promoted {formatTimestamp(promotedTimestamp(route))}</span>
-          <span>{trainingAgeLabel(route)}</span>
-          <span>{health?.connected ? "CLI OK" : "CLI check"}</span>
+        <div className="route-card-v2__sub">
+          {route.instrument} · {route.account_mode} · {executionInterval(route)}
+        </div>
+        <div className="route-card-v2__meta">
+          Promoted {formatTimestamp(promotedTimestamp(route))} · {trainingAgeLabel(route)}{health ? ` · ${health.connected ? "CLI OK" : "CLI check"}` : ""}
         </div>
       </button>
-      <BundleSetupMini latestWake={latestWake} route={route} />
-      <ExecutionSettings compact route={route} saving={settingsSaving} onSave={onSaveSettings} />
-      <div className="execution-sequence-v2 route-card-v2__sequence">
+
+      <div className="route-card-v2__pipeline">
         {executionSteps(route, warmup, latestWake).map((step) => (
-          <span className={`execution-step-v2 ${step.state}`} key={step.label}>
-            {step.state === "done" ? <CheckCircle2 aria-hidden="true" /> : step.state === "blocked" ? <AlertTriangle aria-hidden="true" /> : <Clock aria-hidden="true" />}
-            {step.label}
-          </span>
+          <React.Fragment key={step.label}>
+            <span className="route-card-v2__step">
+              <span className={`route-card-v2__step-icon route-card-v2__step-icon--${step.state}`}>
+                {step.state === "done" ? <CheckCircle2 aria-hidden="true" /> : step.state === "blocked" ? <AlertTriangle aria-hidden="true" /> : <Clock aria-hidden="true" />}
+              </span>
+              <span className={`route-card-v2__step-label route-card-v2__step-label--${step.state}`}>{step.label}</span>
+            </span>
+            <span className={`route-card-v2__step-connector ${step.state === "done" ? "route-card-v2__step-connector--done" : ""}`} aria-hidden="true" />
+          </React.Fragment>
         ))}
       </div>
-      <div className="route-card-v2__footer">
-        <span className={status.state === "blocked" ? "tone-warn" : status.state === "running" ? "tone-pass" : undefined}>
-          {status.detail}
-        </span>
-        <div className="route-card-v2__actions">
+
+      <div className="route-card-v2__setup-line">{setupLine}</div>
+
+      {settingsOpen ? (
+        <div className="route-card-v2__settings">
+          <ExecutionSettings compact route={route} saving={settingsSaving} onSave={onSaveSettings} />
           <button
             className="button button--secondary route-card-v2__archive"
             disabled={archiveBusy || actionBusy}
@@ -870,6 +890,22 @@ function RouteCard({
           >
             <Archive aria-hidden="true" />
             {archiveBusy ? "Archiving" : "Archive"}
+          </button>
+        </div>
+      ) : null}
+
+      <div className="route-card-v2__footer">
+        <span className={`route-card-v2__status ${status.state === "blocked" ? "tone-warn" : status.state === "running" ? "tone-pass" : ""}`}>
+          {status.detail}
+        </span>
+        <div className="route-card-v2__actions">
+          <button
+            className={`route-card-v2__settings-btn ${settingsOpen ? "route-card-v2__settings-btn--open" : ""}`}
+            onClick={() => setSettingsOpen((prev) => !prev)}
+            type="button"
+            aria-label={settingsOpen ? "Hide settings" : "Show settings"}
+          >
+            <Settings aria-hidden="true" />
           </button>
           <button
             className={route.scheduler_status === "running" ? "button button--danger route-card-v2__run" : "button button--primary route-card-v2__run"}
@@ -967,7 +1003,7 @@ function ExecutionSettings({ compact = false, onSave, route, saving }: {
 }) {
   const bundleSizing = routeBundleSizing(route);
   const effectiveSizing = effectiveRouteSizing(route);
-  const [cron, setCron] = useState(String(route.cron_interval_minutes ?? 15));
+  const [cron, setCron] = useState(String(route.cron_interval_minutes ?? 5));
   const [exchange, setExchange] = useState(route.execution_adapter ?? "okx");
   const [account, setAccount] = useState(route.exchange_account ?? "default");
   const [manualSizing, setManualSizing] = useState(Boolean(route.manual_sizing_enabled));
@@ -976,7 +1012,7 @@ function ExecutionSettings({ compact = false, onSave, route, saving }: {
   const [autoSubmit, setAutoSubmit] = useState(Boolean(route.auto_submit_enabled));
 
   useEffect(() => {
-    setCron(String(route.cron_interval_minutes ?? 15));
+    setCron(String(route.cron_interval_minutes ?? 5));
     setExchange(route.execution_adapter ?? "okx");
     setAccount(route.exchange_account ?? "default");
     setManualSizing(Boolean(route.manual_sizing_enabled));
@@ -1072,36 +1108,6 @@ function ExecutionSettings({ compact = false, onSave, route, saving }: {
       >
         {saving ? "Saving" : "Save Setup"}
       </button>
-    </div>
-  );
-}
-
-function BundleSetupMini({ latestWake, route }: { latestWake: WakeRun | null; route: DeploymentRoute }) {
-  const legs = pyramidMaxLegs(route);
-  const sizing = effectiveRouteSizing(route);
-  const margin = Number(sizing.margin_allocation_pct ?? 0);
-  const perLegMarginPct = legs > 0 ? margin / legs : margin;
-  const tpSlRows = routeTpSlRows(route);
-  return (
-    <div className="bundle-setup-mini">
-      {tpSlRows.map((row) => (
-        <div key={row.label}>
-          <span>{row.label}</span>
-          <strong>{row.value}</strong>
-        </div>
-      ))}
-      <div>
-        <span>Pyramid</span>
-        <strong>{formatNumber(legs)} legs</strong>
-      </div>
-      <div>
-        <span>Leg Margin</span>
-        <strong>{formatPercent(perLegMarginPct)} · {formatNumber(sizing.leverage)}x</strong>
-      </div>
-      <div>
-        <span>Last Wake</span>
-        <strong>{latestWake ? formatTimestamp(latestWake.completed_at ?? latestWake.started_at) : "not run"}</strong>
-      </div>
     </div>
   );
 }

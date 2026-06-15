@@ -2,11 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Database, RefreshCw, Search, UploadCloud } from "lucide-react";
 import {
+  fetchDatasetRows,
   fetchDatasetCandles,
   fetchJob,
   fetchJobs,
   fetchMarketDataCatalog,
   isJobResponse,
+  refreshMarketDataFeatureFamily,
   refreshMarketDataEma,
   refreshMarketDataDataset,
   type CatalogResponse,
@@ -31,7 +33,21 @@ type DatasetTypeOption = {
 
 type RefreshRequest =
   | { kind: "candles"; datasetId: string }
-  | { kind: "ema"; asset: string };
+  | { kind: "ema"; asset: string }
+  | { kind: "feature"; asset: string; family: string };
+
+const FEATURE_CATEGORIES = [
+  { dataType: "feature_base_candle", family: "base_candle", label: "Base Candle Features" },
+  { dataType: "feature_volatility_range", family: "volatility_range", label: "Volatility / Range" },
+  { dataType: "feature_volume", family: "volume", label: "Volume" },
+  { dataType: "feature_ema_vegas_structure", family: "ema_vegas_structure", label: "EMA / Vegas Structure" },
+  { dataType: "feature_bollinger", family: "bollinger", label: "Bollinger Context" },
+  { dataType: "feature_regime_momentum", family: "regime_momentum", label: "Regime / Momentum" }
+] as const;
+
+function featureCategoryForDataType(dataType: string) {
+  return FEATURE_CATEGORIES.find((category) => category.dataType === dataType);
+}
 
 function getSelectedAsset(catalog: CatalogResponse | undefined, searchParams: URLSearchParams): string {
   const requested = searchParams.get("asset");
@@ -62,7 +78,7 @@ function getDataTypeOptions(catalog: CatalogResponse | undefined, selectedAsset:
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([dataType, count]) => ({
       dataType,
-      label: dataType === "candles" ? "Candle data" : titleize(dataType),
+      label: dataType === "candles" ? "Candle data" : featureCategoryForDataType(dataType)?.label ?? titleize(dataType),
       count
     }));
   const derivedCandles = datasets.filter((dataset) => dataset.data_type === "candles" && dataset.data_origin === "derived");
@@ -121,6 +137,10 @@ function getRefreshTargetForType(datasets: Dataset[], dataType: string, selected
   if (dataType === "ema" && datasets.length) {
     return { kind: "ema", asset: selectedAsset };
   }
+  const featureCategory = featureCategoryForDataType(dataType);
+  if (featureCategory) {
+    return { kind: "feature", asset: selectedAsset, family: featureCategory.family };
+  }
   if (dataType !== "candles") {
     return undefined;
   }
@@ -149,7 +169,13 @@ function refreshResultText(result: RefreshPlan | undefined): string {
     return `Added ${formatNumber(result.rows_added ?? 0)} rows, rebuilt ${formatNumber(result.derived_rebuilt?.length ?? 0)} derived datasets.`;
   }
   if (result.status === "enriched") {
+    if (result.feature_count !== undefined) {
+      return `Enriched ${formatNumber(result.feature_count ?? result.features?.length ?? 0)} feature datasets.`;
+    }
     return `Enriched ${formatNumber(result.enriched_count ?? result.enriched?.length ?? 0)} EMA datasets.`;
+  }
+  if (result.status === "noop" && result.feature_count !== undefined) {
+    return "No feature datasets were updated.";
   }
   if (result.status === "noop" && result.enriched_count !== undefined) {
     return "No EMA datasets were updated.";
@@ -183,7 +209,13 @@ function refreshRequestKey(request: RefreshRequest | undefined): string | undefi
   if (!request) {
     return undefined;
   }
-  return request.kind === "ema" ? `ema:${request.asset}` : request.datasetId;
+  if (request.kind === "ema") {
+    return `ema:${request.asset}`;
+  }
+  if (request.kind === "feature") {
+    return `feature:${request.asset}:${request.family}`;
+  }
+  return request.datasetId;
 }
 
 function titleize(value: string): string {
@@ -208,10 +240,10 @@ export function DataPage() {
   const refreshTarget = getRefreshTargetForType(visibleDatasets, selectedDataType, selectedAsset);
   const refreshTargetKey = refreshRequestKey(refreshTarget);
 
-  const candlePreviewQuery = useQuery({
-    enabled: Boolean(selectedDataset && selectedDataset.data_type === "candles"),
-    queryKey: ["market-data-candles", selectedDataset?.dataset_id],
-    queryFn: () => fetchDatasetCandles(selectedDataset!.dataset_id, 25)
+  const rowPreviewQuery = useQuery({
+    enabled: Boolean(selectedDataset),
+    queryKey: ["market-data-rows", selectedDataset?.dataset_id],
+    queryFn: () => selectedDataset!.data_type === "candles" ? fetchDatasetCandles(selectedDataset!.dataset_id, 25) : fetchDatasetRows(selectedDataset!.dataset_id, 25)
   });
   const refreshJobQuery = useQuery({
     enabled: Boolean(activeRefreshJobId),
@@ -223,7 +255,11 @@ export function DataPage() {
     }
   });
   const activeScopeKey = refreshTarget
-    ? (refreshTarget.kind === "ema" ? `asset:${refreshTarget.asset}:ema` : `dataset:${refreshTarget.datasetId}`)
+    ? (refreshTarget.kind === "ema"
+      ? `asset:${refreshTarget.asset}:ema`
+      : refreshTarget.kind === "feature"
+        ? `asset:${refreshTarget.asset}:feature:${refreshTarget.family}`
+        : `dataset:${refreshTarget.datasetId}`)
     : null;
   const latestScopeJobsQuery = useQuery({
     enabled: Boolean(activeScopeKey) && !activeRefreshJobId,
@@ -232,20 +268,34 @@ export function DataPage() {
   });
 
   const refreshMutation = useMutation({
-    mutationFn: (request: RefreshRequest) => request.kind === "ema" ? refreshMarketDataEma(request.asset) : refreshMarketDataDataset(request.datasetId),
+    mutationFn: (request: RefreshRequest) => {
+      if (request.kind === "ema") {
+        return refreshMarketDataEma(request.asset);
+      }
+      if (request.kind === "feature") {
+        return refreshMarketDataFeatureFamily(request.asset, request.family);
+      }
+      return refreshMarketDataDataset(request.datasetId);
+    },
     onSuccess: (result) => {
       if (isJobResponse(result)) {
         setActiveRefreshJobId(result.job.job_id);
         return;
       }
       void queryClient.invalidateQueries({ queryKey: ["market-data-catalog"] });
-      void queryClient.invalidateQueries({ queryKey: ["market-data-candles", result.dataset_id] });
+      void queryClient.invalidateQueries({ queryKey: ["market-data-rows", result.dataset_id] });
     }
   });
 
   const canRefreshType = Boolean(refreshTarget);
   const refreshResult = isJobResponse(refreshMutation.data) ? undefined : refreshMutation.data;
-  const selectedRefreshResult = refreshResult && (selectedDataType === "ema" ? refreshResult.asset === selectedAsset || refreshResult.status === "enriched" : refreshResult.dataset_id === refreshTargetKey) ? refreshResult : undefined;
+  const selectedRefreshResult = refreshResult && (
+    selectedDataType === "ema"
+      ? refreshResult.asset === selectedAsset || refreshResult.status === "enriched"
+      : featureCategoryForDataType(selectedDataType)
+        ? refreshResult.asset === selectedAsset && refreshResult.family === featureCategoryForDataType(selectedDataType)?.family
+        : refreshResult.dataset_id === refreshTargetKey
+  ) ? refreshResult : undefined;
   const selectedRefreshError = refreshRequestKey(refreshMutation.variables) === refreshTargetKey ? refreshMutation.error : undefined;
   const selectedTypeLabel = typeOptions.find((option) => option.dataType === selectedDataType)?.label ?? titleize(selectedDataType || "data");
   const refreshJob = refreshJobQuery.data?.job ?? null;
@@ -268,7 +318,7 @@ export function DataPage() {
     }
     void queryClient.invalidateQueries({ queryKey: ["market-data-catalog"] });
     if (selectedDataset?.dataset_id) {
-      void queryClient.invalidateQueries({ queryKey: ["market-data-candles", selectedDataset.dataset_id] });
+      void queryClient.invalidateQueries({ queryKey: ["market-data-rows", selectedDataset.dataset_id] });
     }
     const timeout = window.setTimeout(() => setActiveRefreshJobId(null), refreshJob.status === "completed" ? 2500 : 5000);
     return () => window.clearTimeout(timeout);
@@ -347,7 +397,7 @@ export function DataPage() {
                     className="button button--primary"
                     disabled={!canRefreshType || isRefreshingType}
                     onClick={() => refreshTarget && refreshMutation.mutate(refreshTarget)}
-                    title={canRefreshType ? `Fill ${selectedTypeLabel.toLowerCase()} to current time` : "Fill is supported for candle and EMA data only"}
+                    title={canRefreshType ? `Fill ${selectedTypeLabel.toLowerCase()} to current time` : "Fill is supported for candle, EMA, and feature data"}
                     type="button"
                   >
                     <UploadCloud aria-hidden="true" />
@@ -361,7 +411,7 @@ export function DataPage() {
                 <div className="progress-card">
                   <div className="progress-card__header">
                     <strong>Updating {selectedTypeLabel.toLowerCase()}</strong>
-                    <span>{refreshJob ? `${refreshJob.status} · ${refreshJob.current_step ?? "waiting"}` : selectedDataType === "ema" ? "Derived candle scan + EMA enrichment" : "OKX download + Parquet persist + derived rebuild"}</span>
+                    <span>{refreshJob ? `${refreshJob.status} · ${refreshJob.current_step ?? "waiting"}` : selectedDataType === "ema" ? "Derived candle scan + EMA enrichment" : featureCategoryForDataType(selectedDataType) ? "Derived candle scan + feature enrichment" : "OKX download + Parquet persist + derived rebuild"}</span>
                   </div>
                   <div className="progress-rail" aria-label="Data fill in progress">
                     <span />
@@ -372,6 +422,12 @@ export function DataPage() {
                         <span>Read derived candles</span>
                         <span>Compute recursive EMA</span>
                         <span>Persist enriched Parquet</span>
+                      </>
+                    ) : featureCategoryForDataType(selectedDataType) ? (
+                      <>
+                        <span>Read derived candles</span>
+                        <span>Compute feature family</span>
+                        <span>Persist feature Parquet</span>
                       </>
                     ) : (
                       <>
@@ -442,27 +498,14 @@ export function DataPage() {
               </TerminalPanel>
             </div>
 
-            <TerminalPanel title={selectedDataType === "ema" ? "EMA Preview" : "Candle Preview"}>
-              {selectedDataset?.data_type !== "candles" ? <div className="state-line">Preview is available for candle datasets only.</div> : null}
-              {candlePreviewQuery.isLoading ? <div className="state-line">Loading candle preview...</div> : null}
-              {candlePreviewQuery.error ? <div className="state-line state-line--error">{candlePreviewQuery.error.message}</div> : null}
-              {candlePreviewQuery.data ? (
+            <TerminalPanel title={selectedDataType === "ema" ? "EMA Preview" : featureCategoryForDataType(selectedDataType) ? "Feature Preview" : "Candle Preview"}>
+              {rowPreviewQuery.isLoading ? <div className="state-line">Loading row preview...</div> : null}
+              {rowPreviewQuery.error ? <div className="state-line state-line--error">{rowPreviewQuery.error.message}</div> : null}
+              {rowPreviewQuery.data ? (
                 <DataTable
-                  columns={[
-                    { key: "timestamp", header: "Timestamp", render: (row) => <span className="mono">{formatTimestamp(String(row.timestamp ?? row.ts ?? ""))}</span> },
-                    { key: "open", header: "Open", align: "right", render: (row) => formatCompactValue(row.open) },
-                    { key: "high", header: "High", align: "right", render: (row) => formatCompactValue(row.high) },
-                    { key: "low", header: "Low", align: "right", render: (row) => formatCompactValue(row.low) },
-                    { key: "close", header: "Close", align: "right", render: (row) => formatCompactValue(row.close) },
-                    ...(selectedDataType === "ema" ? [
-                      { key: "ema_36", header: "EMA 36", align: "right" as const, render: (row: Record<string, unknown>) => formatCompactValue(row.ema_36) },
-                      { key: "ema_144", header: "EMA 144", align: "right" as const, render: (row: Record<string, unknown>) => formatCompactValue(row.ema_144) },
-                      { key: "ema_676", header: "EMA 676", align: "right" as const, render: (row: Record<string, unknown>) => formatCompactValue(row.ema_676) }
-                    ] : []),
-                    { key: "volume", header: "Volume", align: "right", render: (row) => formatCompactValue(row.volume ?? row.vol) }
-                  ]}
+                  columns={previewColumns(selectedDataType, rowPreviewQuery.data.rows)}
                   getRowKey={(row) => String(row.timestamp ?? row.ts ?? JSON.stringify(row))}
-                  rows={candlePreviewQuery.data.rows}
+                  rows={rowPreviewQuery.data.rows}
                 />
               ) : null}
             </TerminalPanel>
@@ -471,4 +514,33 @@ export function DataPage() {
       />
     </div>
   );
+}
+
+function previewColumns(selectedDataType: string, rows: Array<Record<string, unknown>>) {
+  if (featureCategoryForDataType(selectedDataType)) {
+    const sample = rows[0] ?? {};
+    const featureKeys = Object.keys(sample).filter((key) => key !== "timestamp" && key !== "ts").slice(0, 8);
+    return [
+      { key: "timestamp", header: "Timestamp", render: (row: Record<string, unknown>) => <span className="mono">{formatTimestamp(String(row.timestamp ?? row.ts ?? ""))}</span> },
+      ...featureKeys.map((key) => ({
+        key,
+        header: titleize(key),
+        align: "right" as const,
+        render: (row: Record<string, unknown>) => formatCompactValue(row[key])
+      }))
+    ];
+  }
+  return [
+    { key: "timestamp", header: "Timestamp", render: (row: Record<string, unknown>) => <span className="mono">{formatTimestamp(String(row.timestamp ?? row.ts ?? ""))}</span> },
+    { key: "open", header: "Open", align: "right" as const, render: (row: Record<string, unknown>) => formatCompactValue(row.open) },
+    { key: "high", header: "High", align: "right" as const, render: (row: Record<string, unknown>) => formatCompactValue(row.high) },
+    { key: "low", header: "Low", align: "right" as const, render: (row: Record<string, unknown>) => formatCompactValue(row.low) },
+    { key: "close", header: "Close", align: "right" as const, render: (row: Record<string, unknown>) => formatCompactValue(row.close) },
+    ...(selectedDataType === "ema" ? [
+      { key: "ema_36", header: "EMA 36", align: "right" as const, render: (row: Record<string, unknown>) => formatCompactValue(row.ema_36) },
+      { key: "ema_144", header: "EMA 144", align: "right" as const, render: (row: Record<string, unknown>) => formatCompactValue(row.ema_144) },
+      { key: "ema_676", header: "EMA 676", align: "right" as const, render: (row: Record<string, unknown>) => formatCompactValue(row.ema_676) }
+    ] : []),
+    { key: "volume", header: "Volume", align: "right" as const, render: (row: Record<string, unknown>) => formatCompactValue(row.volume ?? row.vol) }
+  ];
 }

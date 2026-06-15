@@ -247,6 +247,49 @@ def read_stage1_iteration_detail(*, workspace_root: Path, session: dict[str, Any
     }
 
 
+def read_stage4_candidate_detail(*, workspace_root: Path, session: dict[str, Any], candidate_id: str) -> dict[str, Any]:
+    artifact_root = _artifact_root(workspace_root, session)
+    promotion_root = artifact_root / "promotion"
+    realized_path = promotion_root / "stage4_realized_expectancy.json"
+    ledger_path = promotion_root / "stage4_trade_ledger.json"
+    realized = _read_json_if_exists(realized_path)
+    ledger = _read_json_if_exists(ledger_path)
+    if realized is None or ledger is None:
+        raise FileNotFoundError("Stage 4 detail is not available for this session")
+
+    candidate = next(
+        (
+            row
+            for row in realized.get("candidates", [])
+            if isinstance(row, dict) and str(row.get("candidate_id")) == candidate_id
+        ),
+        None,
+    )
+    if candidate is None:
+        raise FileNotFoundError(f"Stage 4 candidate not found: {candidate_id}")
+
+    ledger_candidate = next(
+        (
+            row
+            for row in ledger.get("candidates", [])
+            if isinstance(row, dict) and str(row.get("candidate_id")) == candidate_id
+        ),
+        None,
+    )
+    trades = ledger_candidate.get("trades", []) if isinstance(ledger_candidate, dict) else []
+    if not isinstance(trades, list):
+        trades = []
+
+    return {
+        "session_id": session["session_id"],
+        "run_id": realized.get("run_id"),
+        "created_at": realized.get("created_at"),
+        "candidate": candidate,
+        "trade_count": len(trades),
+        "trades": trades,
+    }
+
+
 def repair_stage1_iteration_bundle(*, workspace_root: Path, iteration_root: Path) -> dict[str, Any]:
     artifact_root = iteration_root.parent.parent
     session_manifest = _read_json_if_exists(artifact_root / "manifest.json") or {}

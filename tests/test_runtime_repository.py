@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import create_engine, insert, select, update
 
@@ -71,6 +71,49 @@ def test_runtime_repository_serializes_datetime_values_inside_wake_json_payloads
 
     assert stored["strategy_decision"]["diagnostics"]["created_at"] == "2026-06-06T04:12:21Z"
     assert stored["exchange_snapshot"]["positions"][0]["opened_at"] == "2026-06-06T04:12:21Z"
+
+
+def test_runtime_repository_bulk_upserts_signals_and_ignores_duplicates():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    base_signal = {
+        "signal_set_key": "vegas_ema:AAVE:AAVE-vegas_ema-canonical",
+        "signal_engine_id": "vegas_ema",
+        "signal_engine_version": "0.1",
+        "asset": "AAVE",
+        "instrument": "AAVE-USDT-SWAP",
+        "data_refs": [],
+        "payload_schema": "signal_packet.v2",
+    }
+
+    repository.upsert_signals(
+        [
+            {
+                **base_signal,
+                "signal_id": "signal-1",
+                "timestamp": "2026-06-01T00:00:00Z",
+                "payload": {"timestamp": "2026-06-01T00:00:00Z"},
+            },
+            {
+                **base_signal,
+                "signal_id": "signal-2",
+                "timestamp": datetime(2026, 6, 1, 0, 5, tzinfo=UTC),
+                "payload": {"timestamp": "2026-06-01T00:05:00Z"},
+            },
+            {
+                **base_signal,
+                "signal_id": "signal-1",
+                "timestamp": "2026-06-01T00:00:00Z",
+                "payload": {"timestamp": "duplicate"},
+            },
+        ]
+    )
+
+    rows = repository.list_signals(signal_set_key="vegas_ema:AAVE:AAVE-vegas_ema-canonical")
+
+    assert [row["signal_id"] for row in rows] == ["signal-1", "signal-2"]
+    assert rows[0]["payload"] == {"timestamp": "2026-06-01T00:00:00Z"}
 
 
 def test_runtime_repository_enqueues_and_dedupes_active_jobs_by_scope():
@@ -208,6 +251,52 @@ def test_runtime_repository_reports_worker_runtime_status():
     assert online["online"] is True
     assert online["active_worker_count"] == 1
     assert online["workers"][0]["worker_id"] == "worker-1"
+
+
+def test_runtime_repository_ignores_generic_celery_unknown_heartbeat():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+
+    repository.record_worker_heartbeat("celery-unknown", status="idle")
+    runtime = repository.get_worker_runtime_status()
+
+    assert runtime["status"] == "offline"
+    assert runtime["online"] is False
+    assert runtime["active_worker_count"] == 0
+    assert runtime["workers"] == []
+
+
+def test_runtime_repository_ignores_generic_celery_unknown_when_real_worker_is_active():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+
+    repository.record_worker_heartbeat("celery-unknown", status="idle")
+    repository.record_worker_heartbeat("worker-1", status="idle")
+    runtime = repository.get_worker_runtime_status()
+
+    assert runtime["status"] == "online"
+    assert runtime["active_worker_count"] == 1
+    assert [worker["worker_id"] for worker in runtime["workers"]] == ["worker-1"]
+
+
+def test_runtime_repository_counts_generic_celery_unknown_as_stale_after_cutoff():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    now = datetime.now(UTC)
+
+    repository.record_worker_heartbeat(
+        "celery-unknown",
+        status="idle",
+        started_at=now - timedelta(seconds=60),
+    )
+
+    runtime = repository.get_worker_runtime_status(stale_after_seconds=15)
+
+    assert runtime["status"] == "offline"
+    assert runtime["stale_worker_count"] == 0
 
 
 def test_runtime_repository_job_heartbeat_refreshes_worker_runtime_status():
@@ -1235,7 +1324,7 @@ def test_runtime_repository_persists_execution_bundle_route_wake_and_signal_cons
     assert route["route_id"] == "aave-live"
     assert route["enabled"] is False
     assert route["manually_armed"] is False
-    assert route["cron_interval_minutes"] == 15
+    assert route["cron_interval_minutes"] == 5
     assert route["exchange_account"] == "default"
     assert route["margin_allocation_pct"] == 30.0
     assert route["leverage"] == 5.0
@@ -1372,7 +1461,7 @@ def test_runtime_repository_reuses_one_deployment_route_per_asset_account_exchan
     assert live_profile_route["active_bundle_id"] == "aave-bollinger-bundle"
     assert live_profile_route["signal_engine_id"] == "bollinger"
     assert live_profile_route["strategy_id"] == "aave-bollinger"
-    assert live_profile_route["cron_interval_minutes"] == 15
+    assert live_profile_route["cron_interval_minutes"] == 5
 
 
 def test_runtime_repository_archives_deployment_routes_out_of_active_list():

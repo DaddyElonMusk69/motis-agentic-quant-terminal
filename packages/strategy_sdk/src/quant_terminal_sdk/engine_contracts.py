@@ -7,7 +7,15 @@ from pathlib import Path
 from typing import Any, Literal
 
 
-SUPPORTED_REQUIRED_DATA_TYPES = {"candles"}
+SUPPORTED_REQUIRED_DATA_TYPES = {
+    "candles",
+    "feature_base_candle",
+    "feature_volatility_range",
+    "feature_volume",
+    "feature_ema_vegas_structure",
+    "feature_bollinger",
+    "feature_regime_momentum",
+}
 SUPPORTED_REQUIRED_DATA_ORIGINS = {"raw", "derived"}
 SUPPORTED_PACKET_SCHEMA = "signal_packet.v2"
 FORBIDDEN_SIGNAL_PACKET_FIELDS = {

@@ -52,6 +52,7 @@ class RuntimeRepository:
     ) -> dict[str, Any]:
         now = datetime.now(UTC)
         with self.engine.begin() as connection:
+            self._requeue_expired_running_jobs(connection, now=now)
             active = connection.execute(
                 select(jobs)
                 .where(jobs.c.scope_key == scope_key)
@@ -138,6 +139,7 @@ class RuntimeRepository:
                 for row in connection.execute(
                     select(worker_heartbeats).order_by(worker_heartbeats.c.last_seen_at.desc())
                 ).mappings()
+                if not _is_ignored_worker_heartbeat(dict(row))
             ]
             queued_count = int(
                 connection.execute(
@@ -512,6 +514,19 @@ class RuntimeRepository:
         }
         with self.engine.begin() as connection:
             connection.execute(self._insert_signal_ignore_conflict(values))
+
+    def upsert_signals(self, signal_rows: list[dict[str, Any]]) -> None:
+        values = [
+            {
+                **signal,
+                "timestamp": _coerce_datetime(signal["timestamp"]),
+            }
+            for signal in signal_rows
+        ]
+        if not values:
+            return
+        with self.engine.begin() as connection:
+            connection.execute(self._insert_signals_ignore_conflict(values))
 
     def replace_signals_for_set(self, signal_set_key: str, signal_rows: list[dict[str, Any]]) -> None:
         values = [
@@ -898,6 +913,16 @@ class RuntimeRepository:
             row = connection.execute(statement).mappings().first()
             return dict(row) if row else None
 
+    def get_data_ref(
+        self,
+        *,
+        asset: str,
+        timeframe: str,
+        origin: str,
+        data_type: str,
+    ) -> dict[str, Any] | None:
+        return self.get_candle_ref(asset=asset, timeframe=timeframe, origin=origin, data_type=data_type)
+
     def list_signals(
         self,
         *,
@@ -1067,7 +1092,7 @@ class RuntimeRepository:
             "leverage": _execution_setup_leverage(bundle.get("execution_setup")),
             "manual_sizing_enabled": False,
             "scheduler_status": "stopped",
-            "auto_submit_enabled": False,
+            "auto_submit_enabled": True,
             "last_wake_at": None,
             "last_wake_id": None,
             "next_wake_at": None,
@@ -1743,6 +1768,13 @@ class RuntimeRepository:
             )
         return insert(signals).values(**values).prefix_with("OR IGNORE")
 
+    def _insert_signals_ignore_conflict(self, values: list[dict[str, Any]]):
+        if self.engine.dialect.name == "postgresql":
+            return postgres_insert(signals).values(values).on_conflict_do_nothing(
+                index_elements=["signal_id"]
+            )
+        return insert(signals).values(values).prefix_with("OR IGNORE")
+
     def _insert_signal_engine_ignore_conflict(self, values: dict[str, Any]):
         if self.engine.dialect.name == "postgresql":
             return postgres_insert(signal_engines).values(**values).on_conflict_do_nothing(
@@ -1895,9 +1927,9 @@ def _execution_setup_cron_minutes(execution_setup: Any) -> int:
         if value is None and isinstance(nested, dict):
             value = nested.get("cron_interval_minutes") or nested.get("cron_interval")
     try:
-        minutes = int(value) if value is not None else 15
+        minutes = int(value) if value is not None else 5
     except (TypeError, ValueError):
-        minutes = 15
+        minutes = 5
     return max(1, minutes)
 
 
@@ -2053,6 +2085,10 @@ def _normalize_worker_heartbeat_row(row: dict[str, Any]) -> dict[str, Any]:
         "started_at": _coerce_datetime(row["started_at"]),
         "last_seen_at": _coerce_datetime(row["last_seen_at"]),
     }
+
+
+def _is_ignored_worker_heartbeat(row: dict[str, Any]) -> bool:
+    return row.get("worker_id") == "celery-unknown"
 
 
 def _coerce_date(value: str | date) -> date:

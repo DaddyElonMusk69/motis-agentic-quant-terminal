@@ -109,9 +109,9 @@ class RouteLifecycleScheduler:
 
 def _interval_seconds(route: dict[str, Any]) -> int:
     try:
-        minutes = int(route.get("cron_interval_minutes") or 15)
+        minutes = int(route.get("cron_interval_minutes") or 5)
     except (TypeError, ValueError):
-        minutes = 15
+        minutes = 5
     return max(1, minutes) * 60
 
 

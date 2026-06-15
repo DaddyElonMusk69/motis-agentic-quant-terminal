@@ -67,7 +67,7 @@ def _engine_parameters(route: dict[str, Any]) -> dict[str, Any]:
 def _restore_packet_audit_fields(payload: dict[str, Any]) -> dict[str, Any]:
     evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
     restored = dict(payload)
-    for key in ("interactions", "charts"):
+    for key in ("interactions", "charts", "features"):
         if key in evidence and key not in restored:
             restored[key] = evidence[key]
     return restored

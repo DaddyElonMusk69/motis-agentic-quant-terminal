@@ -34,6 +34,7 @@ from quant_terminal_worker.adapters.exchange import ExchangeAdapterError, build_
 from quant_terminal_worker.adapters.okx import OKXAdapter
 from quant_terminal_worker.backtests.stage1 import run_stage1_backtest
 from quant_terminal_worker.ingestion.ema_enrichment import enrich_derived_ema_datasets
+from quant_terminal_worker.ingestion.feature_enrichment import enrich_feature_family_datasets
 from quant_terminal_worker.ingestion.raw_candle_fill import fill_raw_candle_dataset
 from quant_terminal_worker.ingestion.legacy_signals import import_legacy_signal_sets
 from quant_terminal_worker.ingestion.signal_pool_extension import extend_signal_pool_from_local_candles
@@ -52,6 +53,7 @@ from quant_terminal_worker.stage1.workspace import create_stage1_iteration_works
 from quant_terminal_worker.stage1.workspace import build_stage1_gate_summary
 from quant_terminal_worker.stage1.workspace import list_stage1_iterations
 from quant_terminal_worker.stage1.workspace import read_stage1_iteration_detail
+from quant_terminal_worker.stage1.workspace import read_stage4_candidate_detail
 from quant_terminal_worker.stage1.scoring import run_stage1a_training_score
 from quant_terminal_worker.stage1.scoring import run_stage1a_score
 from quant_terminal_worker.stage1.scoring import run_stage1a_canonical_full_cycle
@@ -238,12 +240,12 @@ class DeploymentRouteSettingsRequest(BaseModel):
     margin_allocation_pct: float = Field(default=10.0, ge=0.1, le=100.0)
     leverage: float = Field(default=1.0, ge=1.0, le=125.0)
     manual_sizing_enabled: bool = False
-    auto_submit_enabled: bool = False
+    auto_submit_enabled: bool = True
 
 
 class DeploymentRouteStartRequest(BaseModel):
     confirm_live: bool = False
-    auto_submit_enabled: bool = False
+    auto_submit_enabled: bool = True
 
 
 DEFAULT_WALK_FORWARD_TEMPLATES: list[dict[str, Any]] = [
@@ -1138,6 +1140,23 @@ def create_app(
             ),
         }
 
+    @app.get("/api/v1/research/stage1-sessions/{session_id}/stage4/candidates/{candidate_id}/details")
+    def get_stage4_candidate_detail(session_id: str, candidate_id: str) -> dict[str, Any]:
+        session = get_runtime_repository().get_stage1_research_session(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Stage 1 session not found")
+        try:
+            detail = read_stage4_candidate_detail(
+                workspace_root=Path.cwd(),
+                session=session,
+                candidate_id=candidate_id,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"detail": _relative_nested_paths(Path.cwd(), detail)}
+
     @app.post("/api/v1/research/stage1-sessions/{session_id}/promote-execution-bundle")
     def promote_execution_bundle(
         session_id: str,
@@ -1845,6 +1864,16 @@ def create_app(
             "rows": read_parquet_candles(Path(registration["storage_uri"]), limit=limit),
         }
 
+    @app.get("/api/v1/market-data/{dataset_id}/rows")
+    def read_market_data_rows(dataset_id: str, limit: int = 200) -> dict[str, Any]:
+        registration = get_market_data_repository().get_ref(dataset_id)
+        if registration is None:
+            raise HTTPException(status_code=404, detail="dataset not found")
+        return {
+            "dataset_id": dataset_id,
+            "rows": read_parquet_candles(Path(registration["storage_uri"]), limit=limit),
+        }
+
     @app.post("/api/v1/market-data/{dataset_id}/refresh")
     def refresh_market_data(dataset_id: str) -> dict[str, Any]:
         registration = get_market_data_repository().get_ref(dataset_id)
@@ -1890,6 +1919,25 @@ def create_app(
         if queued:
             return queued
         return enrich_derived_ema_datasets(repository=get_market_data_repository(), asset=asset)
+
+    @app.post("/api/v1/market-data/assets/{asset}/features/{family}/refresh")
+    def refresh_asset_feature_family_data(asset: str, family: str) -> dict[str, Any]:
+        asset = asset.upper()
+        queued = enqueue_runtime_job(
+            get_runtime_repository(),
+            job_type="market_data_feature_refresh",
+            scope_key=f"asset:{asset}:feature:{family}",
+            payload={"asset": asset, "family": family},
+            current_step="queued",
+        )
+        if queued:
+            return queued
+        return enrich_feature_family_datasets(
+            repository=get_market_data_repository(),
+            asset=asset,
+            family=family,
+            target_root=Path(".data/market-data"),
+        )
 
     return app
 
@@ -2438,14 +2486,12 @@ def _required_data_refs(*, repository: Any, engine: dict[str, Any], asset: str) 
     refs: list[dict[str, Any]] = []
     missing: list[str] = []
     for requirement in engine.get("required_data") or []:
-        if requirement.get("data_type") != "candles":
-            missing.append(str(requirement.get("data_type") or "unsupported data"))
-            continue
+        data_type = str(requirement.get("data_type") or "").strip()
         origin = requirement.get("origin") or requirement.get("data_origin") or "raw"
         timeframe = requirement.get("timeframe") or "5m"
-        ref = repository.get_candle_ref(asset=asset, data_type="candles", origin=origin, timeframe=timeframe)
+        ref = repository.get_candle_ref(asset=asset, data_type=data_type or "candles", origin=origin, timeframe=timeframe)
         if ref is None:
-            missing.append(f"{origin} candles {timeframe}")
+            missing.append(f"{origin} {data_type or 'candles'} {timeframe}")
             continue
         refs.append(ref)
     return refs, missing

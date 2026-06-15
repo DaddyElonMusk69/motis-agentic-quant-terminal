@@ -8,6 +8,7 @@ from typing import Any
 from quant_terminal_sdk.market_data_reader import MarketDataReader
 from quant_terminal_worker.adapters.okx import OKXAdapter
 from quant_terminal_worker.ingestion.ema_enrichment import enrich_derived_ema_datasets
+from quant_terminal_worker.ingestion.feature_enrichment import enrich_feature_family_datasets
 from quant_terminal_worker.ingestion.raw_candle_fill import fill_raw_candle_dataset
 from quant_terminal_worker.ingestion.signal_pool_extension import extend_signal_pool_from_local_candles
 from quant_terminal_worker.stage0.execution import execute_stage0_candidate
@@ -33,6 +34,7 @@ def execute_job(
     handlers = {
         "market_data_refresh": _execute_market_data_refresh,
         "market_data_ema_refresh": _execute_market_data_ema_refresh,
+        "market_data_feature_refresh": _execute_market_data_feature_refresh,
         "signal_pool_extend": _execute_signal_pool_extend,
         "stage0_candidate": _execute_stage0_candidate_job,
         "stage0_candidate_batch": _execute_stage0_candidate_batch,
@@ -147,6 +149,27 @@ def _execute_market_data_ema_refresh(
     return enrich_derived_ema_datasets(repository=market_data_repository, asset=asset)
 
 
+def _execute_market_data_feature_refresh(
+    *,
+    repository: Any,
+    job: dict[str, Any],
+    workspace_root: Path,
+    market_data_repository: Any | None = None,
+) -> dict[str, Any]:
+    del repository
+    if market_data_repository is None:
+        raise ValueError("market data repository is required for market_data_feature_refresh jobs")
+    payload = job.get("payload") or {}
+    asset = str(payload["asset"]).upper()
+    family = str(payload["family"])
+    return enrich_feature_family_datasets(
+        repository=market_data_repository,
+        asset=asset,
+        family=family,
+        target_root=workspace_root / ".data" / "market-data",
+    )
+
+
 def _execute_signal_pool_extend(
     *,
     repository: Any,
@@ -157,12 +180,17 @@ def _execute_signal_pool_extend(
     del market_data_repository
     payload = job.get("payload") or {}
     repository.heartbeat_job(job["job_id"], current_step="signal_pool_extend")
+
+    def report_progress(step: str) -> None:
+        repository.heartbeat_job(job["job_id"], current_step=step)
+
     return extend_signal_pool_from_local_candles(
         workspace_root=workspace_root,
         repository=repository,
         signal_engine_id=str(payload["signal_engine_id"]),
         asset=str(payload["asset"]),
         target_end=payload.get("target_end"),
+        progress_callback=report_progress,
     )
 
 

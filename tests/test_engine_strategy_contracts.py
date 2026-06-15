@@ -348,6 +348,100 @@ def test_5m_vegas_hft_base_skips_without_required_context():
     assert decision["reason_code"] == "missing_required_5m_2h_or_1d_context"
 
 
+def test_recursive_vegas_features_base_strategy_validates_and_registry_points_to_it():
+    registry = json.loads(Path("artifacts/signal_engine/engine_registry.json").read_text())
+    entry = registry["vegas_ema_recursive_features"]
+
+    assert entry["code_ref"]["base_strategy_path"] == "packages/strategy_modules/src/quant_terminal_strategies/vegas_ema_recursive_features_base.py"
+    assert validate_strategy_module(entry["code_ref"]["base_strategy_path"]) == []
+
+
+def test_recursive_vegas_features_base_enters_long_with_aligned_features():
+    strategy = importlib.import_module("quant_terminal_strategies.vegas_ema_recursive_features_base")
+
+    decision = strategy.decide(
+        {
+            "signal": {
+                "signal_id": "vegas_ema_recursive_features:ETH:test:20260608T060000Z",
+                "payload": _recursive_feature_payload(
+                    active_timeframes=["2h", "4h"],
+                    fast_mid_gap=0.8,
+                    mid_slow_gap=0.6,
+                    ema_stack_state="bull_stack",
+                    returns_5m=[0.03, 0.04, 0.05],
+                    return_2h_12=0.8,
+                    return_1d_48=2.4,
+                    bb_position_5m=54,
+                    atr_pct_5m=0.22,
+                ),
+            },
+            "runtime_mode": "backtest",
+        }
+    )
+
+    assert decision["action"] == "ENTER"
+    assert decision["direction"] == "LONG"
+    assert decision["reason_code"] == "feature_aligned_recursive_vegas_long"
+    assert decision["diagnostics"]["feature_bias"] == "LONG"
+
+
+def test_recursive_vegas_features_base_enters_short_with_aligned_features():
+    strategy = importlib.import_module("quant_terminal_strategies.vegas_ema_recursive_features_base")
+
+    decision = strategy.decide(
+        {
+            "signal": {
+                "signal_id": "vegas_ema_recursive_features:ETH:test:20260608T060000Z",
+                "payload": _recursive_feature_payload(
+                    active_timeframes=["2h", "4h"],
+                    fast_mid_gap=-0.7,
+                    mid_slow_gap=-0.5,
+                    ema_stack_state="bear_stack",
+                    returns_5m=[-0.03, -0.04, -0.05],
+                    return_2h_12=-0.8,
+                    return_1d_48=-2.1,
+                    bb_position_5m=46,
+                    atr_pct_5m=0.2,
+                ),
+            },
+            "runtime_mode": "backtest",
+        }
+    )
+
+    assert decision["action"] == "ENTER"
+    assert decision["direction"] == "SHORT"
+    assert decision["reason_code"] == "feature_aligned_recursive_vegas_short"
+    assert decision["diagnostics"]["feature_bias"] == "SHORT"
+
+
+def test_recursive_vegas_features_base_skips_overextended_or_too_volatile_signals():
+    strategy = importlib.import_module("quant_terminal_strategies.vegas_ema_recursive_features_base")
+
+    decision = strategy.decide(
+        {
+            "signal": {
+                "signal_id": "vegas_ema_recursive_features:ETH:test:20260608T060000Z",
+                "payload": _recursive_feature_payload(
+                    active_timeframes=["2h", "4h"],
+                    fast_mid_gap=0.8,
+                    mid_slow_gap=0.6,
+                    ema_stack_state="bull_stack",
+                    returns_5m=[0.2, 0.2, 0.2],
+                    return_2h_12=1.4,
+                    return_1d_48=3.0,
+                    bb_position_5m=98,
+                    atr_pct_5m=1.3,
+                ),
+            },
+            "runtime_mode": "backtest",
+        }
+    )
+
+    assert decision["action"] == "SKIP"
+    assert decision["direction"] == "FLAT"
+    assert decision["reason_code"] == "feature_context_overextended_or_volatile"
+
+
 def test_current_aave_execution_bundle_validates_with_legacy_aliases():
     bundle_id = "aave-vegas_ema-aave-vegas_ema-strategy-v01-3bee1a88652e"
 
@@ -399,3 +493,70 @@ def _cluster_payload(
 
 def _candle_row(index: int, close: float) -> list[object]:
     return [f"2026-06-08T00:{index:02d}:00Z", str(close), str(close), str(close), str(close), "1", "1", "1", 1]
+
+
+def _recursive_feature_payload(
+    *,
+    active_timeframes: list[str],
+    fast_mid_gap: float,
+    mid_slow_gap: float,
+    ema_stack_state: str,
+    returns_5m: list[float],
+    return_2h_12: float,
+    return_1d_48: float,
+    bb_position_5m: float,
+    atr_pct_5m: float,
+) -> dict[str, object]:
+    feature_window_5m = [
+        {
+            "timestamp": f"2026-06-08T00:{index:02d}:00Z",
+            "base_candle": {"return_pct": value, "close_location_pct": 60},
+            "volatility_range": {"atr_pct_14": atr_pct_5m, "rolling_range_pct_12": abs(value) * 10},
+            "ema_vegas_structure": {
+                "fast_mid_gap_pct": fast_mid_gap,
+                "mid_slow_gap_pct": mid_slow_gap,
+                "ema_stack_state": ema_stack_state,
+            },
+            "bollinger": {"bb_position_pct": bb_position_5m, "bb_bandwidth_pct": 1.2},
+            "regime_momentum": {"return_pct_12": sum(returns_5m), "return_pct_48": sum(returns_5m)},
+        }
+        for index, value in enumerate(returns_5m)
+    ]
+    features = {
+        "5m": {"latest": feature_window_5m[-1], "window": feature_window_5m, "window_bars": 24},
+        "2h": {
+            "latest": {
+                "ema_vegas_structure": {
+                    "fast_mid_gap_pct": fast_mid_gap,
+                    "mid_slow_gap_pct": mid_slow_gap,
+                    "ema_stack_state": ema_stack_state,
+                },
+                "regime_momentum": {"return_pct_12": return_2h_12, "return_pct_48": return_2h_12},
+                "bollinger": {"bb_position_pct": 58 if return_2h_12 > 0 else 42},
+            },
+            "window": [],
+            "window_bars": 12,
+        },
+        "1d": {
+            "latest": {
+                "ema_vegas_structure": {"ema_stack_state": ema_stack_state},
+                "regime_momentum": {"return_pct_12": return_1d_48 / 2, "return_pct_48": return_1d_48},
+                "bollinger": {"bb_position_pct": 62 if return_1d_48 > 0 else 38},
+            },
+            "window": [],
+            "window_bars": 10,
+        },
+    }
+    return {
+        "schema_version": "signal_packet.v2",
+        "asset": "ETH",
+        "instrument": "ETH-USDT-SWAP",
+        "timestamp": "2026-06-08T06:00:00Z",
+        "active_timeframes": active_timeframes,
+        "features": features,
+        "evidence": {
+            "pattern": "vegas_ema_tunnel_proximity_with_features",
+            "active_timeframes": active_timeframes,
+            "features": features,
+        },
+    }

@@ -8,6 +8,7 @@ from quant_terminal_api.main import create_app
 class FakeMarketDataRepository:
     def __init__(self):
         self.updated_registration = None
+        self.upserted_registration = None
 
     def list_refs(self):
         return [
@@ -38,6 +39,9 @@ class FakeMarketDataRepository:
 
     def update_ref(self, registration):
         self.updated_registration = registration
+
+    def upsert_ref(self, registration):
+        self.upserted_registration = registration
 
 
 def fake_fill_service(*, registration, repository, adapter):
@@ -89,6 +93,36 @@ def test_market_data_ema_refresh_endpoint_queues_worker_job():
     assert response.json()["accepted"] is True
     assert response.json()["job"]["job_type"] == "market_data_ema_refresh"
     assert response.json()["job"]["payload"] == {"asset": "BTC"}
+
+
+def test_market_data_feature_refresh_endpoint_queues_worker_job():
+    class FakeRuntimeRepository:
+        def enqueue_job(self, *, job_type, scope_key, payload, current_step):
+            return {
+                "job_id": "job-feature-btc-bollinger",
+                "job_type": job_type,
+                "scope_key": scope_key,
+                "status": "queued",
+                "payload": payload,
+                "result": {},
+                "error": {},
+                "current_step": current_step,
+            }
+
+    client = TestClient(
+        create_app(
+            market_data_repository=FakeMarketDataRepository(),
+            runtime_repository=FakeRuntimeRepository(),
+        )
+    )
+
+    response = client.post("/api/v1/market-data/assets/btc/features/bollinger/refresh")
+
+    assert response.status_code == 200
+    assert response.json()["accepted"] is True
+    assert response.json()["job"]["job_type"] == "market_data_feature_refresh"
+    assert response.json()["job"]["scope_key"] == "asset:BTC:feature:bollinger"
+    assert response.json()["job"]["payload"] == {"asset": "BTC", "family": "bollinger"}
 
 
 def test_market_data_refresh_endpoint_fills_dataset():

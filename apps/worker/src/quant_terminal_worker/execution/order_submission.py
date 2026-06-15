@@ -127,7 +127,6 @@ def _submit_intent(*, adapter: Any, intent: dict[str, Any]) -> dict[str, Any]:
 
 def _validate_intents(*, route: dict[str, Any], intents: list[dict[str, Any]]) -> list[str]:
     blockers: list[str] = []
-    max_notional = _numeric((route.get("risk_limits") or {}).get("max_notional_usd"))
     for intent in intents:
         if _numeric(intent.get("quantity")) <= 0:
             blockers.append("missing_order_quantity")
@@ -136,8 +135,6 @@ def _validate_intents(*, route: dict[str, Any], intents: list[dict[str, Any]]) -
         reduce_only = _truthy(intent.get("reduce_only"))
         if action != "UPDATE_PROTECTION" and not reduce_only and notional <= 0:
             blockers.append("missing_order_notional_usd")
-        if max_notional > 0 and notional > max_notional:
-            blockers.append("order_notional_exceeds_route_limit")
     return list(dict.fromkeys(blockers))
 
 

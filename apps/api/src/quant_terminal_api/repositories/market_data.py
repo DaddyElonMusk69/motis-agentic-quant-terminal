@@ -90,6 +90,10 @@ class PostgresMarketDataRepository:
         with self.engine.begin() as connection:
             connection.execute(statement)
 
+    def upsert_ref(self, registration: dict[str, Any]) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(build_market_data_ref_upsert(registration))
+
     def list_derived_refs_for_raw(self, registration: dict[str, Any]) -> list[dict[str, Any]]:
         statement = self.build_derived_refs_for_raw_statement(registration)
         with self.engine.connect() as connection:

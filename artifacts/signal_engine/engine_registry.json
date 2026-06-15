@@ -399,4 +399,213 @@
       }
     }
   }
+,
+  "vegas_ema_recursive_features": {
+    "signal_engine_id": "vegas_ema_recursive_features",
+    "version": "0.1",
+    "name": "Vegas EMA Recursive + Features",
+    "description": "5m Vegas EMA cluster signal engine with compact neutral feature snapshots for 5m, 2h, and 1d context.",
+    "code_ref": {
+      "path": "apps/worker/src/quant_terminal_worker/signal_engines/vegas_ema_recursive_features.py",
+      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/vegas_ema_recursive_features_base.py"
+    },
+    "required_data": [
+      {
+        "data_type": "candles",
+        "origin": "raw",
+        "timeframe": "5m",
+        "lookback_bars": 20000,
+        "freshness_tolerance_seconds": 300
+      },
+      {
+        "data_type": "candles",
+        "origin": "derived",
+        "timeframe": "5m",
+        "lookback_bars": 20000,
+        "source": {
+          "data_type": "candles",
+          "origin": "raw",
+          "timeframe": "5m"
+        },
+        "required_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ]
+      },
+      {
+        "data_type": "candles",
+        "origin": "derived",
+        "timeframe": "2h",
+        "lookback_bars": 80,
+        "source": {
+          "data_type": "candles",
+          "origin": "raw",
+          "timeframe": "5m"
+        },
+        "required_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ]
+      },
+      {
+        "data_type": "candles",
+        "origin": "derived",
+        "timeframe": "1d",
+        "lookback_bars": 80,
+        "source": {
+          "data_type": "candles",
+          "origin": "raw",
+          "timeframe": "5m"
+        },
+        "required_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ]
+      },
+      {
+        "data_type": "feature_base_candle",
+        "origin": "derived",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "feature_volatility_range",
+        "origin": "derived",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "feature_volume",
+        "origin": "derived",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "feature_ema_vegas_structure",
+        "origin": "derived",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "feature_bollinger",
+        "origin": "derived",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "feature_regime_momentum",
+        "origin": "derived",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "feature_base_candle",
+        "origin": "derived",
+        "timeframe": "2h"
+      },
+      {
+        "data_type": "feature_volatility_range",
+        "origin": "derived",
+        "timeframe": "2h"
+      },
+      {
+        "data_type": "feature_volume",
+        "origin": "derived",
+        "timeframe": "2h"
+      },
+      {
+        "data_type": "feature_ema_vegas_structure",
+        "origin": "derived",
+        "timeframe": "2h"
+      },
+      {
+        "data_type": "feature_bollinger",
+        "origin": "derived",
+        "timeframe": "2h"
+      },
+      {
+        "data_type": "feature_regime_momentum",
+        "origin": "derived",
+        "timeframe": "2h"
+      },
+      {
+        "data_type": "feature_base_candle",
+        "origin": "derived",
+        "timeframe": "1d"
+      },
+      {
+        "data_type": "feature_volatility_range",
+        "origin": "derived",
+        "timeframe": "1d"
+      },
+      {
+        "data_type": "feature_volume",
+        "origin": "derived",
+        "timeframe": "1d"
+      },
+      {
+        "data_type": "feature_ema_vegas_structure",
+        "origin": "derived",
+        "timeframe": "1d"
+      },
+      {
+        "data_type": "feature_bollinger",
+        "origin": "derived",
+        "timeframe": "1d"
+      },
+      {
+        "data_type": "feature_regime_momentum",
+        "origin": "derived",
+        "timeframe": "1d"
+      }
+    ],
+    "output_envelope_version": "signal_packet.v2",
+    "runtime_entrypoint": "quant_terminal_worker.signal_engines.vegas_ema_recursive_features:generate_training_signals",
+    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.vegas_ema_recursive_features:scan_live_signal",
+    "configuration_schema": {
+      "default_parameters": {
+        "context_bars": 80,
+        "proximity_threshold": "0.002",
+        "vote_threshold": 3,
+        "dedupe_window_minutes": 120,
+        "ema_mode": "precomputed_5m_ema_cluster",
+        "context_timeframes": [
+          "2h",
+          "1d"
+        ],
+        "ema_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ],
+        "feature_timeframes": [
+          "5m",
+          "2h",
+          "1d"
+        ],
+        "feature_window_bars": {
+          "5m": 24,
+          "2h": 12,
+          "1d": 10
+        },
+        "feature_families": [
+          "base_candle",
+          "volatility_range",
+          "volume",
+          "ema_vegas_structure",
+          "bollinger",
+          "regime_momentum"
+        ]
+      }
+    }
+  }
 }

@@ -40,11 +40,39 @@ Before proposing rules, replay the current strategy on the training sample and r
 
 - scoreable count and LONG/SHORT label balance
 - match, mismatch, and neutral counts
+- directional agreement (match / called, where called = signals with a non-FLAT direction)
 - failure counts by `reason_code`, truth direction, and decision direction
 - protected training cases and whether the current strategy matches them
 - whether failures are mostly neutrality, wrong-way direction, or both
 
 This replay is the baseline. Do not patch before understanding it.
+
+## Neutral Rate Alignment
+
+A strategy can inflate directional agreement by SKIP'ing signals with valid ground truth — converting potential mismatches into neutrals. To prevent this, every baseline replay and training verification must include a neutral-rate alignment check.
+
+### Methodology
+
+Compute two rates from the training sample:
+
+- **natural_null_gt_rate** = count of signals where `natural_direction` is `None` / total scoreable signals
+- **strategy_neutral_rate** = count of signals where `decide(...)` returned `FLAT` / total scoreable signals
+
+The natural null-GT rate represents the fraction of signals in the pool that genuinely lack directional resolution (did not cross the significance threshold within the observation window). For these signals, SKIP is the correct answer. A strategy should neither skip signals with valid ground truth (avoidance) nor enter signals with null ground truth (gambling).
+
+### Deviation Rules
+
+Report the deviation = `strategy_neutral_rate - natural_null_gt_rate`.
+
+| Deviation | Interpretation | Flag |
+|---|---|---|
+| Within ±15pp | Normal | None |
+| ±15pp to ±25pp | Mild drift | Warning — investigate whether avoidance (positive) or gambling (negative) is occurring |
+| Beyond ±25pp | Significant drift | Block — the strategy is either skipping signals it should be deciding, or entering signals with no directional resolution; agreement scores are unreliable |
+
+### Monthly Coverage
+
+Include strategy_neutral_rate per month alongside the monthly stability audit. If any individual month deviates from the natural null-GT rate by more than ±25pp, flag it regardless of that month's directional agreement.
 
 ## Monthly Stability Audit
 
@@ -54,6 +82,7 @@ Report or record:
 
 - scoreable signal count per month
 - monthly match, mismatch, and neutral counts
+- monthly strategy_neutral_rate and deviation from natural_null_gt_rate
 - monthly directional agreement
 - monthly LONG agreement and SHORT agreement when enough samples exist
 - worst-month agreement
@@ -141,6 +170,7 @@ After editing, run:
 - Python syntax verification, such as `PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile <strategy.py>`
 - a replay of the training sample
 - a protected-case check
+- the neutral rate alignment check
 - the monthly stability audit
 - a diff against the read-only strategy snapshot or a scoped diff of the edited strategy file
 
@@ -148,6 +178,7 @@ Report:
 
 - baseline match/mismatch/neutral counts
 - updated match/mismatch/neutral counts
+- natural_null_gt_rate, strategy_neutral_rate, and deviation
 - protected cases preserved or regressed
 - worst-month and monthly-stability result
 - changed rule summary
@@ -175,7 +206,7 @@ Keep the final response concise:
 
 - file edited
 - deterministic rules changed
-- training replay result
+- training replay result (including natural_null_gt_rate, strategy_neutral_rate, and deviation)
 - protected-case result
 - monthly stability result
 - explicit note that validation/walk-forward/OOS was not used

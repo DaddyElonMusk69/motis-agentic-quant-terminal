@@ -473,7 +473,10 @@
   overflow: auto;
 }
 
+/* --- Route card (redesigned) --- */
+
 .route-card-v2 {
+  --route-accent: var(--status-idle);
   background: transparent;
   border: 1px solid var(--line-subtle);
   border-radius: var(--radius-md);
@@ -482,84 +485,252 @@
   flex: 0 0 auto;
   flex-direction: column;
   gap: var(--space-2);
-  min-height: 276px;
-  padding: var(--space-2);
+  min-height: 0;
+  padding: var(--space-3);
+  padding-left: 20px;
+  position: relative;
   text-align: left;
 }
+
+.route-card-v2::before {
+  background: var(--route-accent);
+  border-radius: 999px;
+  content: "";
+  height: calc(100% - 20px);
+  left: 7px;
+  opacity: 0.85;
+  position: absolute;
+  top: 10px;
+  transition: background 0.25s ease;
+  width: 3px;
+}
+
+.route-card-v2--running,  .route-card-v2.running  { --route-accent: var(--status-live); }
+.route-card-v2--blocked,  .route-card-v2.blocked  { --route-accent: var(--status-warn); }
+.route-card-v2--ready,    .route-card-v2.ready    { --route-accent: var(--status-pass); }
+.route-card-v2--idle,     .route-card-v2.idle     { --route-accent: var(--status-idle); }
 
 .route-card-v2.is-selected {
   background: color-mix(in oklch, var(--surface-selected) 70%, transparent);
   border-color: var(--line-strong);
 }
 
-.route-card-v2__select {
+/* --- Header --- */
+
+.route-card-v2__header {
   background: transparent;
   border: 0;
   color: inherit;
   cursor: pointer;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: 2px;
   min-width: 0;
   padding: 0;
   text-align: left;
 }
 
-.route-card-v2 strong {
+.route-card-v2__title strong {
   color: var(--ink-primary);
-  font-size: 15px;
+  font-size: 14px;
 }
 
-.route-card-v2 span,
-.route-card-v2 small {
+.route-card-v2__sub {
   color: var(--ink-muted);
-}
-
-.route-card-v2__facts {
-  display: grid;
-  gap: var(--space-1);
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.route-card-v2__facts span {
-  background: var(--surface-base);
-  border: 1px solid var(--line-subtle);
-  border-radius: var(--radius-sm);
-  min-width: 0;
-  overflow: hidden;
-  padding: var(--space-1) var(--space-2);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.bundle-setup-mini {
-  border: 1px solid var(--line-subtle);
-  border-radius: var(--radius-sm);
-  display: grid;
-  gap: var(--space-1);
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  padding: var(--space-1);
-}
-
-.bundle-setup-mini div {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  min-width: 0;
-}
-
-.bundle-setup-mini span {
-  color: var(--ink-muted);
-  font-size: 10px;
-  text-transform: uppercase;
-}
-
-.bundle-setup-mini strong {
   font-size: 12px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.route-card-v2__meta {
+  color: var(--ink-muted);
+  font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- Pipeline --- */
+
+.route-card-v2__pipeline {
+  align-items: center;
+  display: flex;
+  gap: 0;
+  padding: var(--space-2) 0;
+}
+
+.route-card-v2__step {
+  align-items: center;
+  display: flex;
+  flex: 1 1 0;
+  font-size: 11px;
+  gap: 4px;
+  min-width: 0;
+}
+
+.route-card-v2__step-icon {
+  align-items: center;
+  border-radius: 50%;
+  display: flex;
+  flex: 0 0 auto;
+  height: 20px;
+  justify-content: center;
+  width: 20px;
+}
+
+.route-card-v2__step-icon svg {
+  height: 12px;
+  width: 12px;
+}
+
+.route-card-v2__step-icon--done {
+  background: color-mix(in oklch, var(--status-pass) 22%, transparent);
+  color: var(--status-pass);
+}
+
+.route-card-v2__step-icon--pending {
+  background: var(--surface-base);
+  color: var(--ink-muted);
+}
+
+.route-card-v2__step-icon--blocked {
+  background: color-mix(in oklch, var(--status-warn) 20%, transparent);
+  color: var(--status-warn);
+}
+
+.route-card-v2__step-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.route-card-v2__step-label--done {
+  color: var(--ink-primary);
+}
+
+.route-card-v2__step-label--pending {
+  color: var(--ink-muted);
+}
+
+.route-card-v2__step-label--blocked {
+  color: var(--status-warn);
+}
+
+.route-card-v2__step-connector {
+  background: var(--line-subtle);
+  flex: 0 0 auto;
+  height: 1px;
+  width: 8px;
+}
+
+.route-card-v2__step-connector--done {
+  background: color-mix(in oklch, var(--status-pass) 45%, var(--line-subtle));
+}
+
+.route-card-v2__step:last-child .route-card-v2__step-connector {
+  visibility: hidden;
+}
+
+/* --- Setup & Settings --- */
+
+.route-card-v2__setup-line {
+  color: var(--ink-muted);
+  font-size: 11px;
+  line-height: 1.4;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.route-card-v2__settings-toggle {
+  background: none;
+  border: 0;
+  color: var(--ink-muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0;
+  text-align: left;
+}
+
+.route-card-v2__settings-toggle:hover {
+  color: var(--ink-secondary);
+}
+
+.route-card-v2__settings {
+  border-top: 1px solid var(--line-subtle);
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+}
+
+/* --- Footer --- */
+
+.route-card-v2__footer {
+  align-items: center;
+  border-top: 1px solid var(--line-subtle);
+  display: grid;
+  gap: var(--space-2);
+  grid-template-columns: minmax(0, 1fr);
+  margin-top: auto;
+  padding-top: var(--space-2);
+}
+
+.route-card-v2__footer .route-card-v2__status {
+  color: var(--ink-muted);
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.route-card-v2__actions {
+  display: grid;
+  gap: var(--space-2);
+  grid-template-columns: auto 1fr;
+}
+
+.route-card-v2__settings-btn {
+  align-items: center;
+  background: none;
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--ink-muted);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 16px;
+  height: 34px;
+  justify-content: center;
+  padding: 0;
+  width: 34px;
+}
+
+.route-card-v2__settings-btn:hover {
+  border-color: var(--line-strong);
+  color: var(--ink-secondary);
+}
+
+.route-card-v2__settings-btn--open {
+  background: color-mix(in oklch, var(--surface-raised) 60%, transparent);
+  border-color: var(--line-strong);
+  color: var(--ink-primary);
+}
+
+.route-card-v2__run {
+  min-height: 34px;
+  width: 100%;
+}
+
+.route-card-v2__archive {
+  min-height: 34px;
+  width: 100%;
+}
+
+.route-card-v2__settings .route-card-v2__archive {
+  margin-top: var(--space-2);
 }
 
 .trading-header-v2 {
@@ -603,8 +774,8 @@
 }
 
 .execution-settings-v2--compact {
-  gap: var(--space-2);
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-1);
+    grid-template-columns: 1fr;
 }
 
 .execution-settings-v2 .slider-row-v2,
@@ -613,17 +784,50 @@
 }
 
 .execution-settings-v2--compact label {
-  gap: var(--space-1);
+    align-items: center;
+    flex-direction: row;
+    font-size: 11px;
+    font-weight: 500;
+    gap: var(--space-2);
+    letter-spacing: 0;
+    min-width: 0;
+    text-transform: none;
+}
+
+.execution-settings-v2--compact input,
+.execution-settings-v2--compact select {
+    flex: 1;
+    min-height: 28px;
+    min-width: 0;
 }
 
 .execution-settings-v2--compact .slider-row-v2,
 .execution-settings-v2--compact .checkbox-row-v2 {
-  grid-column: span 2;
+    grid-column: span 1;
+}
+
+.execution-settings-v2--compact .slider-row-v2 > span {
+    align-items: center;
+    flex: 0 0 auto;
+    min-width: 100px;
+}
+
+.execution-settings-v2--compact .slider-row-v2 input[type="range"] {
+    flex: 1 1 0;
+}
+
+.execution-settings-v2--compact .slider-row-v2 > strong {
+    flex: 1;
+}
+
+.execution-settings-v2--compact .checkbox-row-v2 {
+    min-height: 28px;
 }
 
 .execution-settings-v2--compact .button {
-  grid-column: span 2;
-  min-height: 30px;
+    grid-column: span 1;
+    min-height: 32px;
+    width: 100%;
 }
 
 .slider-row-v2 span,
@@ -662,69 +866,6 @@
   min-height: auto;
 }
 
-.execution-sequence-v2 {
-  border: 1px solid var(--line-subtle);
-  border-radius: var(--radius-sm);
-  display: grid;
-  flex: 0 0 auto;
-  gap: var(--space-1);
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  padding: var(--space-1);
-}
-
-.route-card-v2__sequence {
-  padding: 0;
-}
-
-.execution-step-v2 {
-  align-items: center;
-  background: var(--surface-base);
-  border: 1px solid var(--line-subtle);
-  border-radius: var(--radius-sm);
-  color: var(--ink-secondary);
-  display: inline-flex;
-  gap: var(--space-1);
-  justify-content: center;
-  min-height: 28px;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.route-card-v2__footer {
-  align-items: center;
-  border-top: 1px solid var(--line-subtle);
-  display: grid;
-  gap: var(--space-2);
-  grid-template-columns: minmax(0, 1fr);
-  margin-top: auto;
-  padding-top: var(--space-2);
-}
-
-.route-card-v2__footer span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.route-card-v2__run {
-  min-height: 34px;
-  width: 100%;
-}
-
-.route-card-v2__actions {
-  display: grid;
-  gap: var(--space-2);
-  grid-template-columns: 0.9fr 1fr;
-}
-
-.route-card-v2__archive {
-  min-height: 34px;
-  width: 100%;
-}
-
 .wake-pagination-v2 {
   align-items: center;
   border: 1px solid var(--line-subtle);
@@ -759,21 +900,6 @@
   border-radius: 50%;
   height: 7px;
   width: 7px;
-}
-
-.execution-step-v2 svg {
-  height: 14px;
-  width: 14px;
-}
-
-.execution-step-v2.done {
-  border-color: color-mix(in oklch, var(--status-pass) 55%, var(--line-subtle));
-  color: var(--status-pass);
-}
-
-.execution-step-v2.blocked {
-  border-color: color-mix(in oklch, var(--status-warn) 60%, var(--line-subtle));
-  color: var(--status-warn);
 }
 
 .pending-intent-v2 {
@@ -2032,6 +2158,11 @@
   min-width: min(680px, calc(100vw - 48px));
 }
 
+.stage4-candidate-modal {
+  max-width: 1380px;
+  min-width: min(1280px, calc(100vw - 48px));
+}
+
 .archived-strategies-modal {
   max-width: 1040px;
 }
@@ -2047,6 +2178,128 @@
   flex-direction: column;
   gap: var(--space-3);
   min-height: 0;
+}
+
+.stage4-detail-layout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-height: 0;
+}
+
+.stage4-detail-summary,
+.stage4-detail-note-grid {
+  display: grid;
+  gap: var(--space-2) var(--space-3);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.stage4-detail-chart-card {
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+}
+
+.stage4-detail-chart-card__header {
+  align-items: baseline;
+  display: flex;
+  gap: var(--space-2);
+  justify-content: space-between;
+}
+
+.stage4-detail-chart-card__header strong {
+  color: var(--ink-primary);
+  font-size: 14px;
+}
+
+.stage4-detail-chart-card__header span,
+.stage4-equity-curve__scale {
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+.stage4-equity-curve {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.stage4-equity-curve svg {
+  background: color-mix(in oklch, var(--surface-selected) 12%, transparent);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-sm);
+  display: block;
+  height: 240px;
+  width: 100%;
+}
+
+.stage4-equity-curve__baseline {
+  stroke: color-mix(in oklch, var(--line-subtle) 80%, transparent);
+  stroke-width: 0.7;
+  vector-effect: non-scaling-stroke;
+}
+
+.stage4-equity-curve__axis {
+  stroke: color-mix(in oklch, var(--line-subtle) 90%, transparent);
+  stroke-width: 0.7;
+  vector-effect: non-scaling-stroke;
+}
+
+.stage4-equity-curve__axis-label {
+  fill: var(--ink-muted);
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+.stage4-equity-curve__path {
+  fill: none;
+  stroke: var(--status-live);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.15;
+  vector-effect: non-scaling-stroke;
+}
+
+.stage4-equity-curve__scale {
+  display: flex;
+  justify-content: space-between;
+}
+
+.stage4-detail-trades-panel {
+  flex: 0 0 auto;
+  min-height: 360px;
+}
+
+.stage4-trade-row--win {
+  background: color-mix(in oklch, var(--status-pass) 7%, transparent);
+  box-shadow: inset 3px 0 0 color-mix(in oklch, var(--status-pass) 82%, transparent);
+}
+
+.stage4-trade-row--loss {
+  background: color-mix(in oklch, var(--status-risk) 8%, transparent);
+  box-shadow: inset 3px 0 0 color-mix(in oklch, var(--status-risk) 84%, transparent);
+}
+
+.stage4-trade-row--flat {
+  background: color-mix(in oklch, var(--status-idle) 5%, transparent);
+  box-shadow: inset 3px 0 0 color-mix(in oklch, var(--status-idle) 58%, transparent);
+}
+
+.stage4-trade-row--win td:nth-child(8),
+.stage4-trade-row--win td:nth-child(9) {
+  color: var(--status-pass);
+}
+
+.stage4-trade-row--loss td:nth-child(8),
+.stage4-trade-row--loss td:nth-child(9) {
+  color: var(--status-risk);
+}
+
+.data-table tbody .stage4-trade-row:hover {
+  background: color-mix(in oklch, var(--surface-selected) 32%, transparent);
 }
 
 .stage1-start-grid {
@@ -2307,13 +2560,8 @@
     flex: 1 1 auto;
   }
 
-  .trading-split .route-card-v2__facts,
-  .trading-split .bundle-setup-mini {
-    grid-template-columns: 1fr;
-  }
-
-  .trading-split .execution-sequence-v2 {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .trading-split .route-card-v2__pipeline {
+    flex-wrap: wrap;
   }
 
   .dashboard-grid,
@@ -2348,5 +2596,10 @@
 
   .stage4-run-history-panel {
     min-height: 300px;
+  }
+
+  .stage4-detail-summary,
+  .stage4-detail-note-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

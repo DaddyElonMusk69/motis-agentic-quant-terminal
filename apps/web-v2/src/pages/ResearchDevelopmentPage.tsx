@@ -9,6 +9,7 @@ import {
   fetchDevelopmentQueue,
   fetchJob,
   fetchJobs,
+  fetchStage4CandidateDetail,
   fetchStage0UniverseRuns,
   fetchStage1AgentPrompt,
   fetchStage1Gate,
@@ -41,7 +42,9 @@ import {
   type Stage1TrainingScore,
   type Stage2CaptureRate,
   type Stage2PolicyValues,
+  type Stage4CandidateDetail,
   type Stage4CandidateResult,
+  type Stage4TradeLedgerRow,
   type Stage3GridSetup,
   type RuntimeJob
 } from "../app/api";
@@ -319,6 +322,24 @@ function formatUtcTimestamp(value: string | null | undefined): string {
   }).replace(",", "") + " UTC";
 }
 
+function formatCompactUtcTimestamp(value: string | number | null | undefined): string {
+  if (value === null || value === undefined) {
+    return "-";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+  return date.toLocaleString("en-US", {
+    timeZone: "UTC",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).replace(",", "") + " UTC";
+}
+
 function roleIterations(iterations: Stage1IterationSummary[]): Record<Stage1SampleRole, Stage1IterationSummary[]> {
   return {
     training: iterations.filter((iteration) => stage1RoleForIteration(iteration) === "training"),
@@ -512,6 +533,71 @@ function formatUsd(value: number | undefined | null): string {
   return `$${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
 }
 
+function stage4FilledTrades(trades: Stage4TradeLedgerRow[]): Stage4TradeLedgerRow[] {
+  return trades.filter((trade) => trade.entry_status === "FILLED");
+}
+
+function stage4WinningTrades(trades: Stage4TradeLedgerRow[]): Stage4TradeLedgerRow[] {
+  return trades.filter((trade) => (trade.net_pnl_usdt ?? 0) > 0);
+}
+
+function stage4LosingTrades(trades: Stage4TradeLedgerRow[]): Stage4TradeLedgerRow[] {
+  return trades.filter((trade) => (trade.net_pnl_usdt ?? 0) < 0);
+}
+
+function stage4MaxDrawdownPct(trades: Stage4TradeLedgerRow[]): number | null {
+  if (!trades.length) {
+    return null;
+  }
+  let peak = trades[0].equity_before ?? trades[0].equity_after ?? 0;
+  let maxDrawdown = 0;
+  for (const trade of trades) {
+    const equity = trade.equity_after ?? trade.equity_before;
+    if (typeof equity !== "number" || Number.isNaN(equity)) {
+      continue;
+    }
+    if (equity > peak) {
+      peak = equity;
+      continue;
+    }
+    if (peak > 0) {
+      maxDrawdown = Math.max(maxDrawdown, ((peak - equity) / peak) * 100);
+    }
+  }
+  return maxDrawdown;
+}
+
+function stage4TradeMarginUsed(trade: Stage4TradeLedgerRow): number | null {
+  const legs = trade.leg_details ?? [];
+  const margin = legs.reduce((sum, leg) => sum + (leg.margin_usdt ?? 0), 0);
+  return margin > 0 ? margin : null;
+}
+
+function stage4TradeNotional(trade: Stage4TradeLedgerRow): number | null {
+  const legs = trade.leg_details ?? [];
+  const notional = legs.reduce((sum, leg) => sum + (leg.entry_notional_usdt ?? 0), 0);
+  return notional > 0 ? notional : null;
+}
+
+function stage4TradeRoePct(trade: Stage4TradeLedgerRow): number | null {
+  const margin = stage4TradeMarginUsed(trade);
+  if (!margin) {
+    return null;
+  }
+  return ((trade.net_pnl_usdt ?? 0) / margin) * 100;
+}
+
+function stage4TradeRowClassName(trade: Stage4TradeLedgerRow): string {
+  const pnl = trade.net_pnl_usdt ?? 0;
+  if (pnl > 0) {
+    return "stage4-trade-row stage4-trade-row--win";
+  }
+  if (pnl < 0) {
+    return "stage4-trade-row stage4-trade-row--loss";
+  }
+  return "stage4-trade-row stage4-trade-row--flat";
+}
+
 function scoreExists(gate: Stage1GateSummary | null, role: Stage1SampleRole): boolean {
   return Boolean(gate?.roles[role]?.score);
 }
@@ -521,6 +607,7 @@ function invalidateDevelopment(sessionId?: string, poolId?: string) {
   if (sessionId) {
     void queryClient.invalidateQueries({ queryKey: ["stage1-iterations", sessionId] });
     void queryClient.invalidateQueries({ queryKey: ["stage1-gate", sessionId] });
+    void queryClient.invalidateQueries({ queryKey: ["stage4-candidate-detail", sessionId] });
   }
   if (poolId) {
     void queryClient.invalidateQueries({ queryKey: ["development-queue", poolId] });
@@ -533,6 +620,7 @@ export function ResearchDevelopmentPage() {
   const [copiedPrompt, setCopiedPrompt] = useState(false);
   const [overrideAction, setOverrideAction] = useState<Stage1OverrideAction | null>(null);
   const [selectedIteration, setSelectedIteration] = useState<Stage1IterationSummary | null>(null);
+  const [selectedStage4Candidate, setSelectedStage4Candidate] = useState<Stage4CandidateResult | null>(null);
   const [startChoice, setStartChoice] = useState<Stage1StartChoice | null>(null);
   const [activeJob, setActiveJob] = useState<ActiveDevelopmentJob | null>(null);
   const [stage4Inputs, setStage4Inputs] = useState({
@@ -576,6 +664,11 @@ export function ResearchDevelopmentPage() {
     enabled: Boolean(session?.session_id && selectedIteration?.iteration_id),
     queryKey: ["stage1-iteration-detail", session?.session_id, selectedIteration?.iteration_id],
     queryFn: () => fetchStage1IterationDetail({ session_id: session!.session_id, iteration_id: selectedIteration!.iteration_id })
+  });
+  const stage4CandidateDetailQuery = useQuery({
+    enabled: Boolean(session?.session_id && selectedStage4Candidate?.candidate_id),
+    queryKey: ["stage4-candidate-detail", session?.session_id, selectedStage4Candidate?.candidate_id],
+    queryFn: () => fetchStage4CandidateDetail({ session_id: session!.session_id, candidate_id: selectedStage4Candidate!.candidate_id })
   });
   const activeJobQuery = useQuery({
     enabled: Boolean(activeJob?.jobId),
@@ -759,6 +852,7 @@ export function ResearchDevelopmentPage() {
 
   useEffect(() => {
     setSelectedIteration(null);
+    setSelectedStage4Candidate(null);
   }, [session?.session_id]);
 
   useEffect(() => {
@@ -1165,6 +1259,7 @@ export function ResearchDevelopmentPage() {
             {activeStage === "stage4" ? (
               <Stage4Panel
                 gate={gate}
+                onOpenCandidate={setSelectedStage4Candidate}
                 onPromote={() => session && promoteMutation.mutate(session.session_id)}
                 onRun={runStage4}
                 inputs={stage4Inputs}
@@ -1275,6 +1370,31 @@ export function ResearchDevelopmentPage() {
             <footer className="terminal-modal__footer">
               <span>Review the full signal ledger before auditing or spawning the next bundle.</span>
               <button className="button button--secondary" onClick={() => setSelectedIteration(null)} type="button">Close</button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+
+      {selectedStage4Candidate ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="terminal-modal stage4-candidate-modal" role="dialog" aria-modal="true" aria-labelledby="stage4-candidate-title">
+            <header className="terminal-modal__header">
+              <div>
+                <span className="eyebrow">Stage 4 Candidate</span>
+                <h2 id="stage4-candidate-title">{selectedStage4Candidate.candidate_id}</h2>
+              </div>
+              <button className="icon-button" onClick={() => setSelectedStage4Candidate(null)} type="button" aria-label="Close candidate detail">
+                <X aria-hidden="true" />
+              </button>
+            </header>
+            <div className="terminal-modal__body">
+              {stage4CandidateDetailQuery.isLoading ? <div className="state-line">Loading candidate detail...</div> : null}
+              {stage4CandidateDetailQuery.error ? <div className="state-line state-line--error">{stage4CandidateDetailQuery.error.message}</div> : null}
+              {stage4CandidateDetailQuery.data?.detail ? <Stage4CandidateDetailPanel detail={stage4CandidateDetailQuery.data.detail} /> : null}
+            </div>
+            <footer className="terminal-modal__footer">
+              <span>Review realized equity and filled-trade outcomes before promoting or rerunning.</span>
+              <button className="button button--secondary" onClick={() => setSelectedStage4Candidate(null)} type="button">Close</button>
             </footer>
           </section>
         </div>
@@ -2166,6 +2286,7 @@ function Stage3Panel({
 
 function Stage4Panel({
   gate,
+  onOpenCandidate,
   onPromote,
   onRun,
   inputs,
@@ -2174,6 +2295,7 @@ function Stage4Panel({
   running
 }: {
   gate: Stage1GateSummary | null;
+  onOpenCandidate: (candidate: Stage4CandidateResult) => void;
   onPromote: () => void;
   onRun: () => void;
   inputs: { initial_capital_usdt: number; margin_allocation_pct: number; leverage: number };
@@ -2318,6 +2440,7 @@ function Stage4Panel({
               { key: "fees", header: "Fees", align: "right", render: (item) => formatUsd(item.account?.total_fees_usdt) }
             ]}
             getRowKey={(item) => item.candidate_id}
+            onRowClick={onOpenCandidate}
             rows={stage4.candidates}
           />
         </TerminalPanel>
@@ -2338,6 +2461,154 @@ function Stage4Panel({
           />
         </TerminalPanel>
       ) : null}
+    </div>
+  );
+}
+
+function Stage4CandidateDetailPanel({ detail }: { detail: Stage4CandidateDetail }) {
+  const candidate = detail.candidate ?? {};
+  const setup = candidate.setup ?? {};
+  const allTrades = detail.trades ?? [];
+  const filledTrades = stage4FilledTrades(allTrades);
+  const wins = stage4WinningTrades(filledTrades);
+  const losses = stage4LosingTrades(filledTrades);
+  const totalNetPnl = filledTrades.reduce((sum, trade) => sum + (trade.net_pnl_usdt ?? 0), 0);
+  const totalFees = filledTrades.reduce((sum, trade) => sum + (trade.total_fees_usdt ?? 0), 0);
+  const totalSkipped = (candidate.skipped_decisions ?? 0) + (candidate.skipped_position_open ?? 0);
+  const expectancyPerTrade = filledTrades.length ? totalNetPnl / filledTrades.length : null;
+  const maxDrawdownPct = stage4MaxDrawdownPct(filledTrades);
+
+  return (
+    <div className="stage4-detail-layout">
+      <div className="stage4-detail-summary">
+        <FieldRow label="Run" value={detail.run_id ?? "n/a"} />
+        <FieldRow label="Policy" value={formatStage3Policy(setup)} />
+        <FieldRow label="Protection" value={formatStage3Protection(setup)} />
+        <FieldRow label="Pyramid" value={formatPyramidPolicy(setup)} />
+        <FieldRow label="Initial Capital" value={formatUsd(candidate.account?.initial_capital_usdt)} />
+        <FieldRow label="Ending Equity" value={formatUsd(candidate.account?.ending_equity_usdt)} />
+        <FieldRow label="Net PnL" value={formatUsd(candidate.account?.net_pnl_usdt)} />
+        <FieldRow label="Return" value={formatPct(candidate.account?.return_pct)} />
+        <FieldRow label="Fees" value={formatUsd(totalFees)} />
+        <FieldRow label="Filled Trades" value={formatNumber(filledTrades.length)} />
+        <FieldRow label="Win Rate" value={formatPct(candidate.win_rate_pct)} />
+        <FieldRow label="Expectancy / Trade" value={formatUsd(expectancyPerTrade)} />
+        <FieldRow label="Max Drawdown" value={formatPct(maxDrawdownPct)} />
+        <FieldRow label="Skipped Signals" value={formatNumber(totalSkipped)} />
+      </div>
+
+      <div className="stage4-detail-chart-card">
+        <div className="stage4-detail-chart-card__header">
+          <strong>Account Growth</strong>
+          <span>{filledTrades.length ? `${formatNumber(filledTrades.length)} realized trades` : "No filled trades"}</span>
+        </div>
+        <Stage4EquityCurve trades={filledTrades} />
+      </div>
+
+      <div className="stage4-detail-note-grid">
+        <FieldRow label="Wins / Losses" value={`${formatNumber(wins.length)} / ${formatNumber(losses.length)}`} />
+        <FieldRow label="Latest close" value={formatUtcTimestamp(filledTrades[filledTrades.length - 1]?.exit_ts)} />
+        <FieldRow label="Exit mode" value={formatStage4ExitMode(setup)} />
+        <FieldRow label="Position-open skips" value={formatNumber(candidate.skipped_position_open)} />
+      </div>
+
+      <TerminalPanel className="scroll-panel stage4-detail-trades-panel" title="Filled Trades">
+        <DataTable
+          columns={[
+            { key: "close", header: "Close", render: (item) => formatUtcTimestamp(item.exit_ts ?? item.signal_ts) },
+            { key: "side", header: "Side", render: (item) => item.decision_direction ?? "-" },
+            { key: "exit", header: "Exit", render: (item) => item.exit_status ?? "-" },
+            { key: "entry", header: "Entry", align: "right", render: (item) => formatDecimal(item.entry_price, 4) },
+            { key: "exit_px", header: "Exit Px", align: "right", render: (item) => formatDecimal(item.exit_price, 4) },
+            { key: "margin", header: "Margin", align: "right", render: (item) => formatUsd(stage4TradeMarginUsed(item)) },
+            { key: "notional", header: "Notional", align: "right", render: (item) => formatUsd(stage4TradeNotional(item)) },
+            { key: "roe", header: "ROE", align: "right", render: (item) => formatPct(stage4TradeRoePct(item)) },
+            { key: "pnl", header: "Net PnL", align: "right", render: (item) => formatUsd(item.net_pnl_usdt) },
+            { key: "fees", header: "Fees", align: "right", render: (item) => formatUsd(item.total_fees_usdt) },
+            { key: "equity", header: "Equity After", align: "right", render: (item) => formatUsd(item.equity_after) },
+            { key: "legs", header: "Legs", align: "right", render: (item) => formatNumber(item.filled_legs) },
+            { key: "protect", header: "Protected", render: (item) => item.protection_activated ? "yes" : "no" }
+          ]}
+          getRowKey={(item) => item.position_id ?? item.signal_id}
+          getRowClassName={stage4TradeRowClassName}
+          rows={filledTrades}
+        />
+      </TerminalPanel>
+    </div>
+  );
+}
+
+function Stage4EquityCurve({ trades }: { trades: Stage4TradeLedgerRow[] }) {
+  if (!trades.length) {
+    return <div className="state-line">No filled trades were recorded for this candidate.</div>;
+  }
+  const firstTrade = trades[0];
+  const points = [
+    {
+      time: new Date(firstTrade.signal_ts ?? firstTrade.exit_ts ?? "").getTime(),
+      equity: firstTrade.equity_before ?? firstTrade.equity_after ?? 0,
+      index: 0,
+    },
+    ...trades.map((trade, index) => ({
+      time: new Date(trade.exit_ts ?? trade.signal_ts ?? "").getTime(),
+      equity: trade.equity_after ?? trade.equity_before ?? 0,
+      index: index + 1,
+    })),
+  ].filter((point) => (
+    typeof point.equity === "number"
+    && !Number.isNaN(point.equity)
+    && typeof point.time === "number"
+    && !Number.isNaN(point.time)
+  )).sort((left, right) => left.time - right.time || left.index - right.index);
+  if (points.length < 2) {
+    return <div className="state-line">Not enough equity points to render the chart.</div>;
+  }
+  const equities = points.map((point) => point.equity);
+  const times = points.map((point) => point.time);
+  const min = Math.min(...equities);
+  const max = Math.max(...equities);
+  const minTime = Math.min(...times);
+  const maxTime = Math.max(...times);
+  const span = max - min || 1;
+  const paddedMin = min - span * 0.06;
+  const paddedMax = max + span * 0.06;
+  const paddedSpan = paddedMax - paddedMin || 1;
+  const timeSpan = maxTime - minTime;
+  const width = 1000;
+  const height = 300;
+  const left = 78;
+  const right = 18;
+  const top = 18;
+  const bottom = 36;
+  const plotWidth = width - left - right;
+  const plotHeight = height - top - bottom;
+  const path = points
+    .map((point, index) => {
+      const xRatio = timeSpan > 0 ? (point.time - minTime) / timeSpan : index / Math.max(points.length - 1, 1);
+      const x = left + (xRatio * plotWidth);
+      const y = top + ((paddedMax - point.equity) / paddedSpan) * plotHeight;
+      return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+    })
+    .join(" ");
+  const initialEquity = points[0].equity;
+  const baselineY = top + ((paddedMax - initialEquity) / paddedSpan) * plotHeight;
+
+  return (
+    <div className="stage4-equity-curve">
+      <svg aria-label="Stage 4 account growth curve" preserveAspectRatio="none" viewBox={`0 0 ${width} ${height}`}>
+        <line className="stage4-equity-curve__axis" x1={left} x2={left} y1={top} y2={height - bottom} />
+        <line className="stage4-equity-curve__axis" x1={left} x2={width - right} y1={height - bottom} y2={height - bottom} />
+        <line className="stage4-equity-curve__baseline" x1={left} x2={width - right} y1={baselineY} y2={baselineY} />
+        <text className="stage4-equity-curve__axis-label" x={left - 10} y={top + 4} textAnchor="end">{formatUsd(max)}</text>
+        <text className="stage4-equity-curve__axis-label" x={left - 10} y={height - bottom} textAnchor="end">{formatUsd(min)}</text>
+        <text className="stage4-equity-curve__axis-label" x={left} y={height - 10} textAnchor="start">{formatCompactUtcTimestamp(minTime)}</text>
+        <text className="stage4-equity-curve__axis-label" x={width - right} y={height - 10} textAnchor="end">{formatCompactUtcTimestamp(maxTime)}</text>
+        <path className="stage4-equity-curve__path" d={path} vectorEffect="non-scaling-stroke" />
+      </svg>
+      <div className="stage4-equity-curve__scale">
+        <span>Account size</span>
+        <span>Time</span>
+      </div>
     </div>
   );
 }

@@ -6,6 +6,33 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 RUN_DIR="${RUN_DIR:-${ROOT_DIR}/.run}"
 
+stop_matching_processes() {
+  local name="$1"
+  local pattern="$2"
+  local pids
+  pids="$(pgrep -f "${pattern}" 2>/dev/null || true)"
+  if [[ -z "${pids}" ]]; then
+    return 0
+  fi
+
+  echo "${name}: stopping stale matching processes"
+  for pid in ${pids}; do
+    if [[ "${pid}" == "$$" ]]; then
+      continue
+    fi
+    kill "${pid}" 2>/dev/null || true
+  done
+
+  sleep 1
+  pids="$(pgrep -f "${pattern}" 2>/dev/null || true)"
+  for pid in ${pids}; do
+    if [[ "${pid}" == "$$" ]]; then
+      continue
+    fi
+    kill -9 "${pid}" 2>/dev/null || true
+  done
+}
+
 stop_service() {
   local name="$1"
   local pid_file="${RUN_DIR}/${name}.pid"
@@ -41,5 +68,7 @@ stop_service() {
 stop_service web-v2
 stop_service worker
 stop_service api
+stop_matching_processes worker "celery -A quant_terminal_worker.celery_app:celery_app worker"
+stop_matching_processes api "uvicorn quant_terminal_api.main:app"
 
 echo "Motis dev stack stopped."

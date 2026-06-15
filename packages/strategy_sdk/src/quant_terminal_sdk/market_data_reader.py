@@ -6,6 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 
@@ -115,7 +116,7 @@ def read_candles_from_ref(
     rows_by_timestamp: dict[datetime, MarketDataCandle] = {}
 
     for file in sorted(storage_uri.glob("year=*/month=*/data.parquet")):
-        for row in pq.read_table(file).to_pylist():
+        for row in _read_parquet_rows(file, dataset_id=str(ref.get("dataset_id") or "unknown")):
             candle = _coerce_candle(row)
             if confirmed_only and candle.confirm != 1:
                 continue
@@ -145,7 +146,7 @@ def read_rows_from_ref(
     rows_by_timestamp: dict[datetime, dict[str, Any]] = {}
 
     for file in sorted(storage_uri.glob("year=*/month=*/data.parquet")):
-        for row in pq.read_table(file).to_pylist():
+        for row in _read_parquet_rows(file, dataset_id=str(ref.get("dataset_id") or "unknown")):
             timestamp = _coerce_datetime(row.get("timestamp") or row.get("ts"))
             if confirmed_only and int(row.get("confirm", 1)) != 1:
                 continue
@@ -161,6 +162,13 @@ def read_rows_from_ref(
 def _resolve_storage_uri(*, workspace_root: Path, value: str | Path) -> Path:
     path = Path(value)
     return path if path.is_absolute() else workspace_root / path
+
+
+def _read_parquet_rows(file: Path, *, dataset_id: str) -> list[dict[str, Any]]:
+    try:
+        return pq.read_table(file).to_pylist()
+    except (pa.ArrowInvalid, pa.ArrowIOError, OSError) as exc:
+        raise ValueError(f"Corrupt parquet shard for {dataset_id}: {file}") from exc
 
 
 def _coerce_candle(row: dict[str, Any]) -> MarketDataCandle:

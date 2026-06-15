@@ -35,6 +35,7 @@ export type RefreshPlan = {
   dataset_id: string;
   status: string;
   asset?: string;
+  family?: string;
   instrument?: string;
   data_type?: string;
   timeframe?: string | null;
@@ -46,6 +47,8 @@ export type RefreshPlan = {
   row_count?: number;
   derived_rebuilt?: Array<{ dataset_id: string; timeframe: string; row_count: number }>;
   enriched?: Array<{ dataset_id: string; timeframe: string; row_count: number; ema_columns?: string[] }>;
+  features?: Array<{ dataset_id: string; timeframe: string; row_count: number; columns?: string[] }>;
+  feature_count?: number;
   enriched_count?: number;
   skipped_count?: number;
   reason?: string;
@@ -646,6 +649,67 @@ export type Stage4CandidateResult = {
   };
 };
 
+export type Stage4TradeLedgerRow = {
+  candidate_id: string;
+  signal_id: string;
+  signal_ts?: string;
+  slice_name?: string;
+  agreement?: string;
+  decision_direction?: "LONG" | "SHORT" | "FLAT" | string;
+  reference_price?: number;
+  position_id?: string;
+  entry_status?: string;
+  exit_status?: string;
+  entry_price?: number;
+  exit_price?: number;
+  exit_ts?: string;
+  filled_legs?: number;
+  protection_enabled?: boolean;
+  protection_activated?: boolean;
+  active_sl_kind?: string;
+  initial_sl_pct?: number;
+  protect_trigger_pct?: number;
+  trail_sl_pct?: number;
+  gross_pnl_usdt?: number;
+  net_pnl_usdt?: number;
+  total_fees_usdt?: number;
+  total_entry_fees_usdt?: number;
+  total_exit_fees_usdt?: number;
+  total_slippage_usdt?: number;
+  equity_before?: number;
+  equity_after?: number;
+  gross_pnl_pct?: number;
+  net_pnl_pct?: number;
+  cost_pct?: number;
+  leg_details?: Array<{
+    leg?: number;
+    entry_ts?: string;
+    exit_ts?: string;
+    entry_price?: number;
+    exit_price?: number;
+    tp_price?: number;
+    exit_status?: string;
+    margin_usdt?: number;
+    entry_notional_usdt?: number;
+    exit_notional_usdt?: number;
+    quantity?: number;
+    entry_fee_usdt?: number;
+    exit_fee_usdt?: number;
+    gross_pnl_usdt?: number;
+    net_pnl_usdt?: number;
+    move_pct?: number;
+  }>;
+};
+
+export type Stage4CandidateDetail = {
+  session_id: string;
+  run_id?: string | null;
+  created_at?: string | null;
+  trade_count: number;
+  candidate: Stage4CandidateResult;
+  trades: Stage4TradeLedgerRow[];
+};
+
 export type Stage4RealizedExpectancyState = {
   exists: boolean;
   realized_expectancy_path?: string | null;
@@ -901,6 +965,12 @@ export function refreshMarketDataEma(asset: string): Promise<RefreshPlan | Async
   });
 }
 
+export function refreshMarketDataFeatureFamily(asset: string, family: string): Promise<RefreshPlan | AsyncJobResponse> {
+  return requestJson<RefreshPlan | AsyncJobResponse>(`/api/v1/market-data/assets/${asset}/features/${family}/refresh`, {
+    method: "POST"
+  });
+}
+
 export function fetchJob(jobId: string): Promise<{ job: RuntimeJob }> {
   return requestJson<{ job: RuntimeJob }>(`/api/v1/jobs/${jobId}`);
 }
@@ -916,6 +986,10 @@ export function fetchWorkerRuntimeStatus(): Promise<{ worker_runtime: WorkerRunt
 
 export function fetchDatasetCandles(datasetId: string, limit = 25): Promise<CandlePreviewResponse> {
   return requestJson<CandlePreviewResponse>(`/api/v1/market-data/${datasetId}/candles?limit=${limit}`);
+}
+
+export function fetchDatasetRows(datasetId: string, limit = 25): Promise<CandlePreviewResponse> {
+  return requestJson<CandlePreviewResponse>(`/api/v1/market-data/${datasetId}/rows?limit=${limit}`);
 }
 
 export function fetchSignalEngines(): Promise<{ engines: SignalEngine[] }> {
@@ -1207,6 +1281,10 @@ export function runStage4RealizedExpectancy(request: Stage4RealizedExpectancyReq
       leverage: request.leverage
     })
   });
+}
+
+export function fetchStage4CandidateDetail(request: { session_id: string; candidate_id: string }): Promise<{ detail: Stage4CandidateDetail }> {
+  return requestJson(`/api/v1/research/stage1-sessions/${request.session_id}/stage4/candidates/${encodeURIComponent(request.candidate_id)}/details`);
 }
 
 export function promoteExecutionBundle(sessionId: string): Promise<{ bundle: ExecutionBundle; route: DeploymentRoute }> {

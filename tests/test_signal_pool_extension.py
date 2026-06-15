@@ -11,7 +11,7 @@ from sqlalchemy import create_engine, insert
 from quant_terminal_api.db.models import data_sources, market_data_refs, metadata
 from quant_terminal_api.repositories.runtime import RuntimeRepository
 from quant_terminal_worker.signal_engines import vegas_ema
-from quant_terminal_worker.ingestion.signal_pool_extension import extend_signal_pool_from_local_candles
+from quant_terminal_worker.ingestion.signal_pool_extension import _append_packets_to_signal_set, extend_signal_pool_from_local_candles
 
 
 WORKSPACE_MANIFEST = {
@@ -47,6 +47,128 @@ def test_extend_signal_pool_blocks_when_target_exceeds_parquet_raw_candles(tmp_p
         assert str(exc) == "Raw candle data only covers through 2026-05-15T00:00:00Z. Update local candle data first."
     else:
         raise AssertionError("expected parquet raw coverage blocker")
+
+
+def test_append_packets_uses_bulk_repository_insert_when_available(tmp_path: Path):
+    root = _make_workspace(tmp_path)
+    repository = _repository_with_signal_pool(root)
+    signal_set = repository.get_signal_set("vegas_ema:AAVE:AAVE-vegas_ema-canonical")
+    bulk_calls = []
+    single_calls = []
+
+    def bulk_insert(rows):
+        bulk_calls.append(list(rows))
+        RuntimeRepository.upsert_signals(repository, rows)
+
+    def single_insert(row):
+        single_calls.append(row)
+        RuntimeRepository.upsert_signal(repository, row)
+
+    repository.upsert_signals = bulk_insert
+    repository.upsert_signal = single_insert
+
+    result = _append_packets_to_signal_set(
+        repository=repository,
+        signal_set=signal_set,
+        signal_set_key=signal_set["signal_set_key"],
+        packets=[
+            {
+                "schema_version": "signal_packet.v2",
+                "asset": "AAVE",
+                "timestamp": "2026-05-20T00:00:00Z",
+                "active_timeframes": ["2h"],
+                "interactions": [],
+                "charts": {},
+            },
+            {
+                "schema_version": "signal_packet.v2",
+                "asset": "AAVE",
+                "timestamp": "2026-05-20T00:05:00Z",
+                "active_timeframes": ["2h"],
+                "interactions": [],
+                "charts": {},
+            },
+        ],
+    )
+
+    assert result["signals"] == 2
+    assert len(bulk_calls) == 1
+    assert len(bulk_calls[0]) == 2
+    assert single_calls == []
+    assert len(repository.list_signals(signal_set_key=signal_set["signal_set_key"])) == 3
+
+
+def test_extend_signal_pool_reports_packet_progress_for_streamed_chunks(tmp_path: Path, monkeypatch) -> None:
+    root = _make_workspace(tmp_path)
+    repository = _repository_with_signal_pool(root)
+    _register_default_refs(
+        repository,
+        root=root,
+        asset="AAVE",
+        timestamps=[
+            "2026-05-10T00:00:00Z",
+            "2026-05-10T00:05:00Z",
+            "2026-05-10T00:10:00Z",
+            "2026-05-10T00:15:00Z",
+        ],
+    )
+    progress_steps = []
+
+    def fake_resolve_signal_engine(*args, **kwargs):
+        class FakeSpec:
+            configuration_schema = {}
+
+        class FakeResolved:
+            spec = FakeSpec()
+
+            @staticmethod
+            def generate_training_signals(context):
+                packets = [
+                    {
+                        "schema_version": "signal_packet.v2",
+                        "asset": "AAVE",
+                        "timestamp": "2026-05-10T00:05:00Z",
+                    },
+                    {
+                        "schema_version": "signal_packet.v2",
+                        "asset": "AAVE",
+                        "timestamp": "2026-05-10T00:10:00Z",
+                    },
+                    {
+                        "schema_version": "signal_packet.v2",
+                        "asset": "AAVE",
+                        "timestamp": "2026-05-10T00:15:00Z",
+                    },
+                ]
+                context.packet_sink(packets[:2])
+                context.packet_sink(packets[2:])
+
+                class FakeOutput:
+                    packets = []
+
+                return FakeOutput()
+
+        return FakeResolved()
+
+    monkeypatch.setattr(
+        "quant_terminal_worker.ingestion.signal_pool_extension.resolve_signal_engine",
+        fake_resolve_signal_engine,
+    )
+
+    result = extend_signal_pool_from_local_candles(
+        workspace_root=root,
+        repository=repository,
+        signal_engine_id="vegas_ema",
+        asset="AAVE",
+        target_end="2026-05-10T00:15:00Z",
+        progress_callback=progress_steps.append,
+    )
+
+    assert result["appended_packet_count"] == 3
+    assert progress_steps == [
+        "packets 2 appended",
+        "packets 3 appended",
+    ]
 
 
 def test_extend_signal_pool_uses_parquet_candles_and_ignores_persistent_packet_folder(
