@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 import shutil
 import sys
-from collections import Counter, defaultdict
 from typing import Any
 
 
@@ -246,7 +245,6 @@ def generate_stage1a_failure_audit(*, iteration_root: Path, sample_role: str = "
         elif record["agreement"] == "MATCH":
             protected_cases.append(case)
 
-    score_metrics = _normalized_score_metrics(scores.get("metrics", {}))
     metrics = {
         "total": scores.get("metrics", {}).get("total", len(scores.get("records", []))),
         "failure_count": len(failure_cases),
@@ -254,10 +252,9 @@ def generate_stage1a_failure_audit(*, iteration_root: Path, sample_role: str = "
         "neutral_count": sum(1 for case in failure_cases if case["agreement"] == "NEUTRAL"),
         "protected_count": len(protected_cases),
     }
-    all_cases = [*failure_cases, *protected_cases]
     created_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     audit = {
-        "schema_version": "0.2",
+        "schema_version": "0.1",
         "stage": "stage1a_directional_agreement",
         "sample_role": sample_role,
         "sample_title": artifacts["title"],
@@ -267,24 +264,9 @@ def generate_stage1a_failure_audit(*, iteration_root: Path, sample_role: str = "
         "session_strategy_path": str(iteration_root.parents[1] / "strategy_module" / "strategy.py"),
         "strategy_snapshot_path": str(iteration_root / "source_artifacts" / "strategy_module_snapshot"),
         "metrics": metrics,
-        "score_metrics": score_metrics,
         "failure_cluster": _failure_cluster(metrics),
-        "coverage_summary": _coverage_summary(cases=all_cases, score_metrics=score_metrics),
-        "evidence_summary": _evidence_summary(cases=all_cases),
-        "monthly_summary": _monthly_summary(cases=all_cases),
-        "side_summary": _side_summary(cases=all_cases),
-        "artifact_refs": {
-            "signal_sample": str(iteration_root / "signal_sample.json"),
-            "builder_training_sample": str(iteration_root / "builder_training_sample.json")
-            if (iteration_root / "builder_training_sample.json").exists()
-            else None,
-            "scores": str(iteration_root / "scores" / artifacts["scores"]),
-            "decisions": str(iteration_root / "decisions" / artifacts["decisions"]),
-        },
         "failure_cases": failure_cases,
-        "failure_case_count": len(failure_cases),
-        "protected_cases": protected_cases,
-        "protected_case_count": len(protected_cases),
+        "protected_cases": protected_cases[:10],
         "required_update_shape": {
             "layer": "Stage 1A directional classification only",
             "proposed_skill_change": "Identify recurring packet evidence that should reclassify direction or turn neutral reads into LONG/SHORT calls.",
@@ -343,123 +325,7 @@ def _audit_case(
         "packet_path": sample.get("packet_path"),
         "ground_truth": ground_truth,
         "diagnostics": decision.get("diagnostics", {}),
-        "packet_context": _packet_context(sample.get("packet")),
     }
-
-
-def _packet_context(packet: Any) -> dict[str, Any]:
-    if not isinstance(packet, dict):
-        return {}
-    evidence = packet.get("evidence") if isinstance(packet.get("evidence"), dict) else {}
-    features = packet.get("features") if isinstance(packet.get("features"), dict) else evidence.get("features")
-    charts = packet.get("charts") if isinstance(packet.get("charts"), dict) else evidence.get("charts")
-    active_timeframes = packet.get("active_timeframes") or evidence.get("active_timeframes") or []
-    return {
-        "active_timeframes": list(active_timeframes) if isinstance(active_timeframes, list) else [],
-        "pattern": evidence.get("pattern"),
-        "trigger_timeframe": evidence.get("trigger_timeframe") or evidence.get("timeframe"),
-        "context_timeframes": evidence.get("context_timeframes") if isinstance(evidence.get("context_timeframes"), list) else [],
-        "matched_ema_count": evidence.get("matched_ema_count"),
-        "matched_periods": evidence.get("matched_periods") if isinstance(evidence.get("matched_periods"), list) else [],
-        "feature_frames": sorted(features.keys()) if isinstance(features, dict) else [],
-        "chart_frames": sorted(charts.keys()) if isinstance(charts, dict) else [],
-    }
-
-
-def _coverage_summary(*, cases: list[dict[str, Any]], score_metrics: dict[str, Any]) -> dict[str, Any]:
-    total = len(cases)
-    neutral = sum(1 for case in cases if case.get("agreement") == "NEUTRAL")
-    called = total - neutral
-    null_ground_truth = sum(1 for case in cases if case.get("ground_truth_direction") not in {"LONG", "SHORT"})
-    return {
-        "total": total,
-        "called": called,
-        "neutral": neutral,
-        "scoreable": score_metrics.get("scoreable", called),
-        "called_coverage": round(called / total, 6) if total else 0,
-        "strategy_neutral_rate": round(neutral / total, 6) if total else 0,
-        "natural_null_gt_rate": round(null_ground_truth / total, 6) if total else 0,
-        "neutral_rate_deviation": round((neutral - null_ground_truth) / total, 6) if total else 0,
-    }
-
-
-def _normalized_score_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
-    normalized = dict(metrics)
-    matches = int(normalized.get("matches") or 0)
-    mismatches = int(normalized.get("mismatches") or 0)
-    scoreable = matches + mismatches
-    normalized.setdefault("scoreable", scoreable)
-    normalized.setdefault("directional_agreement", round(matches / scoreable, 6) if scoreable else 0)
-    normalized.setdefault("promotion_threshold_pct", PROMOTION_THRESHOLD_PCT)
-    normalized.setdefault(
-        "passes_threshold",
-        normalized["directional_agreement"] * 100 >= normalized["promotion_threshold_pct"],
-    )
-    return normalized
-
-
-def _evidence_summary(*, cases: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
-        "reason_counts": _counter_rows((case.get("reason_code") or "" for case in cases), key="reason_code"),
-        "agreement_counts": _counter_rows((case.get("agreement") or "" for case in cases), key="agreement"),
-        "decision_direction_counts": _counter_rows((case.get("decision_direction") or "" for case in cases), key="direction"),
-        "truth_direction_counts": _counter_rows((case.get("ground_truth_direction") or "NULL" for case in cases), key="direction"),
-        "active_timeframe_counts": _counter_rows(
-            (",".join(case.get("packet_context", {}).get("active_timeframes") or ["none"]) for case in cases)
-        ),
-    }
-
-
-def _monthly_summary(*, cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for case in cases:
-        timestamp = case.get("timestamp")
-        month = timestamp[:7] if isinstance(timestamp, str) and len(timestamp) >= 7 else "unknown"
-        grouped[month].append(case)
-    return [{"month": month, "metrics": _case_metrics(items)} for month, items in sorted(grouped.items())]
-
-
-def _side_summary(*, cases: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    result = {}
-    for side in ("LONG", "SHORT"):
-        truth_cases = [case for case in cases if case.get("ground_truth_direction") == side]
-        calls = [case for case in cases if case.get("decision_direction") == side]
-        result[side] = {
-            "truth_count": len(truth_cases),
-            "call_count": len(calls),
-            "matches": sum(1 for case in truth_cases if case.get("agreement") == "MATCH"),
-            "mismatches": sum(1 for case in truth_cases if case.get("agreement") == "MISMATCH"),
-            "neutral": sum(1 for case in truth_cases if case.get("agreement") == "NEUTRAL"),
-            "agreement": _agreement_rate(truth_cases),
-        }
-    return result
-
-
-def _case_metrics(cases: list[dict[str, Any]]) -> dict[str, Any]:
-    matches = sum(1 for case in cases if case.get("agreement") == "MATCH")
-    mismatches = sum(1 for case in cases if case.get("agreement") == "MISMATCH")
-    neutral = sum(1 for case in cases if case.get("agreement") == "NEUTRAL")
-    called = matches + mismatches
-    return {
-        "total": len(cases),
-        "matches": matches,
-        "mismatches": mismatches,
-        "neutral": neutral,
-        "scoreable": called,
-        "directional_agreement": round(matches / called, 6) if called else 0,
-        "strategy_neutral_rate": round(neutral / len(cases), 6) if cases else 0,
-    }
-
-
-def _agreement_rate(cases: list[dict[str, Any]]) -> float:
-    called = sum(1 for case in cases if case.get("agreement") in {"MATCH", "MISMATCH"})
-    matches = sum(1 for case in cases if case.get("agreement") == "MATCH")
-    return round(matches / called, 6) if called else 0
-
-
-def _counter_rows(values: Any, *, key: str = "value") -> list[dict[str, Any]]:
-    counter = Counter(str(value) for value in values)
-    return [{key: value, "count": count} for value, count in sorted(counter.items(), key=lambda item: item[0])]
 
 
 def _audit_labels_for_iteration(*, iteration_root: Path, training_sample: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -535,6 +401,8 @@ Failure cluster: {audit['failure_cluster']}
 
 
 def _render_failure_audit_prompt(audit: dict[str, Any]) -> str:
+    failure_ids = ", ".join(case["signal_id"] for case in audit["failure_cases"]) or "none"
+    protected_ids = ", ".join(case["signal_id"] for case in audit["protected_cases"][:10]) or "none"
     iteration_root = Path(audit["iteration_root"])
     strategy_path = audit["session_strategy_path"]
     policy = audit.get("agent_handoff_policy")
@@ -547,9 +415,11 @@ Read:
 - {iteration_root / "signal_sample.json"}
 
 Current failure cluster: {audit['failure_cluster']}
+Failure cases: {failure_ids}
+Protected cases: {protected_ids}
 
 Task:
-Write a postmortem only. Use the audit artifact as the evidence source; do not infer from this prompt.
+Write a postmortem only. Explain the failure modes and whether the strategy should be rejected, retrained in a fresh cycle, or held for review.
 
 Rules:
 - Do not edit the strategy based on walk-forward test evidence.
@@ -573,9 +443,11 @@ Session strategy file to edit:
 - {strategy_path}
 
 Current failure cluster: {audit['failure_cluster']}
+Failure cases: {failure_ids}
+Protected cases that should not regress: {protected_ids}
 
 Task:
-Make the smallest possible Stage 1A direction-only update to {strategy_path} that addresses repeated failure evidence in the audit. Treat `failure_audit.json` as the evidence source; this prompt intentionally does not list individual cases.
+Make the smallest possible Stage 1A direction-only update to {strategy_path} that addresses repeated failure evidence in the audit.
 
 Rules:
 - Stage 1A is directional agreement only: choose LONG or SHORT when the signal is scoreable.

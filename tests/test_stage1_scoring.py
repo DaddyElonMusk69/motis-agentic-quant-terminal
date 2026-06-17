@@ -323,32 +323,18 @@ def test_generate_stage1a_failure_audit_writes_failure_ledger_and_prompt(tmp_pat
     prompt = (iteration_root / "agent_failure_audit_prompt.md").read_text()
     markdown = (iteration_root / "audits/failure_audit.md").read_text()
     assert result["metrics"]["failure_count"] == 2
-    assert audit["schema_version"] == "0.2"
-    assert audit["score_metrics"]["scoreable"] == 2
-    assert audit["evidence_summary"]["reason_counts"] == [
-        {"reason_code": "right", "count": 1},
-        {"reason_code": "skip", "count": 1},
-        {"reason_code": "wrong", "count": 1},
-    ]
-    assert audit["coverage_summary"]["strategy_neutral_rate"] == 0.333333
-    assert audit["monthly_summary"][0]["month"] == "2026-03"
-    assert audit["monthly_summary"][0]["metrics"]["mismatches"] == 1
-    assert audit["side_summary"]["LONG"]["truth_count"] == 2
-    assert audit["side_summary"]["SHORT"]["mismatches"] == 1
+    assert audit["schema_version"] == "0.1"
     assert audit["failure_cases"][0]["signal_id"] == "sig-miss"
-    assert audit["failure_cases"][0]["timestamp"] == "2026-03-01T00:00:00Z"
-    assert audit["failure_cases"][0]["packet_context"]["active_timeframes"] == ["5m"]
-    assert audit["failure_cases"][0]["packet_context"]["matched_ema_count"] == 3
-    assert audit["failure_cases"][0]["packet_context"]["feature_frames"] == ["1d", "2h", "5m"]
     assert audit["protected_cases"][0]["signal_id"] == "sig-win"
-    assert audit["protected_case_count"] == 1
+    assert len(audit["protected_cases"]) == 1
     assert "smallest possible Stage 1A direction-only update" in prompt
     assert "Do not add Stage 1B entry gates" in prompt
     assert str(iteration_root / "audits" / "failure_audit.json") in prompt
     assert str(iteration_root.parents[1] / "strategy_module" / "strategy.py") in prompt
     assert "New Stage 1 bundles automatically snapshot the current session strategy file" in prompt
-    assert "sig-miss" not in prompt
-    assert "sig-flat" not in prompt
+    assert "sig-miss" in prompt
+    assert "sig-flat" in prompt
+    assert "sig-win" in prompt
     assert "sig-flat" in markdown
 
 

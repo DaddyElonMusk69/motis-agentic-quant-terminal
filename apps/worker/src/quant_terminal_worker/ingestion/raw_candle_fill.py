@@ -6,9 +6,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import pyarrow as pa
-import pyarrow.parquet as pq
 
-from quant_terminal_sdk.parquet_store import read_candles
+from quant_terminal_sdk.parquet_store import read_candles, write_parquet_table_atomically
 from quant_terminal_worker.ingestion.okx_candles import OKXCandleAdapter, normalize_okx_candle
 
 
@@ -158,7 +157,7 @@ def _write_dataset_rows(storage_uri: Path, rows: list[dict[str, Any]]) -> None:
     for (year, month), month_rows in sorted(grouped.items()):
         path = storage_uri / f"year={year:04d}" / f"month={month:02d}" / "data.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(pa.Table.from_pylist(month_rows), path)
+        write_parquet_table_atomically(pa.Table.from_pylist(month_rows), path)
 
 
 def _rebuild_derived_refs(
