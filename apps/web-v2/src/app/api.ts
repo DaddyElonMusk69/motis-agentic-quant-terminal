@@ -711,6 +711,90 @@ export type Stage4CandidateDetail = {
   trades: Stage4TradeLedgerRow[];
 };
 
+export type PortfolioBacktestResult = {
+  schema_version: string;
+  artifact_role: "portfolio_backtest" | string;
+  created_at: string;
+  run_id: string;
+  universe_run_id: string;
+  simulation_inputs: {
+    initial_capital_usdt: number;
+    margin_allocations_pct: Record<string, number>;
+    margin_basis?: string;
+    pyramid_margin_mode?: string;
+  };
+  eligible_assets: Array<{
+    asset: string;
+    session_id: string;
+    stage4_candidate_id: string;
+    margin_allocation_pct: number;
+  }>;
+  summary: {
+    eligible_asset_count: number;
+    total_signals: number;
+    executed_positions: number;
+    skipped_signals: number;
+    skipped_insufficient_margin: number;
+    skipped_asset_open: number;
+    blocked_pyramid_legs: number;
+  };
+  account: {
+    initial_capital_usdt: number;
+    ending_equity_usdt: number;
+    gross_pnl_usdt: number;
+    net_pnl_usdt: number;
+    total_fees_usdt: number;
+    return_pct: number;
+    gross_return_pct: number;
+  };
+  equity_curve: Array<{
+    timestamp: string | null;
+    equity_usdt: number;
+    used_margin_usdt: number;
+    free_margin_usdt: number;
+  }>;
+  trade_ledger: Stage4TradeLedgerRow[];
+  skipped_signals: Array<{
+    asset: string;
+    source_session_id?: string;
+    candidate_id?: string;
+    signal_id?: string;
+    signal_ts?: string;
+    skip_reason: string;
+    requested_margin_usdt?: number | null;
+    used_margin_usdt: number;
+    free_margin_usdt: number;
+    equity_usdt: number;
+  }>;
+  portfolio_backtest_path?: string;
+  trade_ledger_path?: string;
+  skipped_signals_path?: string;
+};
+
+export type PortfolioBacktestRunIndex = {
+  schema_version: string;
+  artifact_role: "portfolio_backtest_run_index" | string;
+  universe_run_id: string;
+  latest_run_id?: string | null;
+  runs: Array<{
+    run_id: string;
+    created_at: string;
+    summary: PortfolioBacktestResult["summary"];
+    account: PortfolioBacktestResult["account"];
+    portfolio_backtest_path?: string;
+  }>;
+};
+
+export type PortfolioBacktestDeleteResult = {
+  schema_version: string;
+  artifact_role: "portfolio_backtest_delete_result" | string;
+  universe_run_id: string;
+  deleted_run_id: string;
+  latest_run_id?: string | null;
+  remaining_run_count: number;
+  runs: PortfolioBacktestRunIndex["runs"];
+};
+
 export type Stage4RealizedExpectancyState = {
   exists: boolean;
   realized_expectancy_path?: string | null;
@@ -1049,6 +1133,33 @@ export function fetchStage0UniverseAppendableAssets(universeRunId: string): Prom
 
 export function fetchDevelopmentQueue(universeRunId: string): Promise<{ universe_run: Stage0UniverseRun; queue: DevelopmentQueueRow[] }> {
   return requestJson<{ universe_run: Stage0UniverseRun; queue: DevelopmentQueueRow[] }>(`/api/v1/research/cycles/${universeRunId}/development-queue`);
+}
+
+export function runPortfolioBacktest(request: {
+  universe_run_id: string;
+  initial_capital_usdt: number;
+  margin_allocations_pct: Record<string, number>;
+}): Promise<{ portfolio_backtest: PortfolioBacktestResult } | AsyncJobResponse> {
+  return requestJson(`/api/v1/research/stage0-universe-runs/${request.universe_run_id}/portfolio-backtest`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      initial_capital_usdt: request.initial_capital_usdt,
+      margin_allocations_pct: request.margin_allocations_pct
+    })
+  });
+}
+
+export function fetchPortfolioBacktestRuns(universeRunId: string): Promise<{ portfolio_backtest_runs: PortfolioBacktestRunIndex }> {
+  return requestJson<{ portfolio_backtest_runs: PortfolioBacktestRunIndex }>(`/api/v1/research/stage0-universe-runs/${universeRunId}/portfolio-backtest/runs`);
+}
+
+export function fetchPortfolioBacktestRun(request: { universe_run_id: string; run_id: string }): Promise<{ portfolio_backtest: PortfolioBacktestResult }> {
+  return requestJson<{ portfolio_backtest: PortfolioBacktestResult }>(`/api/v1/research/stage0-universe-runs/${request.universe_run_id}/portfolio-backtest/runs/${request.run_id}`);
+}
+
+export function deletePortfolioBacktestRun(request: { universe_run_id: string; run_id: string }): Promise<{ portfolio_backtest_delete: PortfolioBacktestDeleteResult }> {
+  return requestJson<{ portfolio_backtest_delete: PortfolioBacktestDeleteResult }>(`/api/v1/research/stage0-universe-runs/${request.universe_run_id}/portfolio-backtest/runs/${request.run_id}`, { method: "DELETE" });
 }
 
 export function createStage0UniverseRun(request: {

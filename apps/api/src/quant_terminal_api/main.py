@@ -64,6 +64,10 @@ from quant_terminal_worker.stage3.grid_search import run_stage3_fixed_sl_baselin
 from quant_terminal_worker.stage3.grid_search import run_stage3_grid_search
 from quant_terminal_worker.stage3.grid_search import run_stage3_local_variants
 from quant_terminal_worker.stage3.pyramid import run_stage3_pyramid
+from quant_terminal_worker.stage4.portfolio_backtest import delete_portfolio_backtest_run
+from quant_terminal_worker.stage4.portfolio_backtest import list_portfolio_backtest_runs
+from quant_terminal_worker.stage4.portfolio_backtest import read_portfolio_backtest_run
+from quant_terminal_worker.stage4.portfolio_backtest import run_portfolio_backtest
 from quant_terminal_worker.stage4.realized_expectancy import run_stage4_realized_expectancy
 
 
@@ -163,6 +167,11 @@ class Stage4RealizedExpectancyRequest(BaseModel):
     initial_capital_usdt: float = Field(default=10_000.0, gt=0)
     margin_allocation_pct: float = Field(default=30.0, gt=0, le=100)
     leverage: float = Field(default=5.0, ge=1, le=125)
+
+
+class PortfolioBacktestRequest(BaseModel):
+    initial_capital_usdt: float = Field(default=10_000.0, gt=0)
+    margin_allocations_pct: dict[str, float] = Field(default_factory=dict)
 
 
 class LegacySignalImportRequest(BaseModel):
@@ -1141,6 +1150,83 @@ def create_app(
                 build_stage1_gate_summary(workspace_root=Path.cwd(), session=session),
             ),
         }
+
+    @app.post("/api/v1/research/stage0-universe-runs/{universe_run_id}/portfolio-backtest")
+    def run_portfolio_backtest_readout(
+        universe_run_id: str,
+        request: PortfolioBacktestRequest = PortfolioBacktestRequest(),
+    ) -> dict[str, Any]:
+        repository = get_runtime_repository()
+        universe_run = repository.get_stage0_universe_run(universe_run_id)
+        if universe_run is None:
+            raise HTTPException(status_code=404, detail="stage0 universe run not found")
+        candidates = repository.list_stage0_universe_candidates(universe_run_id)
+        sessions = [session for session in repository.list_stage1_research_sessions() if session.get("source_universe_run_id") == universe_run_id]
+        if not _portfolio_stage4_complete_sessions(Path.cwd(), sessions=sessions, candidates=candidates):
+            raise HTTPException(status_code=400, detail="Portfolio backtest requires at least one Stage 4-complete asset")
+        queued = enqueue_runtime_job(
+            repository,
+            job_type="portfolio_backtest",
+            scope_key=f"stage0:{universe_run_id}",
+            payload={
+                "universe_run_id": universe_run_id,
+                "initial_capital_usdt": request.initial_capital_usdt,
+                "margin_allocations_pct": request.margin_allocations_pct,
+            },
+            current_step="queued",
+        )
+        if queued:
+            return queued
+        try:
+            result = run_portfolio_backtest(
+                workspace_root=Path.cwd(),
+                universe_run=universe_run,
+                candidates=candidates,
+                sessions=sessions,
+                initial_capital_usdt=request.initial_capital_usdt,
+                margin_allocations_pct=request.margin_allocations_pct,
+                repository=get_runtime_repository(),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "portfolio_backtest": _relative_nested_paths(Path.cwd(), result),
+        }
+
+    @app.get("/api/v1/research/stage0-universe-runs/{universe_run_id}/portfolio-backtest/runs")
+    def list_portfolio_backtest_run_history(universe_run_id: str) -> dict[str, Any]:
+        if get_runtime_repository().get_stage0_universe_run(universe_run_id) is None:
+            raise HTTPException(status_code=404, detail="stage0 universe run not found")
+        return {
+            "portfolio_backtest_runs": _relative_nested_paths(
+                Path.cwd(),
+                list_portfolio_backtest_runs(workspace_root=Path.cwd(), universe_run_id=universe_run_id),
+            )
+        }
+
+    @app.get("/api/v1/research/stage0-universe-runs/{universe_run_id}/portfolio-backtest/runs/{run_id}")
+    def get_portfolio_backtest_run(universe_run_id: str, run_id: str) -> dict[str, Any]:
+        if get_runtime_repository().get_stage0_universe_run(universe_run_id) is None:
+            raise HTTPException(status_code=404, detail="stage0 universe run not found")
+        try:
+            run = read_portfolio_backtest_run(workspace_root=Path.cwd(), universe_run_id=universe_run_id, run_id=run_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"portfolio_backtest": _relative_nested_paths(Path.cwd(), run)}
+
+    @app.delete("/api/v1/research/stage0-universe-runs/{universe_run_id}/portfolio-backtest/runs/{run_id}")
+    def delete_portfolio_backtest_run_history(universe_run_id: str, run_id: str) -> dict[str, Any]:
+        if get_runtime_repository().get_stage0_universe_run(universe_run_id) is None:
+            raise HTTPException(status_code=404, detail="stage0 universe run not found")
+        try:
+            result = delete_portfolio_backtest_run(workspace_root=Path.cwd(), universe_run_id=universe_run_id, run_id=run_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"portfolio_backtest_delete": _relative_nested_paths(Path.cwd(), result)}
 
     @app.get("/api/v1/research/stage1-sessions/{session_id}/stage4/candidates/{candidate_id}/details")
     def get_stage4_candidate_detail(session_id: str, candidate_id: str) -> dict[str, Any]:
@@ -2622,6 +2708,30 @@ def _stage0_evaluated_signal_count(candidate: dict[str, Any]) -> int | None:
     if isinstance(packet_count, int):
         return packet_count
     return None
+
+
+def _portfolio_stage4_complete_sessions(
+    workspace_root: Path,
+    *,
+    sessions: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    accepted_candidate_ids = {
+        candidate["candidate_id"]
+        for candidate in candidates
+        if candidate.get("acceptance_status") == "accepted"
+    }
+    complete = []
+    for session in sessions:
+        if session.get("source_candidate_id") not in accepted_candidate_ids:
+            continue
+        artifact_root = Path(str(session.get("artifact_root") or ""))
+        if not artifact_root.is_absolute():
+            artifact_root = workspace_root / artifact_root
+        promotion_root = artifact_root / "promotion"
+        if (promotion_root / "stage4_realized_expectancy.json").is_file() and (promotion_root / "stage4_trade_ledger.json").is_file():
+            complete.append(session)
+    return complete
 
 
 def _development_queue_state(

@@ -3646,6 +3646,130 @@ def test_stage4_endpoint_writes_realized_expectancy_from_full_decision_set(tmp_p
     assert len(gate_stage4["stage4_runs"]) == 1
 
 
+def test_portfolio_backtest_endpoint_writes_pool_artifacts(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repository = StubRuntimeRepository()
+    session = _queue_session(tmp_path, "candidate-aave", "AAVE", "stage1a_frozen")
+    promotion_root = tmp_path / session["artifact_root"] / "promotion"
+
+    # Stage 4 realized expectancy with candidate setup
+    candidate_setup = {
+        "candidate_id": "market",
+        "entry_model": "market",
+        "tp_pct": 2.0,
+        "sl_pct": 1.0,
+        "final_tp_pct": 2.0,
+        "initial_sl_pct": 1.0,
+        "protection_enabled": False,
+        "timeout_policy": "close_at_cutoff",
+        "max_hold_hours": 12.0,
+        "leverage": 5.0,
+    }
+    (promotion_root / "stage4_realized_expectancy.json").write_text(
+        json.dumps(
+            {
+                "run_id": "stage4-run",
+                "asset": "AAVE",
+                "best_candidate_id": "market",
+                "best_candidate": {"candidate_id": "market", "account": {"initial_capital_usdt": 1000}, "setup": candidate_setup},
+                "cost_assumptions": {"fees_bps_per_side": 5.0, "slippage_bps_per_side": 0.0},
+            }
+        )
+    )
+    (promotion_root / "stage4_candidates.json").write_text(
+        json.dumps({"candidates": [{"candidate_id": "market", "setup": candidate_setup}]})
+    )
+    (promotion_root / "stage4_trade_ledger.json").write_text(
+        json.dumps({"run_id": "stage4-run", "candidates": [{"candidate_id": "market", "trades": []}]})
+    )
+    (promotion_root / "stage1a_canonical_full_cycle_scores.json").write_text(
+        json.dumps({"records": [{"signal_id": "sig-1", "decision_direction": "LONG", "agreement": "MATCH"}]})
+    )
+
+    # Set up repository signals with proper packet structure
+    repository.window_signals = [
+        {
+            "signal_id": "sig-1",
+            "signal_set_key": session["signal_set_key"],
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "AAVE",
+            "instrument": "AAVE-USDT-SWAP",
+            "timestamp": "2026-04-20T00:00:00Z",
+            "data_refs": [],
+            "payload_schema": "signal_packet.v2",
+            "payload": {
+                "timestamp": "2026-04-20T00:00:00Z",
+                "active_timeframes": ["5m"],
+                "charts": {"5m": {"latest_forming_candle": {"close": 100.0}}},
+            },
+        }
+    ]
+
+    # Mock MarketDataReader to return simple candles
+    from datetime import datetime as _dt, timedelta as _td
+    _candle_start = _dt(2026, 4, 20, tzinfo=__import__("datetime").timezone.utc)
+    _candles = []
+    _price = 100.0
+    for _i in range(300):
+        _candles.append({
+            "timestamp": _candle_start + _td(minutes=5 * _i),
+            "open": _price,
+            "high": _price * 1.01,
+            "low": _price * 0.99,
+            "close": _price * 1.002,
+        })
+        _price = _price * 1.002
+    monkeypatch.setattr(
+        "quant_terminal_worker.stage4.portfolio_backtest.MarketDataReader",
+        lambda **kw: type("MockReader", (), {"get_candles": lambda self, **kw: _candles})(),
+    )
+
+    repository.create_stage0_universe(_queue_universe_run(), [_queue_candidate("candidate-aave", "AAVE", "accepted", 91.2)])
+    repository.create_stage1_research_session(session)
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post(
+        "/api/v1/research/stage0-universe-runs/universe-march-may-vegas/portfolio-backtest",
+        json={"initial_capital_usdt": 1000, "margin_allocations_pct": {"AAVE": 30}},
+    )
+
+    assert response.status_code == 200
+    result = response.json()["portfolio_backtest"]
+    assert result["summary"]["eligible_asset_count"] == 1
+    assert result["summary"]["executed_positions"] == 1
+    assert result["portfolio_backtest_path"].endswith("dev/portfolio_backtests/universe-march-may-vegas/portfolio_backtest.json")
+    assert (tmp_path / result["portfolio_backtest_path"]).exists()
+
+    history_response = client.get("/api/v1/research/stage0-universe-runs/universe-march-may-vegas/portfolio-backtest/runs")
+    assert history_response.status_code == 200
+    history = history_response.json()["portfolio_backtest_runs"]
+    assert history["latest_run_id"] == result["run_id"]
+    assert [item["run_id"] for item in history["runs"]] == [result["run_id"]]
+
+    run_response = client.get(f"/api/v1/research/stage0-universe-runs/universe-march-may-vegas/portfolio-backtest/runs/{result['run_id']}")
+    assert run_response.status_code == 200
+    assert run_response.json()["portfolio_backtest"]["run_id"] == result["run_id"]
+
+    delete_response = client.delete(f"/api/v1/research/stage0-universe-runs/universe-march-may-vegas/portfolio-backtest/runs/{result['run_id']}")
+    assert delete_response.status_code == 200
+    assert delete_response.json()["portfolio_backtest_delete"]["remaining_run_count"] == 0
+    assert not (tmp_path / result["portfolio_backtest_path"]).exists()
+
+
+def test_portfolio_backtest_endpoint_rejects_without_stage4_assets(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repository = StubRuntimeRepository()
+    repository.create_stage0_universe(_queue_universe_run(), [_queue_candidate("candidate-aave", "AAVE", "accepted", 91.2)])
+    repository.create_stage1_research_session(_queue_session(tmp_path, "candidate-aave", "AAVE", "stage1a_frozen"))
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post("/api/v1/research/stage0-universe-runs/universe-march-may-vegas/portfolio-backtest")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Portfolio backtest requires at least one Stage 4-complete asset"
+
+
 def test_stage1_score_endpoint_rejects_frozen_session(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     repository = StubRuntimeRepository()

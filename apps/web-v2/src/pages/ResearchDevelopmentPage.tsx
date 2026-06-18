@@ -1,11 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Clipboard, Play, RefreshCw, RotateCcw, Trash2, UploadCloud, X } from "lucide-react";
+import { BarChart3, Clipboard, Play, RefreshCw, RotateCcw, Trash2, UploadCloud, X } from "lucide-react";
 import {
   createStage1Iteration,
   createStage1ResearchSession,
+  deletePortfolioBacktestRun,
   deleteStage1Iteration,
   deleteStage1ResearchSession,
+  fetchPortfolioBacktestRun,
+  fetchPortfolioBacktestRuns,
   fetchDevelopmentQueue,
   fetchJob,
   fetchJobs,
@@ -20,6 +23,7 @@ import {
   isJobResponse,
   promoteExecutionBundle,
   promoteStage2ExitPolicy,
+  runPortfolioBacktest,
   runStage1CanonicalReadout,
   runStage2CaptureCurve,
   runStage3ExactProtection,
@@ -29,6 +33,8 @@ import {
   runStage4RealizedExpectancy,
   scoreStage1Iteration,
   type DevelopmentQueueRow,
+  type PortfolioBacktestResult,
+  type PortfolioBacktestRunIndex,
   type ResearchStageId,
   type Stage0UniverseRun,
   type Stage1AgentPrompt,
@@ -82,6 +88,12 @@ type ActiveDevelopmentJob = {
   jobId: string;
   label: string;
   sessionId?: string;
+};
+
+type PortfolioBacktestModalState = {
+  initialCapital: number;
+  allocations: Record<string, number>;
+  result: PortfolioBacktestResult | null;
 };
 
 type ExitSide = "LONG" | "SHORT";
@@ -144,6 +156,9 @@ function restoreDevelopmentJob(job: RuntimeJob): ActiveDevelopmentJob | null {
   }
   if (job.job_type === "stage4_realized_expectancy") {
     return { action: "stage4", jobId: job.job_id, label: "Running Stage 4 backtest", sessionId };
+  }
+  if (job.job_type === "portfolio_backtest") {
+    return { action: "portfolio", jobId: job.job_id, label: "Running portfolio backtest" };
   }
   return null;
 }
@@ -654,6 +669,11 @@ function stage4TradeRowClassName(trade: Stage4TradeLedgerRow): string {
   return "stage4-trade-row stage4-trade-row--flat";
 }
 
+function portfolioBacktestFromJob(job: RuntimeJob | null): PortfolioBacktestResult | null {
+  const result = job?.result?.portfolio_backtest;
+  return result && typeof result === "object" ? result as PortfolioBacktestResult : null;
+}
+
 function scoreExists(gate: Stage1GateSummary | null, role: Stage1SampleRole): boolean {
   return Boolean(gate?.roles[role]?.score);
 }
@@ -679,6 +699,7 @@ export function ResearchDevelopmentPage() {
   const [selectedStage4Candidate, setSelectedStage4Candidate] = useState<Stage4CandidateResult | null>(null);
   const [startChoice, setStartChoice] = useState<Stage1StartChoice | null>(null);
   const [activeJob, setActiveJob] = useState<ActiveDevelopmentJob | null>(null);
+  const [portfolioBacktestModal, setPortfolioBacktestModal] = useState<PortfolioBacktestModalState | null>(null);
   const [stage4Inputs, setStage4Inputs] = useState({
     initial_capital_usdt: 10000,
     margin_allocation_pct: 30,
@@ -726,6 +747,11 @@ export function ResearchDevelopmentPage() {
     queryKey: ["stage4-candidate-detail", session?.session_id, selectedStage4Candidate?.candidate_id],
     queryFn: () => fetchStage4CandidateDetail({ session_id: session!.session_id, candidate_id: selectedStage4Candidate!.candidate_id })
   });
+  const gate = gateQuery.data?.gate ?? row?.stage1_gate ?? null;
+  const completedStage4Assets = useMemo(
+    () => acceptedRows.filter((candidate) => Boolean(candidate.stage1_gate?.stage4_realized_expectancy.exists)),
+    [acceptedRows]
+  );
   const activeJobQuery = useQuery({
     enabled: Boolean(activeJob?.jobId),
     queryKey: ["runtime-job", activeJob?.jobId],
@@ -735,14 +761,24 @@ export function ResearchDevelopmentPage() {
       return !job || ["queued", "running"].includes(job.status) ? 1500 : false;
     }
   });
-  const activeScopeKey = session?.session_id ? `stage1_session:${session.session_id}` : null;
-  const latestScopeJobsQuery = useQuery({
-    enabled: Boolean(activeScopeKey) && !activeJob?.jobId,
-    queryKey: ["runtime-jobs", activeScopeKey],
-    queryFn: () => fetchJobs(activeScopeKey!, 10)
+  const activeSessionScopeKey = session?.session_id ? `stage1_session:${session.session_id}` : null;
+  const activePoolScopeKey = pool?.universe_run_id ? `stage0:${pool.universe_run_id}` : null;
+  const latestSessionScopeJobsQuery = useQuery({
+    enabled: Boolean(activeSessionScopeKey) && !activeJob?.jobId,
+    queryKey: ["runtime-jobs", activeSessionScopeKey],
+    queryFn: () => fetchJobs(activeSessionScopeKey!, 10)
+  });
+  const latestPoolScopeJobsQuery = useQuery({
+    enabled: Boolean(activePoolScopeKey) && !activeJob?.jobId,
+    queryKey: ["runtime-jobs", activePoolScopeKey],
+    queryFn: () => fetchJobs(activePoolScopeKey!, 10)
+  });
+  const portfolioRunsQuery = useQuery({
+    enabled: Boolean(pool?.universe_run_id && portfolioBacktestModal),
+    queryKey: ["portfolio-backtest-runs", pool?.universe_run_id],
+    queryFn: () => fetchPortfolioBacktestRuns(pool!.universe_run_id)
   });
 
-  const gate = gateQuery.data?.gate ?? row?.stage1_gate ?? null;
   const iterations = iterationsQuery.data?.iterations ?? [];
   const groupedIterations = useMemo(() => roleIterations(iterations), [iterations]);
   const mode = evidenceMode(gate, session);
@@ -764,8 +800,9 @@ export function ResearchDevelopmentPage() {
   }, [plannedStrategyId, row, session?.session_id, sessionsQuery.data?.sessions]);
   const trackedJob = activeJobQuery.data?.job ?? null;
   const trackedJobRunning = Boolean(trackedJob && ["queued", "running"].includes(trackedJob.status));
-  const sessionJobRunning = trackedJobRunning && (!activeJob?.sessionId || activeJob.sessionId === session?.session_id);
-  const isJobRunning = (action: string) => sessionJobRunning && activeJob?.action === action;
+  const sessionJobRunning = trackedJobRunning && activeJob?.action !== "portfolio" && (!activeJob?.sessionId || activeJob.sessionId === session?.session_id);
+  const portfolioJobRunning = trackedJobRunning && activeJob?.action === "portfolio";
+  const isJobRunning = (action: string) => activeJob?.action === action && (action === "portfolio" ? portfolioJobRunning : sessionJobRunning);
   const trackAsyncJob = (result: unknown, action: string, label: string, sessionId?: string): boolean => {
     if (!isJobResponse(result)) {
       return false;
@@ -875,6 +912,35 @@ export function ResearchDevelopmentPage() {
       }
     }
   });
+  const portfolioBacktestMutation = useMutation({
+    mutationFn: runPortfolioBacktest,
+    onSuccess: (result, variables) => {
+      if (!trackAsyncJob(result, "portfolio", "Running portfolio backtest")) {
+        invalidateDevelopment(undefined, variables.universe_run_id);
+        void queryClient.invalidateQueries({ queryKey: ["portfolio-backtest-runs", variables.universe_run_id] });
+        if ("portfolio_backtest" in result) {
+          setPortfolioBacktestModal((current) => (current ? { ...current, result: result.portfolio_backtest } : current));
+        }
+      }
+    }
+  });
+  const loadPortfolioRunMutation = useMutation({
+    mutationFn: fetchPortfolioBacktestRun,
+    onSuccess: (result) => {
+      setPortfolioBacktestModal((current) => (current ? { ...current, result: result.portfolio_backtest } : current));
+    }
+  });
+  const deletePortfolioRunMutation = useMutation({
+    mutationFn: deletePortfolioBacktestRun,
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: ["portfolio-backtest-runs", result.portfolio_backtest_delete.universe_run_id] });
+      setPortfolioBacktestModal((current) => (
+        current?.result?.run_id === result.portfolio_backtest_delete.deleted_run_id
+          ? { ...current, result: null }
+          : current
+      ));
+    }
+  });
   const promoteMutation = useMutation({
     mutationFn: promoteExecutionBundle,
     onSuccess: (_result, sessionId) => invalidateDevelopment(sessionId, pool?.universe_run_id)
@@ -884,7 +950,11 @@ export function ResearchDevelopmentPage() {
     if (activeJob?.jobId) {
       return;
     }
-    const job = latestScopeJobsQuery.data?.jobs.find((item) => ["queued", "running"].includes(item.status));
+    const jobs = [
+      ...(latestSessionScopeJobsQuery.data?.jobs ?? []),
+      ...(latestPoolScopeJobsQuery.data?.jobs ?? [])
+    ];
+    const job = jobs.find((item) => ["queued", "running"].includes(item.status));
     if (!job) {
       return;
     }
@@ -892,7 +962,7 @@ export function ResearchDevelopmentPage() {
     if (restored) {
       setActiveJob(restored);
     }
-  }, [activeJob?.jobId, latestScopeJobsQuery.data?.jobs]);
+  }, [activeJob?.jobId, latestPoolScopeJobsQuery.data?.jobs, latestSessionScopeJobsQuery.data?.jobs]);
 
   useEffect(() => {
     if (!searchParams.get("pool") && pool?.universe_run_id) {
@@ -915,10 +985,17 @@ export function ResearchDevelopmentPage() {
     if (!trackedJob || !activeJob || ["queued", "running"].includes(trackedJob.status)) {
       return;
     }
+    if (activeJob.action === "portfolio" && trackedJob.status === "completed") {
+      const portfolioResult = portfolioBacktestFromJob(trackedJob);
+      if (portfolioResult) {
+        setPortfolioBacktestModal((current) => (current ? { ...current, result: portfolioResult } : current));
+        void queryClient.invalidateQueries({ queryKey: ["portfolio-backtest-runs", portfolioResult.universe_run_id] });
+      }
+    }
     invalidateDevelopment(activeJob.sessionId, pool?.universe_run_id);
     const timeout = window.setTimeout(() => setActiveJob(null), trackedJob.status === "completed" ? 2500 : 5000);
     return () => window.clearTimeout(timeout);
-  }, [activeJob?.jobId, activeJob?.sessionId, pool?.universe_run_id, trackedJob?.status]);
+  }, [activeJob?.action, activeJob?.jobId, activeJob?.sessionId, pool?.universe_run_id, trackedJob, trackedJob?.status]);
 
   useEffect(() => {
     const latestInputs = gate?.stage4_realized_expectancy.latest_simulation_inputs;
@@ -994,6 +1071,26 @@ export function ResearchDevelopmentPage() {
     stage4Mutation.mutate({
       session_id: session.session_id,
       ...stage4Inputs
+    });
+  };
+
+  const openPortfolioBacktest = () => {
+    if (!pool) {
+      return;
+    }
+    const baseAllocation = completedStage4Assets.length ? Math.min(30, Math.floor(100 / completedStage4Assets.length)) : 0;
+    const allocations = Object.fromEntries(completedStage4Assets.map((candidate) => [candidate.asset, baseAllocation]));
+    setPortfolioBacktestModal({ initialCapital: 10000, allocations, result: null });
+  };
+
+  const runPortfolioBacktestNow = () => {
+    if (!pool || !portfolioBacktestModal) {
+      return;
+    }
+    portfolioBacktestMutation.mutate({
+      universe_run_id: pool.universe_run_id,
+      initial_capital_usdt: portfolioBacktestModal.initialCapital,
+      margin_allocations_pct: portfolioBacktestModal.allocations
     });
   };
 
@@ -1111,6 +1208,7 @@ export function ResearchDevelopmentPage() {
     iterationsQuery.error,
     gateQuery.error,
     iterationDetailQuery.error,
+    portfolioRunsQuery.error,
     activeJobQuery.error,
     createSessionMutation.error,
     createIterationMutation.error,
@@ -1127,6 +1225,9 @@ export function ResearchDevelopmentPage() {
     stage3LocalVariantsMutation.error,
     stage3PyramidMutation.error,
     stage4Mutation.error,
+    portfolioBacktestMutation.error,
+    loadPortfolioRunMutation.error,
+    deletePortfolioRunMutation.error,
     promoteMutation.error
   ].filter(Boolean) as Error[];
 
@@ -1139,8 +1240,15 @@ export function ResearchDevelopmentPage() {
           <>
             <div className="list-header">
               <span>Development</span>
-              <button className="icon-button" disabled={queueQuery.isFetching} onClick={() => void queueQuery.refetch()} type="button" aria-label="Refresh development queue">
-                <RefreshCw aria-hidden="true" />
+              <button
+                className="button button--secondary button--compact portfolio-backtest-entry"
+                disabled={completedStage4Assets.length === 0}
+                onClick={openPortfolioBacktest}
+                title={completedStage4Assets.length ? "Run a pool-level account replay across Stage 4-complete assets" : "Complete Stage 4 for at least one accepted asset first"}
+                type="button"
+              >
+                <BarChart3 aria-hidden="true" />
+                Portfolio Backtest
               </button>
             </div>
             <label className="compact-select">
@@ -1454,6 +1562,23 @@ export function ResearchDevelopmentPage() {
             </footer>
           </section>
         </div>
+      ) : null}
+
+      {portfolioBacktestModal ? (
+        <PortfolioBacktestModal
+          assets={completedStage4Assets}
+          state={portfolioBacktestModal}
+          runHistory={portfolioRunsQuery.data?.portfolio_backtest_runs.runs ?? []}
+          latestRunId={portfolioRunsQuery.data?.portfolio_backtest_runs.latest_run_id ?? null}
+          running={portfolioBacktestMutation.isPending || isJobRunning("portfolio")}
+          loadingRunId={loadPortfolioRunMutation.variables?.run_id}
+          deletingRunId={deletePortfolioRunMutation.variables?.run_id}
+          onClose={() => setPortfolioBacktestModal(null)}
+          onDeleteRun={(runId) => pool && deletePortfolioRunMutation.mutate({ universe_run_id: pool.universe_run_id, run_id: runId })}
+          onLoadRun={(runId) => pool && loadPortfolioRunMutation.mutate({ universe_run_id: pool.universe_run_id, run_id: runId })}
+          onRun={runPortfolioBacktestNow}
+          onStateChange={setPortfolioBacktestModal}
+        />
       ) : null}
 
       {prompt ? (
@@ -2646,6 +2771,290 @@ function Stage4Panel({
           />
         </TerminalPanel>
       ) : null}
+    </div>
+  );
+}
+
+function PortfolioBacktestModal({
+  assets,
+  state,
+  runHistory,
+  latestRunId,
+  running,
+  loadingRunId,
+  deletingRunId,
+  onClose,
+  onDeleteRun,
+  onLoadRun,
+  onRun,
+  onStateChange
+}: {
+  assets: DevelopmentQueueRow[];
+  state: PortfolioBacktestModalState;
+  runHistory: PortfolioBacktestRunIndex["runs"];
+  latestRunId: string | null;
+  running: boolean;
+  loadingRunId?: string;
+  deletingRunId?: string;
+  onClose: () => void;
+  onDeleteRun: (runId: string) => void;
+  onLoadRun: (runId: string) => void;
+  onRun: () => void;
+  onStateChange: Dispatch<SetStateAction<PortfolioBacktestModalState | null>>;
+}) {
+  const result = state.result;
+  const [ledgerTab, setLedgerTab] = useState<"trades" | "skipped">("trades");
+  const allocationTotal = Object.values(state.allocations).reduce((sum, value) => sum + Number(value || 0), 0);
+  const tradeRows = stage4FilledTrades(result?.trade_ledger ?? []).map((trade, index) => {
+    const asset = (trade as Stage4TradeLedgerRow & { asset?: string }).asset;
+    return { ...trade, asset, row_key: `${asset ?? "asset"}-${trade.position_id ?? trade.signal_id}-${index}` };
+  });
+  const skippedRows = (result?.skipped_signals ?? []).map((item, index) => ({ ...item, row_key: `${item.asset}-${item.signal_id ?? item.signal_ts ?? "skip"}-${index}` }));
+  const latestPoint = result?.equity_curve[result.equity_curve.length - 1];
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="terminal-modal portfolio-backtest-modal" role="dialog" aria-modal="true" aria-labelledby="portfolio-backtest-title">
+        <header className="terminal-modal__header">
+          <div>
+            <span className="eyebrow">Pool Replay</span>
+            <h2 id="portfolio-backtest-title">Portfolio Backtest</h2>
+          </div>
+          <button className="icon-button" onClick={onClose} type="button" aria-label="Close portfolio backtest">
+            <X aria-hidden="true" />
+          </button>
+        </header>
+
+        <div className="terminal-modal__body portfolio-backtest-body">
+          <div className="portfolio-backtest-layout">
+            <div className="portfolio-backtest-controls">
+            <TerminalPanel eyebrow="inputs" title="Shared Account">
+              <div className="portfolio-control-stack">
+                <label className="stage4-number-control portfolio-capital-control">
+                  <span>Capital</span>
+                  <input
+                    min={100}
+                    onChange={(event) => {
+                      const next = Number(event.target.value);
+                      onStateChange((current) => (current ? { ...current, initialCapital: Number.isFinite(next) ? next : current.initialCapital } : current));
+                    }}
+                    step={100}
+                    type="number"
+                    value={state.initialCapital}
+                  />
+                  <em>USDT</em>
+                </label>
+                <FieldRow label="Eligible Assets" value={formatNumber(assets.length)} />
+                <FieldRow label="Allocation Sum" value={formatPct(allocationTotal)} tone={allocationTotal > 100 ? "warn" : "default"} />
+                <FieldRow label="Margin Basis" value="current equity" />
+              </div>
+            </TerminalPanel>
+
+            <TerminalPanel eyebrow="margin" title="Asset Allocation">
+              <div className="portfolio-allocation-list">
+                {assets.map((asset) => {
+                  const value = state.allocations[asset.asset] ?? 0;
+                  return (
+                    <label className="portfolio-allocation-row" key={asset.candidate_id}>
+                      <span>
+                        <strong>{asset.asset}</strong>
+                        <em>{asset.signal_engine_id}</em>
+                      </span>
+                      <input
+                        max={100}
+                        min={0}
+                        onChange={(event) => {
+                          const next = Number(event.target.value);
+                          onStateChange((current) => current ? {
+                            ...current,
+                            allocations: { ...current.allocations, [asset.asset]: Number.isFinite(next) ? next : value }
+                          } : current);
+                        }}
+                        step={1}
+                        type="range"
+                        value={value}
+                      />
+                      <strong>{formatPct(value)}</strong>
+                    </label>
+                  );
+                })}
+              </div>
+            </TerminalPanel>
+
+            <TerminalPanel eyebrow="artifacts" title="Saved Runs">
+              <div className="portfolio-run-history-list">
+                {runHistory.length ? runHistory.map((run) => (
+                  <div className={run.run_id === result?.run_id ? "portfolio-run-history-row is-active" : "portfolio-run-history-row"} key={run.run_id}>
+                    <button className="portfolio-run-history-main" onClick={() => onLoadRun(run.run_id)} type="button">
+                      <strong>{run.run_id === latestRunId ? "Latest" : formatCompactUtcTimestamp(run.created_at)}</strong>
+                      <span>{formatUsd(run.account?.ending_equity_usdt)} · {formatUsd(run.account?.net_pnl_usdt)} PnL</span>
+                      <small>{formatNumber(run.summary?.executed_positions)} trades · {formatNumber(run.summary?.skipped_signals)} skipped</small>
+                    </button>
+                    <div className="portfolio-run-history-actions">
+                      <button
+                        className="button button--danger button--compact"
+                        disabled={deletingRunId === run.run_id}
+                        onClick={() => {
+                          if (window.confirm(`Delete portfolio backtest run ${run.run_id}? This removes its persisted run artifact.`)) {
+                            onDeleteRun(run.run_id);
+                          }
+                        }}
+                        type="button"
+                      >
+                        <Trash2 aria-hidden="true" />
+                        {deletingRunId === run.run_id ? "…" : ""}
+                      </button>
+                    </div>
+                  </div>
+                )) : <div className="state-line">No saved portfolio runs yet.</div>}
+              </div>
+            </TerminalPanel>
+            </div>
+
+            <div className="portfolio-backtest-results">
+            {result ? (
+              <>
+                <div className="portfolio-summary-strip">
+                  <div><span>Assets</span><strong>{formatNumber(result.summary.eligible_asset_count)}</strong></div>
+                  <div><span>Executed</span><strong>{formatNumber(result.summary.executed_positions)}</strong></div>
+                  <div><span>Ending Equity</span><strong>{formatUsd(result.account.ending_equity_usdt)}</strong></div>
+                  <div><span>Net PnL</span><strong className={result.account.net_pnl_usdt >= 0 ? "tone-pass" : "tone-risk"}>{formatUsd(result.account.net_pnl_usdt)}</strong></div>
+                  <div><span>Margin Skips</span><strong>{formatNumber(result.summary.skipped_insufficient_margin)}</strong></div>
+                  <div><span>Asset Skips</span><strong>{formatNumber(result.summary.skipped_asset_open)}</strong></div>
+                </div>
+
+                <div className="stage4-detail-chart-card portfolio-chart-card">
+                  <div className="stage4-detail-chart-card__header">
+                    <strong>Shared Account Equity</strong>
+                    <span>{latestPoint ? `${formatUsd(latestPoint.free_margin_usdt)} free margin` : "No account points"}</span>
+                  </div>
+                  <PortfolioEquityCurve points={result.equity_curve} />
+                </div>
+
+                <div>
+                  <div className="portfolio-ledger-tabs">
+                    <button
+                      className={`portfolio-ledger-tab ${ledgerTab === "trades" ? "portfolio-ledger-tab--active" : ""}`}
+                      onClick={() => setLedgerTab("trades")}
+                      type="button"
+                    >
+                      Filled Trades ({formatNumber(tradeRows.length)})
+                    </button>
+                    <button
+                      className={`portfolio-ledger-tab ${ledgerTab === "skipped" ? "portfolio-ledger-tab--active" : ""}`}
+                      onClick={() => setLedgerTab("skipped")}
+                      type="button"
+                    >
+                      Skipped Signals ({formatNumber(skippedRows.length)})
+                    </button>
+                  </div>
+
+                  {ledgerTab === "trades" ? (
+                    <TerminalPanel className="portfolio-ledger-panel" title="">
+                      <DataTable
+                        columns={[
+                          { key: "asset", header: "Asset", render: (item) => item.asset ?? "-" },
+                          { key: "close", header: "Close", render: (item) => formatUtcTimestamp(item.exit_ts ?? item.signal_ts) },
+                          { key: "side", header: "Side", render: (item) => item.decision_direction ?? "-" },
+                          { key: "exit", header: "Exit", render: (item) => item.exit_status ?? "-" },
+                          { key: "margin", header: "Margin", align: "right", render: (item) => formatUsd(stage4TradeMarginUsed(item)) },
+                          { key: "pnl", header: "Net PnL", align: "right", render: (item) => formatUsd(item.net_pnl_usdt) },
+                          { key: "equity", header: "Equity", align: "right", render: (item) => formatUsd(item.equity_after) },
+                          { key: "legs", header: "Legs", align: "right", render: (item) => formatNumber(item.filled_legs) }
+                        ]}
+                        getRowKey={(item) => item.row_key}
+                        getRowClassName={stage4TradeRowClassName}
+                        rows={tradeRows}
+                      />
+                    </TerminalPanel>
+                  ) : (
+                    <TerminalPanel className="portfolio-ledger-panel" title="">
+                      <DataTable
+                        columns={[
+                          { key: "asset", header: "Asset", render: (item) => item.asset },
+                          { key: "time", header: "Signal", render: (item) => formatUtcTimestamp(item.signal_ts) },
+                          { key: "reason", header: "Reason", render: (item) => item.skip_reason },
+                          { key: "requested", header: "Requested", align: "right", render: (item) => formatUsd(item.requested_margin_usdt) },
+                          { key: "free", header: "Free", align: "right", render: (item) => formatUsd(item.free_margin_usdt) }
+                        ]}
+                        getRowKey={(item) => item.row_key}
+                        rows={skippedRows}
+                      />
+                    </TerminalPanel>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="portfolio-empty-state">
+                <BarChart3 aria-hidden="true" />
+                <strong>Configure allocations and run the shared account replay.</strong>
+                <span>The result will use each asset's latest Stage 4-complete candidate and save a pool-level artifact.</span>
+              </div>
+            )}
+            </div>
+          </div>
+        </div>
+
+        <footer className="terminal-modal__footer">
+          <span>{result ? `${result.run_id} · ${result.portfolio_backtest_path ?? "saved under pool artifacts"}` : "Stage 4-complete assets only"}</span>
+          <div className="table-action-row">
+            <button className="button button--secondary" onClick={onClose} type="button">Close</button>
+            <button className="button button--primary" disabled={running || assets.length === 0} onClick={onRun} type="button">
+              {running ? <RefreshCw aria-hidden="true" className="spin-icon" /> : <Play aria-hidden="true" />}
+              {running ? "Running" : "Run Backtest"}
+            </button>
+          </div>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function PortfolioEquityCurve({ points }: { points: PortfolioBacktestResult["equity_curve"] }) {
+  const curve = points.filter((point) => typeof point.equity_usdt === "number" && !Number.isNaN(point.equity_usdt));
+  if (curve.length < 2) {
+    return <div className="state-line">Not enough equity points to render the chart.</div>;
+  }
+  const equities = curve.map((point) => point.equity_usdt);
+  const min = Math.min(...equities);
+  const max = Math.max(...equities);
+  const span = max - min || 1;
+  const paddedMin = min - span * 0.06;
+  const paddedMax = max + span * 0.06;
+  const paddedSpan = paddedMax - paddedMin || 1;
+  const width = 1000;
+  const height = 300;
+  const left = 78;
+  const right = 18;
+  const top = 18;
+  const bottom = 36;
+  const plotWidth = width - left - right;
+  const plotHeight = height - top - bottom;
+  const path = curve.map((point, index) => {
+    const x = left + (index / Math.max(curve.length - 1, 1)) * plotWidth;
+    const y = top + ((paddedMax - point.equity_usdt) / paddedSpan) * plotHeight;
+    return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+  }).join(" ");
+  const baselineY = top + ((paddedMax - curve[0].equity_usdt) / paddedSpan) * plotHeight;
+  const firstTimestamp = curve.find((point) => point.timestamp)?.timestamp;
+  const lastTimestamp = curve.slice().reverse().find((point) => point.timestamp)?.timestamp;
+
+  return (
+    <div className="stage4-equity-curve">
+      <svg aria-label="Portfolio shared account equity curve" preserveAspectRatio="none" viewBox={`0 0 ${width} ${height}`}>
+        <line className="stage4-equity-curve__axis" x1={left} x2={left} y1={top} y2={height - bottom} />
+        <line className="stage4-equity-curve__axis" x1={left} x2={width - right} y1={height - bottom} y2={height - bottom} />
+        <line className="stage4-equity-curve__baseline" x1={left} x2={width - right} y1={baselineY} y2={baselineY} />
+        <text className="stage4-equity-curve__axis-label" x={left - 10} y={top + 4} textAnchor="end">{formatUsd(max)}</text>
+        <text className="stage4-equity-curve__axis-label" x={left - 10} y={height - bottom} textAnchor="end">{formatUsd(min)}</text>
+        <text className="stage4-equity-curve__axis-label" x={left} y={height - 10} textAnchor="start">{formatCompactUtcTimestamp(firstTimestamp)}</text>
+        <text className="stage4-equity-curve__axis-label" x={width - right} y={height - 10} textAnchor="end">{formatCompactUtcTimestamp(lastTimestamp)}</text>
+        <path className="stage4-equity-curve__path" d={path} vectorEffect="non-scaling-stroke" />
+      </svg>
+      <div className="stage4-equity-curve__scale">
+        <span>Shared equity</span>
+        <span>Replay order</span>
+      </div>
     </div>
   );
 }
