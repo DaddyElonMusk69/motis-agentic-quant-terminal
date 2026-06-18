@@ -2915,14 +2915,43 @@ function PortfolioBacktestModal({
             {result ? (
               <>
                 <div className="portfolio-summary-strip">
-                  <div><span>Assets</span><strong>{formatNumber(result.summary.eligible_asset_count)}</strong></div>
-                  <div><span>Executed</span><strong>{formatNumber(result.summary.executed_positions)}</strong></div>
-                  <div><span>Win Rate</span><strong>{result.summary.executed_positions > 0 ? formatPct((stage4FilledTrades(result.trade_ledger ?? []).filter((t) => (t.net_pnl_usdt ?? 0) > 0).length / result.summary.executed_positions) * 100) : "-"}</strong></div>
-                  <div><span>Net PnL</span><strong className={result.account.net_pnl_usdt >= 0 ? "tone-pass" : "tone-risk"}>{formatUsd(result.account.net_pnl_usdt)}</strong></div>
-                  <div><span>Fees Paid</span><strong>{formatUsd(result.account.total_fees_usdt)}</strong></div>
-                  <div><span>Ending Equity</span><strong>{formatUsd(result.account.ending_equity_usdt)}</strong></div>
-                  <div><span>Margin Skips</span><strong>{formatNumber(result.summary.skipped_insufficient_margin)}</strong></div>
-                  <div><span>Asset Skips</span><strong>{formatNumber(result.summary.skipped_asset_open)}</strong></div>
+                  <div className="portfolio-summary-strip__hero">
+                    <span className="portfolio-summary-strip__label">Net PnL</span>
+                    <strong className={`portfolio-summary-strip__value ${result.account.net_pnl_usdt >= 0 ? "tone-pass" : "tone-risk"}`}>{formatUsd(result.account.net_pnl_usdt)}</strong>
+                    <span className="portfolio-summary-strip__sub">{result.account.net_pnl_usdt >= 0 ? "profit" : "loss"}</span>
+                  </div>
+                  <div className="portfolio-summary-strip__group">
+                    <div className="portfolio-summary-strip__stat">
+                      <span className="portfolio-summary-strip__label">Win Rate</span>
+                      <strong className="portfolio-summary-strip__value">{result.summary.executed_positions > 0 ? formatPct((stage4FilledTrades(result.trade_ledger ?? []).filter((t) => (t.net_pnl_usdt ?? 0) > 0).length / result.summary.executed_positions) * 100) : "-"}</strong>
+                    </div>
+                    <div className="portfolio-summary-strip__stat">
+                      <span className="portfolio-summary-strip__label">Fees Paid</span>
+                      <strong className="portfolio-summary-strip__value portfolio-summary-strip__value--cost">{formatUsd(result.account.total_fees_usdt)}</strong>
+                    </div>
+                    <div className="portfolio-summary-strip__stat">
+                      <span className="portfolio-summary-strip__label">Ending Equity</span>
+                      <strong className="portfolio-summary-strip__value">{formatUsd(result.account.ending_equity_usdt)}</strong>
+                    </div>
+                  </div>
+                  <div className="portfolio-summary-strip__group portfolio-summary-strip__group--muted">
+                    <div className="portfolio-summary-strip__stat">
+                      <span className="portfolio-summary-strip__label">Assets</span>
+                      <strong className="portfolio-summary-strip__value">{formatNumber(result.summary.eligible_asset_count)}</strong>
+                    </div>
+                    <div className="portfolio-summary-strip__stat">
+                      <span className="portfolio-summary-strip__label">Executed</span>
+                      <strong className="portfolio-summary-strip__value">{formatNumber(result.summary.executed_positions)}</strong>
+                    </div>
+                    <div className="portfolio-summary-strip__stat">
+                      <span className="portfolio-summary-strip__label">Margin Skips</span>
+                      <strong className="portfolio-summary-strip__value">{formatNumber(result.summary.skipped_insufficient_margin)}</strong>
+                    </div>
+                    <div className="portfolio-summary-strip__stat">
+                      <span className="portfolio-summary-strip__label">Asset Skips</span>
+                      <strong className="portfolio-summary-strip__value">{formatNumber(result.summary.skipped_asset_open)}</strong>
+                    </div>
+                  </div>
                 </div>
 
                 <div className="stage4-detail-chart-card portfolio-chart-card">
