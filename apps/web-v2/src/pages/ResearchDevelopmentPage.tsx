@@ -2962,9 +2962,10 @@ function PortfolioBacktestModal({
                           { key: "lev", header: "Lev", align: "right", render: (item) => item.leverage ? `${item.leverage}x` : "-" },
                           { key: "size", header: "Size", align: "right", render: (item) => formatUsd(item.position_notional_usdt ?? stage4TradeNotional(item)) },
                           { key: "margin", header: "Margin", align: "right", render: (item) => formatUsd(item.position_margin_usdt ?? stage4TradeMarginUsed(item)) },
-                          { key: "roe", header: "ROE", align: "right", render: (item) => formatPct(item.roe_pct ?? stage4TradeRoePct(item) ?? 0) },
+                          { key: "gross", header: "Gross", align: "right", render: (item) => formatUsd(item.gross_pnl_usdt) },
                           { key: "fees", header: "Fees", align: "right", render: (item) => formatUsd(item.total_fees_usdt) },
-                          { key: "pnl", header: "Net PnL", align: "right", render: (item) => formatUsd(item.net_pnl_usdt) },
+                          { key: "net", header: "Net PnL", align: "right", render: (item) => formatUsd(item.net_pnl_usdt) },
+                          { key: "roe", header: "ROE", align: "right", render: (item) => formatPct(item.roe_pct ?? stage4TradeRoePct(item) ?? 0) },
                           { key: "equity", header: "Equity", align: "right", render: (item) => formatUsd(item.equity_after) },
                           { key: "legs", header: "Legs", align: "right", render: (item) => formatNumber(item.filled_legs) }
                         ]}
