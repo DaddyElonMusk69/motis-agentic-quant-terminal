@@ -654,6 +654,9 @@ export type Stage4TradeLedgerRow = {
   candidate_id: string;
   signal_id: string;
   signal_ts?: string;
+  entry_ts?: string;
+  exit_ts?: string;
+  open_duration_hours?: number;
   slice_name?: string;
   agreement?: string;
   decision_direction?: "LONG" | "SHORT" | "FLAT" | string;
@@ -663,8 +666,10 @@ export type Stage4TradeLedgerRow = {
   exit_status?: string;
   entry_price?: number;
   exit_price?: number;
-  exit_ts?: string;
   filled_legs?: number;
+  leverage?: number;
+  position_margin_usdt?: number;
+  position_notional_usdt?: number;
   protection_enabled?: boolean;
   protection_activated?: boolean;
   active_sl_kind?: string;
@@ -681,6 +686,7 @@ export type Stage4TradeLedgerRow = {
   equity_after?: number;
   gross_pnl_pct?: number;
   net_pnl_pct?: number;
+  roe_pct?: number;
   cost_pct?: number;
   leg_details?: Array<{
     leg?: number;

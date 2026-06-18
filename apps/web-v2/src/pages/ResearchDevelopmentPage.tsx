@@ -2954,10 +2954,16 @@ function PortfolioBacktestModal({
                       <DataTable
                         columns={[
                           { key: "asset", header: "Asset", render: (item) => item.asset ?? "-" },
+                          { key: "open", header: "Open", render: (item) => formatUtcTimestamp(item.entry_ts ?? item.signal_ts) },
                           { key: "close", header: "Close", render: (item) => formatUtcTimestamp(item.exit_ts ?? item.signal_ts) },
+                          { key: "dur", header: "Dur", align: "right", render: (item) => item.open_duration_hours != null ? `${item.open_duration_hours.toFixed(1)}h` : "-" },
                           { key: "side", header: "Side", render: (item) => item.decision_direction ?? "-" },
                           { key: "exit", header: "Exit", render: (item) => item.exit_status ?? "-" },
-                          { key: "margin", header: "Margin", align: "right", render: (item) => formatUsd(stage4TradeMarginUsed(item)) },
+                          { key: "lev", header: "Lev", align: "right", render: (item) => item.leverage ? `${item.leverage}x` : "-" },
+                          { key: "size", header: "Size", align: "right", render: (item) => formatUsd(item.position_notional_usdt ?? stage4TradeNotional(item)) },
+                          { key: "margin", header: "Margin", align: "right", render: (item) => formatUsd(item.position_margin_usdt ?? stage4TradeMarginUsed(item)) },
+                          { key: "roe", header: "ROE", align: "right", render: (item) => formatPct(item.roe_pct ?? stage4TradeRoePct(item) ?? 0) },
+                          { key: "fees", header: "Fees", align: "right", render: (item) => formatUsd(item.total_fees_usdt) },
                           { key: "pnl", header: "Net PnL", align: "right", render: (item) => formatUsd(item.net_pnl_usdt) },
                           { key: "equity", header: "Equity", align: "right", render: (item) => formatUsd(item.equity_after) },
                           { key: "legs", header: "Legs", align: "right", render: (item) => formatNumber(item.filled_legs) }

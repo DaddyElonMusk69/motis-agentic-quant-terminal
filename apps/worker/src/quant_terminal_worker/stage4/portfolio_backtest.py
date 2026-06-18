@@ -567,9 +567,16 @@ def _close_position(
     net_pnl = sum(float(leg.get("net_pnl_usdt") or 0) for leg in legs)
     entry_fees = sum(float(leg.get("entry_fee_usdt") or 0) for leg in legs)
     exit_fees = sum(float(leg.get("exit_fee_usdt") or 0) for leg in legs)
+    entry_slippage = sum(float(leg.get("entry_slippage_usdt") or 0) for leg in legs)
+    exit_slippage = sum(float(leg.get("exit_slippage_usdt") or 0) for leg in legs)
+    position_margin = sum(float(leg.get("margin_usdt") or 0) for leg in legs)
+    position_notional = sum(float(leg.get("entry_notional_usdt") or 0) for leg in legs)
     equity_after = equity + net_pnl
     signal = position["signal"]
     policy = position["policy"]
+    entry_ts_iso = legs[0]["entry_ts"] if legs else _to_iso(signal["signal_ts"])
+    entry_dt = _coerce_datetime(entry_ts_iso) if entry_ts_iso else signal["signal_ts"]
+    open_duration_hours = round((exit_ts - entry_dt).total_seconds() / 3600, 4) if entry_dt else None
 
     trade = {
         "asset": position["asset"],
@@ -577,6 +584,9 @@ def _close_position(
         "candidate_id": ctx["stage4_candidate_id"],
         "signal_id": signal["signal_id"],
         "signal_ts": _to_iso(signal["signal_ts"]),
+        "entry_ts": entry_ts_iso,
+        "exit_ts": _to_iso(exit_ts),
+        "open_duration_hours": open_duration_hours,
         "agreement": signal.get("agreement"),
         "decision_direction": direction,
         "reference_price": round(position["entry_price"], 8),
@@ -585,8 +595,10 @@ def _close_position(
         "exit_status": _resolve_exit_status(legs) if exit_status == "HARD_EXIT" else exit_status,
         "entry_price": round(position["entry_price"], 8),
         "exit_price": round(float(legs[-1]["exit_price"]), 8),
-        "exit_ts": _to_iso(exit_ts),
         "filled_legs": len(legs),
+        "leverage": ctx["leverage"],
+        "position_margin_usdt": _round_money(position_margin),
+        "position_notional_usdt": _round_money(position_notional),
         "protection_enabled": position["protection_enabled"],
         "protection_activated": position["protection_activated"],
         "active_sl_kind": position["active_sl_kind"],
@@ -596,10 +608,12 @@ def _close_position(
         "total_fees_usdt": _round_money(entry_fees + exit_fees),
         "total_entry_fees_usdt": _round_money(entry_fees),
         "total_exit_fees_usdt": _round_money(exit_fees),
+        "total_slippage_usdt": _round_money(entry_slippage + exit_slippage),
         "equity_before": _round_money(equity),
         "equity_after": _round_money(equity_after),
         "net_pnl_pct": round(net_pnl / equity * 100, 8) if equity else 0.0,
         "gross_pnl_pct": round(gross_pnl / equity * 100, 8) if equity else 0.0,
+        "roe_pct": round(net_pnl / position_margin * 100, 8) if position_margin > 0 else 0.0,
         "leg_details": [_format_leg(leg) for leg in legs],
         "portfolio_entry_equity_usdt": _round_money(equity),
         "portfolio_margin_allocation_pct": ctx["margin_allocation_pct"],
