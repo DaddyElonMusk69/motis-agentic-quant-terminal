@@ -137,6 +137,13 @@ def _load_asset_contexts(
         if best_candidate is None:
             continue
 
+        # Leverage and cost assumptions live in the realized expectancy file,
+        # not in stage4_candidates.json. Override the normalized default.
+        realized_best = realized.get("best_candidate") or {}
+        realized_setup = realized_best.get("setup") or {}
+        if realized_setup.get("leverage") is not None:
+            best_candidate["leverage"] = float(realized_setup["leverage"])
+
         cost = realized.get("cost_assumptions", {})
         fees_bps = float(cost.get("fees_bps_per_side", 5.0))
         slippage_bps = float(cost.get("slippage_bps_per_side", 0.0))
