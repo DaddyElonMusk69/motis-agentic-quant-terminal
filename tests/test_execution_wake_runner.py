@@ -408,7 +408,7 @@ def test_wake_position_management_refreshes_missing_protection_before_pyramiding
         strategy_source=strategy_source,
         setup={"setup": {"tp_pct": 2.0, "sl_pct": 1.0, "pyramid": {"step_pct": 0.5, "max_legs": 3}}},
     )
-    route = {**_route(bundle), "margin_allocation_pct": 30.0, "leverage": 5.0}
+    route = {**_route(bundle), "margin_allocation_pct": 30.0, "leverage": 5.0, "manual_sizing_enabled": True}
     owner_state = {
         "owner_state_id": "owner-1",
         "route_id": "aave-live",
@@ -481,7 +481,7 @@ def test_wake_position_management_seeds_missing_entry_and_emits_long_pyramid(tmp
         strategy_source=strategy_source,
         setup={"setup": {"pyramid": {"step_pct": 0.5, "max_legs": 3, "sl_breakeven": True}}},
     )
-    route = {**_route(bundle), "margin_allocation_pct": 30.0, "leverage": 5.0}
+    route = {**_route(bundle), "margin_allocation_pct": 30.0, "leverage": 5.0, "manual_sizing_enabled": True}
     owner_state = {
         "owner_state_id": "owner-1",
         "route_id": "aave-live",
@@ -537,7 +537,7 @@ def test_wake_position_management_reconciles_filled_pyramid_leg_and_uses_it_for_
         strategy_source=strategy_source,
         setup={"setup": {"pyramid": {"step_pct": 0.5, "max_legs": 3}}},
     )
-    route = {**_route(bundle), "margin_allocation_pct": 30.0, "leverage": 5.0}
+    route = {**_route(bundle), "margin_allocation_pct": 30.0, "leverage": 5.0, "manual_sizing_enabled": True}
     owner_state = {
         "owner_state_id": "owner-1",
         "route_id": "aave-live",
@@ -617,7 +617,7 @@ def test_wake_position_management_allows_retry_after_submitted_pyramid_leg_is_ca
         strategy_source=strategy_source,
         setup={"setup": {"pyramid": {"step_pct": 0.5, "max_legs": 3}}},
     )
-    route = {**_route(bundle), "margin_allocation_pct": 30.0, "leverage": 5.0}
+    route = {**_route(bundle), "margin_allocation_pct": 30.0, "leverage": 5.0, "manual_sizing_enabled": True}
     owner_state = {
         "owner_state_id": "owner-1",
         "route_id": "aave-live",
@@ -654,7 +654,7 @@ def test_wake_position_management_emits_short_pyramid_when_mark_reaches_trigger(
         strategy_source=strategy_source,
         setup={"setup": {"pyramid": {"step_pct": 0.5, "max_legs": 3}}},
     )
-    route = {**_route(bundle), "margin_allocation_pct": 30.0, "leverage": 5.0}
+    route = {**_route(bundle), "margin_allocation_pct": 30.0, "leverage": 5.0, "manual_sizing_enabled": True}
     owner_state = {
         "owner_state_id": "owner-1",
         "route_id": "aave-live",
@@ -685,7 +685,7 @@ def test_wake_position_management_infers_pyramid_leg_count_from_exchange_exposur
         strategy_source=strategy_source,
         setup={"setup": {"pyramid": {"step_pct": 0.5, "max_legs": 3}}},
     )
-    route = {**_route(bundle), "margin_allocation_pct": 30.0, "leverage": 5.0}
+    route = {**_route(bundle), "margin_allocation_pct": 30.0, "leverage": 5.0, "manual_sizing_enabled": True}
     repository = FakeRepository(route=route, bundle=bundle, owner_state=None)
     adapter = FakeAdapter(
         positions=[
@@ -731,7 +731,7 @@ def test_wake_position_management_blocks_pyramid_when_exchange_exposure_is_ambig
         strategy_source=strategy_source,
         setup={"setup": {"pyramid": {"step_pct": 0.5, "max_legs": 3}}},
     )
-    route = {**_route(bundle), "margin_allocation_pct": 30.0, "leverage": 5.0}
+    route = {**_route(bundle), "margin_allocation_pct": 30.0, "leverage": 5.0, "manual_sizing_enabled": True}
     repository = FakeRepository(route=route, bundle=bundle, owner_state=None)
     adapter = FakeAdapter(
         positions=[
@@ -774,7 +774,7 @@ def test_wake_position_management_can_pyramid_without_owner_state_when_exchange_
         strategy_source=strategy_source,
         setup={"setup": {"pyramid": {"step_pct": 0.5, "max_legs": 3}}},
     )
-    route = {**_route(bundle), "margin_allocation_pct": 30.0, "leverage": 5.0}
+    route = {**_route(bundle), "margin_allocation_pct": 30.0, "leverage": 5.0, "manual_sizing_enabled": True}
     repository = FakeRepository(route=route, bundle=bundle, owner_state=None)
     adapter = FakeAdapter(
         positions=[{"instId": "AAVE-USDT-SWAP", "pos": "1", "posSide": "long", "avgPx": "100", "markPx": "100.5", "notionalUsd": "500"}],
@@ -803,7 +803,7 @@ def test_wake_position_management_ignores_stale_owner_bundle_for_pyramid_decisio
         "status": "open",
         "position_state": {"direction": "LONG", "legs": [{"leg": 1, "status": "submitted", "entry_price": "100"}]},
     }
-    route = {**_route(bundle), "margin_allocation_pct": 30.0, "leverage": 5.0}
+    route = {**_route(bundle), "margin_allocation_pct": 30.0, "leverage": 5.0, "manual_sizing_enabled": True}
     repository = FakeRepository(route=route, bundle=bundle, owner_state=owner_state)
     adapter = FakeAdapter(
         positions=[{"instId": "AAVE-USDT-SWAP", "pos": "1", "posSide": "long", "avgPx": "100", "markPx": "100.5", "notionalUsd": "500"}],
