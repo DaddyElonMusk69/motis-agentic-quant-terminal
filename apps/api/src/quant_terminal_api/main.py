@@ -2729,7 +2729,7 @@ def _portfolio_stage4_complete_sessions(
         if not artifact_root.is_absolute():
             artifact_root = workspace_root / artifact_root
         promotion_root = artifact_root / "promotion"
-        if (promotion_root / "stage4_realized_expectancy.json").is_file() and (promotion_root / "stage4_trade_ledger.json").is_file():
+        if (promotion_root / "stage4_realized_expectancy.json").is_file() and (promotion_root / "stage1a_canonical_full_cycle_scores.json").is_file():
             complete.append(session)
     return complete
 

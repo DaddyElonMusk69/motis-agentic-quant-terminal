@@ -237,11 +237,6 @@ function executionInterval(route: DeploymentRoute): string {
   return "15m";
 }
 
-function executionAccount(route: DeploymentRoute): string {
-  const account = route.exchange_account && route.exchange_account !== "default" ? route.exchange_account : route.account_mode;
-  return `${route.execution_adapter} / ${account}`;
-}
-
 function parseDateLike(value: unknown): Date | null {
   if (typeof value !== "string" || !value.trim()) {
     return null;

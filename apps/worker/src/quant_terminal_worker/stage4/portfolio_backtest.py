@@ -302,10 +302,14 @@ def _simulate(
         for ctx in asset_contexts:
             asset = ctx["asset"]
             if asset in open_positions:
-                # Skip signals while position is open
+                # Track signals that fire while a position is open for this asset
                 cursor = signal_cursors[asset]
                 inputs = ctx["signal_inputs"]
                 while cursor < len(inputs) and inputs[cursor]["signal_ts"] <= ts:
+                    skipped_signals.append(_skip_record(
+                        asset=asset, signal=inputs[cursor], reason="asset_position_open",
+                        equity=equity, used_margin=_used_margin(open_positions),
+                    ))
                     cursor += 1
                 signal_cursors[asset] = cursor
                 continue

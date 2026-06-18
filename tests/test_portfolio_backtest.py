@@ -228,8 +228,10 @@ def test_portfolio_backtest_blocks_same_asset_overlap(tmp_path: Path, monkeypatc
 
     assert result["summary"]["executed_positions"] == 1
     # Second signal should be skipped because asset has open position
-    # (cursor advances past it while position is open)
     assert result["summary"]["total_signals"] == 2
+    assert result["summary"]["skipped_asset_open"] == 1
+    assert result["summary"]["skipped_signals"] == 1
+    assert result["skipped_signals"][0]["skip_reason"] == "asset_position_open"
 
 
 def test_portfolio_backtest_rejects_pool_without_stage4_complete_assets(tmp_path: Path):
