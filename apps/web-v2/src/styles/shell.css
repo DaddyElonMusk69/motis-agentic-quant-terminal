@@ -2375,9 +2375,9 @@
   border: 1px solid var(--line-subtle);
   border-radius: var(--radius-md);
   display: flex;
+  flex-shrink: 0;
   flex-wrap: wrap;
   gap: 0;
-  overflow: hidden;
 }
 
 .portfolio-summary-strip__hero {
