@@ -164,6 +164,9 @@ def _load_asset_contexts(
         if not signal_inputs or not candles:
             continue
 
+        leverage = float(best_candidate.get("leverage", 1.0))
+        max_notional = _max_position_notional(asset, leverage)
+
         contexts.append({
             "asset": asset,
             "session_id": session["session_id"],
@@ -171,8 +174,9 @@ def _load_asset_contexts(
             "stage4_run_id": realized.get("run_id"),
             "stage4_candidate_id": best_candidate_id,
             "candidate": best_candidate,
-            "leverage": float(best_candidate.get("leverage", 1.0)),
+            "leverage": leverage,
             "margin_allocation_pct": margin_pct,
+            "max_position_notional_usdt": max_notional,
             "fees_bps_per_side": fees_bps,
             "slippage_bps_per_side": slippage_bps,
             "signal_inputs": signal_inputs,
@@ -365,6 +369,12 @@ def _simulate(
                     requested_margin=margin_needed,
                 ))
                 continue
+
+            # Apply max position notional cap (exchange tier + liquidity constraint)
+            max_notional = ctx.get("max_position_notional_usdt", 500_000.0)
+            max_margin_for_notional = max_notional / ctx["leverage"] if ctx["leverage"] > 0 else margin_needed
+            if margin_needed > max_margin_for_notional:
+                margin_needed = max_margin_for_notional
 
             # Open position
             position = _open_position(
@@ -766,6 +776,31 @@ def _format_leg(leg: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _max_position_notional(asset: str, leverage: float) -> float:
+    """Max notional per position based on OKX position tiers and order book liquidity.
+
+    OKX altcoin perpetuals cap at 10x leverage from Tier 1 with 5% MMR.
+    Beyond exchange limits, order book depth is the real constraint — a
+    large market order moves the price, eating into TP/SL.
+
+    These caps represent the practical maximum notional for a single
+    position before market impact becomes significant (>0.1% slippage
+    on a single market order).
+    """
+    asset_upper = asset.upper()
+    # Major assets: deep order books, OKX allows higher tiers
+    if asset_upper in {"BTC", "ETH"}:
+        return 2_000_000.0
+    # Mid-cap alts: moderate liquidity
+    if asset_upper in {"LINK", "AVAX", "SOL", "DOGE", "XRP", "ADA"}:
+        return 500_000.0
+    # Smaller alts: thinner order books
+    if asset_upper in {"AAVE", "ARB", "INJ", "OP", "SUI", "APT", "TIA"}:
+        return 300_000.0
+    # Default for unknown small-caps
+    return 200_000.0
+
 
 def _used_margin(open_positions: dict[str, dict[str, Any]], *, exclude: str | None = None) -> float:
     """Total margin reserved by open positions.
