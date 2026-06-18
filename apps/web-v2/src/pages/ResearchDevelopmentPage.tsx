@@ -2962,7 +2962,7 @@ function PortfolioBacktestModal({
                   <PortfolioEquityCurve points={result.equity_curve} />
                 </div>
 
-                <div>
+                <div className="portfolio-ledger-section">
                   <div className="portfolio-ledger-tabs">
                     <button
                       className={`portfolio-ledger-tab ${ledgerTab === "trades" ? "portfolio-ledger-tab--active" : ""}`}
@@ -2981,9 +2981,8 @@ function PortfolioBacktestModal({
                   </div>
 
                   {ledgerTab === "trades" ? (
-                    <TerminalPanel className="portfolio-ledger-panel" title="">
-                      <DataTable
-                        columns={[
+                    <DataTable
+                      columns={[
                           { key: "asset", header: "Asset", render: (item) => item.asset ?? "-" },
                           { key: "open", header: "Open", render: (item) => formatUtcTimestamp(item.entry_ts ?? item.signal_ts) },
                           { key: "close", header: "Close", render: (item) => formatUtcTimestamp(item.exit_ts ?? item.signal_ts) },
@@ -2999,26 +2998,23 @@ function PortfolioBacktestModal({
                           { key: "roe", header: "ROE", align: "right", render: (item) => formatPct(item.roe_pct ?? stage4TradeRoePct(item) ?? 0) },
                           { key: "equity", header: "Equity", align: "right", render: (item) => formatUsd(item.equity_after) },
                           { key: "legs", header: "Legs", align: "right", render: (item) => formatNumber(item.filled_legs) }
-                        ]}
-                        getRowKey={(item) => item.row_key}
-                        getRowClassName={stage4TradeRowClassName}
-                        rows={tradeRows}
-                      />
-                    </TerminalPanel>
+                      ]}
+                      getRowKey={(item) => item.row_key}
+                      getRowClassName={stage4TradeRowClassName}
+                      rows={tradeRows}
+                    />
                   ) : (
-                    <TerminalPanel className="portfolio-ledger-panel" title="">
-                      <DataTable
-                        columns={[
+                    <DataTable
+                      columns={[
                           { key: "asset", header: "Asset", render: (item) => item.asset },
                           { key: "time", header: "Signal", render: (item) => formatUtcTimestamp(item.signal_ts) },
                           { key: "reason", header: "Reason", render: (item) => item.skip_reason },
                           { key: "requested", header: "Requested", align: "right", render: (item) => formatUsd(item.requested_margin_usdt) },
                           { key: "free", header: "Free", align: "right", render: (item) => formatUsd(item.free_margin_usdt) }
-                        ]}
-                        getRowKey={(item) => item.row_key}
-                        rows={skippedRows}
-                      />
-                    </TerminalPanel>
+                      ]}
+                      getRowKey={(item) => item.row_key}
+                      rows={skippedRows}
+                    />
                   )}
                 </div>
               </>

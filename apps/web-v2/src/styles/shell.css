@@ -2500,26 +2500,31 @@
   color: var(--ink-primary);
 }
 
-.portfolio-ledger-panel {
+.portfolio-ledger-section {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
   min-height: 0;
   min-width: 0;
-  overflow: hidden;
 }
 
-.portfolio-ledger-panel .terminal-panel__body {
+.portfolio-ledger-section .table-frame {
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-sm);
+  flex: 1 1 auto;
+  min-height: 0;
   min-width: 0;
-  overflow: visible;
+  overflow: auto;
 }
 
-.portfolio-ledger-panel .table-frame {
-  max-width: 100%;
-  min-width: 0;
-  overflow-x: auto;
-  overflow-y: visible;
+.portfolio-ledger-section .data-table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
 
-.portfolio-ledger-panel .data-table th,
-.portfolio-ledger-panel .data-table td {
+.portfolio-ledger-section .data-table th,
+.portfolio-ledger-section .data-table td {
   padding-bottom: 10px;
   padding-top: 10px;
 }
@@ -3158,7 +3163,7 @@
     height: 280px;
   }
 
-  .portfolio-ledger-panel .table-frame {
+  .portfolio-ledger-section .table-frame {
     min-width: 0;
   }
 }
