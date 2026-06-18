@@ -2917,8 +2917,10 @@ function PortfolioBacktestModal({
                 <div className="portfolio-summary-strip">
                   <div><span>Assets</span><strong>{formatNumber(result.summary.eligible_asset_count)}</strong></div>
                   <div><span>Executed</span><strong>{formatNumber(result.summary.executed_positions)}</strong></div>
-                  <div><span>Ending Equity</span><strong>{formatUsd(result.account.ending_equity_usdt)}</strong></div>
+                  <div><span>Win Rate</span><strong>{result.summary.executed_positions > 0 ? formatPct((stage4FilledTrades(result.trade_ledger ?? []).filter((t) => (t.net_pnl_usdt ?? 0) > 0).length / result.summary.executed_positions) * 100) : "-"}</strong></div>
                   <div><span>Net PnL</span><strong className={result.account.net_pnl_usdt >= 0 ? "tone-pass" : "tone-risk"}>{formatUsd(result.account.net_pnl_usdt)}</strong></div>
+                  <div><span>Fees Paid</span><strong>{formatUsd(result.account.total_fees_usdt)}</strong></div>
+                  <div><span>Ending Equity</span><strong>{formatUsd(result.account.ending_equity_usdt)}</strong></div>
                   <div><span>Margin Skips</span><strong>{formatNumber(result.summary.skipped_insufficient_margin)}</strong></div>
                   <div><span>Asset Skips</span><strong>{formatNumber(result.summary.skipped_asset_open)}</strong></div>
                 </div>
