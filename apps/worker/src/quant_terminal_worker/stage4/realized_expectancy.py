@@ -896,7 +896,54 @@ def _candidate_policy_for_direction(candidate: dict[str, Any], direction: str) -
 
 
 def _choose_best_candidate(results: list[dict[str, Any]]) -> dict[str, Any]:
-    return max(results, key=lambda item: (item["net_expectancy_pct"], item["profit_factor"], -item["unfilled"]))
+    """Select the best candidate using walk-forward OOS performance.
+
+    Selection priority:
+    1. Candidates with OOS expectancy >= 30% of training expectancy (option 2)
+    2. If none pass the ratio gate, fall back to combined metric (option 3)
+       and flag the winner with oos_warning.
+    """
+    OOS_RATIO_THRESHOLD = 0.30
+
+    def _oos_metrics(item: dict[str, Any]) -> tuple[float, float]:
+        slices = item.get("slices") or {}
+        wf = slices.get("walk_forward_test") or {}
+        return (
+            float(wf.get("net_expectancy_pct", 0)),
+            float(wf.get("profit_factor", 0)),
+        )
+
+    def _training_metrics(item: dict[str, Any]) -> tuple[float, float]:
+        slices = item.get("slices") or {}
+        tr = slices.get("training") or {}
+        return (
+            float(tr.get("net_expectancy_pct", 0)),
+            float(tr.get("profit_factor", 0)),
+        )
+
+    # Option 2: candidates where OOS expectancy >= 30% of training expectancy
+    viable = []
+    for item in results:
+        wf_exp, _ = _oos_metrics(item)
+        tr_exp, _ = _training_metrics(item)
+        if tr_exp > 0 and wf_exp >= tr_exp * OOS_RATIO_THRESHOLD:
+            viable.append(item)
+        elif tr_exp <= 0 and wf_exp > 0:
+            # Training was negative but OOS is positive — accept
+            viable.append(item)
+
+    if viable:
+        # Among viable candidates, pick best OOS expectancy, then OOS PF
+        best = max(viable, key=lambda item: (
+            _oos_metrics(item)[0],
+            _oos_metrics(item)[1],
+            -item["unfilled"],
+        ))
+        return {**best, "oos_selection_mode": "oos_ratio_gate", "oos_warning": False}
+
+    # Option 3: fallback to combined metric, flag with warning
+    best = max(results, key=lambda item: (item["net_expectancy_pct"], item["profit_factor"], -item["unfilled"]))
+    return {**best, "oos_selection_mode": "fallback_combined", "oos_warning": True}
 
 
 def _render_summary(payload: dict[str, Any]) -> str:

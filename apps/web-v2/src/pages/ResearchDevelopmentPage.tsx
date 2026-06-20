@@ -2744,10 +2744,28 @@ function Stage4Panel({
               { key: "protect", header: "Protection", render: (item) => formatStage3Protection(item.setup) },
               { key: "pyramid", header: "Pyramid", render: (item) => formatPyramidPolicy(item.setup) },
               { key: "net", header: "Net Exp", align: "right", render: (item) => formatPct(item.net_expectancy_pct) },
+              { key: "oos_exp", header: "OOS Exp", align: "right", render: (item) => {
+                const wf = item.slices?.walk_forward_test;
+                return wf ? formatPct(wf.net_expectancy_pct) : "-";
+              } },
+              { key: "oos_pf", header: "OOS PF", align: "right", render: (item) => {
+                const wf = item.slices?.walk_forward_test;
+                return wf?.profit_factor != null ? wf.profit_factor.toFixed(2) : "-";
+              } },
+              { key: "oos_ratio", header: "OOS/Train", align: "right", render: (item) => {
+                const wf = item.slices?.walk_forward_test;
+                const tr = item.slices?.training;
+                if (wf?.net_expectancy_pct != null && tr?.net_expectancy_pct != null && tr.net_expectancy_pct !== 0) {
+                  const ratio = wf.net_expectancy_pct / tr.net_expectancy_pct;
+                  return `${ratio >= 0 ? "" : ""}${(ratio * 100).toFixed(0)}%`;
+                }
+                return "-";
+              } },
               { key: "trades", header: "Trades", align: "right", render: (item) => formatNumber(item.executed_trades) },
               { key: "win", header: "Win Rate", align: "right", render: (item) => formatPct(item.win_rate_pct) },
               { key: "pnl", header: "Account PnL", align: "right", render: (item) => formatPct(item.net_pnl_pct) },
-              { key: "fees", header: "Fees", align: "right", render: (item) => formatUsd(item.account?.total_fees_usdt) }
+              { key: "fees", header: "Fees", align: "right", render: (item) => formatUsd(item.account?.total_fees_usdt) },
+              { key: "flag", header: "", render: (item) => item.oos_warning ? "⚠️" : item.oos_selection_mode === "oos_ratio_gate" ? "✓" : "" }
             ]}
             getRowKey={(item) => item.candidate_id}
             onRowClick={onOpenCandidate}
@@ -3144,6 +3162,38 @@ function Stage4CandidateDetailPanel({ detail }: { detail: Stage4CandidateDetail 
         <FieldRow label="Max Drawdown" value={formatPct(maxDrawdownPct)} />
         <FieldRow label="Skipped Signals" value={formatNumber(totalSkipped)} />
       </div>
+
+      {candidate.slices ? (
+        <div className="stage4-oos-split">
+          <div className="stage4-oos-split__col">
+            <span className="stage4-oos-split__label">Training</span>
+            <FieldRow label="Net PnL" value={formatPct(candidate.slices.training?.net_pnl_pct)} />
+            <FieldRow label="Expectancy" value={formatPct(candidate.slices.training?.net_expectancy_pct)} />
+            <FieldRow label="Win Rate" value={formatPct(candidate.slices.training?.win_rate_pct)} />
+            <FieldRow label="Profit Factor" value={candidate.slices.training?.profit_factor?.toFixed(2) ?? "-"} />
+            <FieldRow label="Trades" value={formatNumber(candidate.slices.training?.executed_trades)} />
+          </div>
+          <div className="stage4-oos-split__col">
+            <span className="stage4-oos-split__label">Walk-Forward (OOS)</span>
+            <FieldRow label="Net PnL" value={formatPct(candidate.slices.walk_forward_test?.net_pnl_pct)} />
+            <FieldRow label="Expectancy" value={formatPct(candidate.slices.walk_forward_test?.net_expectancy_pct)} />
+            <FieldRow label="Win Rate" value={formatPct(candidate.slices.walk_forward_test?.win_rate_pct)} />
+            <FieldRow label="Profit Factor" value={candidate.slices.walk_forward_test?.profit_factor?.toFixed(2) ?? "-"} />
+            <FieldRow label="Trades" value={formatNumber(candidate.slices.walk_forward_test?.executed_trades)} />
+          </div>
+          <div className="stage4-oos-split__ratio">
+            {(() => {
+              const wf = candidate.slices.walk_forward_test?.net_expectancy_pct;
+              const tr = candidate.slices.training?.net_expectancy_pct;
+              if (wf == null || tr == null || tr === 0) return null;
+              const ratio = wf / tr;
+              const tone = ratio >= 0.6 ? "tone-pass" : ratio >= 0.3 ? "tone-warn" : "tone-risk";
+              return <span className={tone}>OOS/Train: {(ratio * 100).toFixed(0)}%</span>;
+            })()}
+            {candidate.oos_warning ? <span className="tone-risk">⚠ Training-optimized (OOS fallback)</span> : null}
+          </div>
+        </div>
+      ) : null}
 
       <div className="stage4-detail-chart-card">
         <div className="stage4-detail-chart-card__header">

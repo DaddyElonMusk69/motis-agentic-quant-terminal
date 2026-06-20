@@ -610,6 +610,16 @@ export type Stage4CandidateResult = {
   skipped_position_open?: number;
   margin_allocation_pct?: number;
   leverage?: number;
+  oos_selection_mode?: "oos_ratio_gate" | "fallback_combined" | string | null;
+  oos_warning?: boolean;
+  slices?: Record<string, {
+    net_expectancy_pct?: number;
+    gross_expectancy_pct?: number;
+    profit_factor?: number;
+    win_rate_pct?: number;
+    executed_trades?: number;
+    net_pnl_pct?: number;
+  }>;
   setup?: {
     policy_mode?: "shared" | "side_specific" | string | null;
     protection_enabled?: boolean;
