@@ -196,15 +196,15 @@ def test_fill_raw_candle_dataset_pages_back_from_latest_until_gap_is_covered(tmp
                 return {
                     "code": "0",
                     "data": [
-                        ["1780273200000", "104", "108", "103", "107", "6.0"],
-                        ["1780272900000", "101", "106", "100", "104", "8.75"],
+                        ["1780273200000", "104", "108", "103", "107", "6.0", "0.6", "642", "1"],
+                        ["1780272900000", "101", "106", "100", "104", "8.75", "0.875", "910", "1"],
                     ],
                 }
             return {
                 "code": "0",
                 "data": [
-                    ["1780272600000", "100", "105", "99", "101", "12.5"],
-                    ["1780272300000", "99", "101", "98", "100", "3.0"],
+                    ["1780272600000", "100", "105", "99", "101", "12.5", "1.25", "1262.5", "1"],
+                    ["1780272300000", "99", "101", "98", "100", "3.0", "0.3", "300", "1"],
                 ],
             }
 
@@ -240,6 +240,101 @@ def test_fill_raw_candle_dataset_pages_back_from_latest_until_gap_is_covered(tmp
     assert result["status"] == "filled"
     assert result["rows_added"] == 4
     assert result["end_ts"] == "2026-06-01T00:20:00Z"
+
+
+def test_fill_raw_candle_dataset_ignores_unconfirmed_source_candles(tmp_path: Path):
+    class FormingOKXAdapter:
+        def market_candles(self, inst_id: str, *, bar: str, limit: int, after: str | None = None):
+            return {
+                "code": "0",
+                "data": [
+                    ["1780272300000", "101", "106", "100", "104", "8.75", "0.875", "910", "0"],
+                ],
+            }
+
+    storage_uri = tmp_path / "origin=raw/source=okx/type=candles/asset=BTC/timeframe=5m"
+    month_path = storage_uri / "year=2026/month=06/data.parquet"
+    month_path.parent.mkdir(parents=True)
+    _write_parquet(month_path, [_row("2026-06-01T00:00:00Z", 100, 105, 99, 101, 12.5)])
+    repository = FakeRepository()
+
+    result = fill_raw_candle_dataset(
+        registration={
+            "dataset_id": "btc-raw-5m",
+            "source_id": "okx",
+            "asset": "BTC",
+            "instrument": "BTC-USDT-SWAP",
+            "data_type": "candles",
+            "timeframe": "5m",
+            "data_origin": "raw",
+            "start_ts": datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+            "end_ts": datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+            "row_count": 1,
+            "storage_backend": "parquet",
+            "storage_uri": str(storage_uri),
+            "schema_descriptor": {"columns": ["timestamp", "open", "high", "low", "close", "volume"]},
+            "quality_status": "ingested",
+            "ingestion_version": "legacy",
+        },
+        repository=repository,
+        adapter=FormingOKXAdapter(),
+        as_of=datetime(2026, 6, 1, 0, 5, tzinfo=UTC),
+    )
+
+    assert result["status"] == "no_new_rows"
+    assert result["end_ts"] == "2026-06-01T00:00:00Z"
+    assert repository.updated_registration is None
+    assert [row["timestamp"] for row in read_candles(month_path)] == ["2026-06-01T00:00:00Z"]
+
+
+def test_fill_raw_candle_dataset_appends_confirmed_rows_only_from_mixed_payload(tmp_path: Path):
+    class MixedOKXAdapter:
+        def market_candles(self, inst_id: str, *, bar: str, limit: int, after: str | None = None):
+            return {
+                "code": "0",
+                "data": [
+                    ["1780272600000", "104", "108", "103", "107", "6.0", "0.6", "642", "0"],
+                    ["1780272300000", "101", "106", "100", "104", "8.75", "0.875", "910", "1"],
+                ],
+            }
+
+    storage_uri = tmp_path / "origin=raw/source=okx/type=candles/asset=BTC/timeframe=5m"
+    month_path = storage_uri / "year=2026/month=06/data.parquet"
+    month_path.parent.mkdir(parents=True)
+    _write_parquet(month_path, [_row("2026-06-01T00:00:00Z", 100, 105, 99, 101, 12.5)])
+    repository = FakeRepository()
+
+    result = fill_raw_candle_dataset(
+        registration={
+            "dataset_id": "btc-raw-5m",
+            "source_id": "okx",
+            "asset": "BTC",
+            "instrument": "BTC-USDT-SWAP",
+            "data_type": "candles",
+            "timeframe": "5m",
+            "data_origin": "raw",
+            "start_ts": datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+            "end_ts": datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+            "row_count": 1,
+            "storage_backend": "parquet",
+            "storage_uri": str(storage_uri),
+            "schema_descriptor": {"columns": ["timestamp", "open", "high", "low", "close", "volume"]},
+            "quality_status": "ingested",
+            "ingestion_version": "legacy",
+        },
+        repository=repository,
+        adapter=MixedOKXAdapter(),
+        as_of=datetime(2026, 6, 1, 0, 10, tzinfo=UTC),
+    )
+
+    assert result["status"] == "filled"
+    assert result["rows_added"] == 1
+    assert result["end_ts"] == "2026-06-01T00:05:00Z"
+    assert repository.updated_registration["end_ts"] == "2026-06-01T00:05:00Z"
+    assert [row["timestamp"] for row in read_candles(month_path)] == [
+        "2026-06-01T00:00:00Z",
+        "2026-06-01T00:05:00Z",
+    ]
 
 
 def test_fill_raw_candle_dataset_reports_no_new_rows_when_source_returns_gap(tmp_path: Path):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ def warm_route_data(
     adapter: Any,
     feature_service: Any | None = None,
     workspace_root: Path | None = None,
+    as_of: datetime | None = None,
 ) -> dict[str, Any]:
     route = runtime_repository.get_deployment_route(route_id)
     if route is None:
@@ -43,8 +45,10 @@ def warm_route_data(
             "route": updated_route,
         }
 
+    checked_at = as_of or datetime.now(UTC)
     requirement_results: list[dict[str, Any]] = []
     raw_results_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    raw_refs_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     blocked = False
 
     for requirement in required_data:
@@ -63,11 +67,14 @@ def warm_route_data(
             blocked = True
             continue
 
-        fill_result = fill_service(
+        fill_result = _call_fill_service(
+            fill_service=fill_service,
             registration=raw_ref,
             repository=market_data_repository,
             adapter=adapter,
+            as_of=checked_at,
         )
+        raw_refs_by_key[("candles", timeframe)] = raw_ref
         raw_results_by_key[("candles", timeframe)] = fill_result
         requirement_results.append(
             {
@@ -112,6 +119,43 @@ def warm_route_data(
                 "source_timeframe": source_timeframe,
             }
         )
+
+    data_freshness = _route_data_freshness(
+        route=route,
+        requirements=required_data,
+        market_data_repository=market_data_repository,
+        checked_at=checked_at,
+    )
+    if data_freshness.get("status") == "stale":
+        retry_result = _retry_stale_raw_5m(
+            route=route,
+            requirements=required_data,
+            raw_refs_by_key=raw_refs_by_key,
+            market_data_repository=market_data_repository,
+            fill_service=fill_service,
+            adapter=adapter,
+            checked_at=checked_at,
+        )
+        if retry_result is not None:
+            data_freshness["retry_result"] = retry_result
+            data_freshness = _route_data_freshness(
+                route=route,
+                requirements=required_data,
+                market_data_repository=market_data_repository,
+                checked_at=checked_at,
+            ) | {"retry_result": retry_result}
+        if data_freshness.get("status") == "stale":
+            updated_route = runtime_repository.update_deployment_route_gate(route_id, data_warmed=False)
+            return {
+                "status": "blocked",
+                "route_id": route_id,
+                "asset": route["asset"],
+                "signal_engine_id": route["signal_engine_id"],
+                "reason": "market_data_stale",
+                "requirements": requirement_results,
+                "data_freshness": data_freshness,
+                "route": updated_route or route,
+            }
 
     for requirement in required_data:
         data_type = requirement.get("data_type")
@@ -181,6 +225,7 @@ def warm_route_data(
         "asset": route["asset"],
         "signal_engine_id": route["signal_engine_id"],
         "requirements": requirement_results,
+        "data_freshness": data_freshness,
         "route": updated_route,
     }
 
@@ -220,6 +265,169 @@ def _get_ref(repository: Any, *, asset: str, timeframe: str | None, origin: str,
     if not callable(getter):
         return None
     return getter(asset=asset, timeframe=timeframe, origin=origin, data_type=data_type)
+
+
+def _route_data_freshness(
+    *,
+    route: dict[str, Any],
+    requirements: list[dict[str, Any]],
+    market_data_repository: Any,
+    checked_at: datetime,
+) -> dict[str, Any]:
+    cron_minutes = route.get("cron_interval_minutes")
+    if cron_minutes is None:
+        return {"status": "not_checked", "reason": "route_has_no_wake_interval"}
+    try:
+        wake_interval_seconds = max(60, int(cron_minutes) * 60)
+    except (TypeError, ValueError):
+        wake_interval_seconds = 300
+    candle_interval_seconds = _timeframe_seconds("5m")
+    grace_seconds = 90
+    max_age_seconds = candle_interval_seconds + wake_interval_seconds + grace_seconds
+    raw_required = _requires_candles(requirements, origin="raw", timeframe="5m")
+    derived_required = _requires_candles(requirements, origin="derived", timeframe="5m")
+    raw_ref = market_data_repository.get_raw_candle_ref(route["asset"], "5m") if raw_required else None
+    derived_ref = _get_ref(
+        market_data_repository,
+        asset=route["asset"],
+        timeframe="5m",
+        origin="derived",
+        data_type="candles",
+    ) if derived_required else None
+    raw_status = _freshness_ref_status(raw_ref, checked_at=checked_at, max_age_seconds=max_age_seconds)
+    derived_status = _freshness_ref_status(derived_ref, checked_at=checked_at, max_age_seconds=max_age_seconds)
+
+    status = "fresh"
+    reason = None
+    if raw_required and raw_status["status"] == "stale":
+        status = "stale"
+        reason = "raw_5m_stale"
+    elif raw_required and raw_status["status"] == "missing":
+        status = "stale"
+        reason = "raw_5m_missing"
+    elif derived_required and derived_status["status"] == "stale":
+        status = "stale"
+        reason = "derived_5m_stale"
+    elif derived_required and derived_status["status"] == "missing":
+        status = "stale"
+        reason = "derived_5m_missing"
+    elif derived_required and raw_status.get("timestamp") and derived_status.get("timestamp"):
+        raw_ts = _coerce_datetime(raw_status["timestamp"])
+        derived_ts = _coerce_datetime(derived_status["timestamp"])
+        if derived_ts < raw_ts:
+            status = "stale"
+            reason = "derived_5m_lagging_raw"
+
+    return {
+        "status": status,
+        "reason": reason,
+        "checked_at": _to_iso(checked_at),
+        "candle_interval_seconds": candle_interval_seconds,
+        "wake_interval_seconds": wake_interval_seconds,
+        "grace_seconds": grace_seconds,
+        "max_age_seconds": max_age_seconds,
+        "raw_5m": raw_status if raw_required else None,
+        "derived_5m": derived_status if derived_required else None,
+    }
+
+
+def _retry_stale_raw_5m(
+    *,
+    route: dict[str, Any],
+    requirements: list[dict[str, Any]],
+    raw_refs_by_key: dict[tuple[str, str], dict[str, Any]],
+    market_data_repository: Any,
+    fill_service: Any,
+    adapter: Any,
+    checked_at: datetime,
+) -> dict[str, Any] | None:
+    if not _requires_candles(requirements, origin="raw", timeframe="5m"):
+        return None
+    raw_ref = raw_refs_by_key.get(("candles", "5m")) or market_data_repository.get_raw_candle_ref(route["asset"], "5m")
+    if raw_ref is None:
+        return None
+    return _call_fill_service(
+        fill_service=fill_service,
+        registration=raw_ref,
+        repository=market_data_repository,
+        adapter=adapter,
+        as_of=checked_at,
+    )
+
+
+def _requires_candles(requirements: list[dict[str, Any]], *, origin: str, timeframe: str) -> bool:
+    return any(
+        requirement.get("data_type") == "candles"
+        and requirement.get("origin") == origin
+        and (requirement.get("timeframe") or "5m") == timeframe
+        for requirement in requirements
+    )
+
+
+def _freshness_ref_status(ref: dict[str, Any] | None, *, checked_at: datetime, max_age_seconds: int) -> dict[str, Any]:
+    if ref is None:
+        return {"status": "missing"}
+    end_ts = ref.get("end_ts")
+    if end_ts is None:
+        return {
+            "status": "unknown",
+            "dataset_id": ref.get("dataset_id"),
+            "reason": "missing_end_ts",
+        }
+    timestamp = _coerce_datetime(end_ts)
+    age_seconds = max(0, int((checked_at - timestamp).total_seconds()))
+    return {
+        "status": "fresh" if age_seconds <= max_age_seconds else "stale",
+        "dataset_id": ref.get("dataset_id"),
+        "timestamp": _to_iso(timestamp),
+        "age_seconds": age_seconds,
+    }
+
+
+def _call_fill_service(
+    *,
+    fill_service: Any,
+    registration: dict[str, Any],
+    repository: Any,
+    adapter: Any,
+    as_of: datetime,
+) -> dict[str, Any]:
+    try:
+        return fill_service(
+            registration=registration,
+            repository=repository,
+            adapter=adapter,
+            as_of=as_of,
+        )
+    except TypeError as exc:
+        if "as_of" not in str(exc):
+            raise
+        return fill_service(
+            registration=registration,
+            repository=repository,
+            adapter=adapter,
+        )
+
+
+def _coerce_datetime(value: datetime | str) -> datetime:
+    if isinstance(value, datetime):
+        return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(UTC)
+
+
+def _timeframe_seconds(timeframe: str) -> int:
+    normalized = str(timeframe).strip().lower()
+    if normalized.endswith("m"):
+        return int(normalized[:-1]) * 60
+    if normalized.endswith("h"):
+        return int(normalized[:-1]) * 60 * 60
+    if normalized.endswith("d"):
+        return int(normalized[:-1]) * 24 * 60 * 60
+    return 300
+
+
+def _to_iso(value: datetime) -> str:
+    return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _blocked(*, route: dict[str, Any], requirements: list[dict[str, Any]]) -> dict[str, Any]:

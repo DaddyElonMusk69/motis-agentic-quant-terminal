@@ -646,6 +646,51 @@
   white-space: nowrap;
 }
 
+.route-card-v2__data-freshness {
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-sm);
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 6px 8px;
+}
+
+.route-card-v2__data-freshness span,
+.route-card-v2__data-freshness small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.route-card-v2__data-freshness span {
+  color: var(--ink-secondary);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.route-card-v2__data-freshness small {
+  color: var(--ink-muted);
+  font-size: 10px;
+}
+
+.route-card-v2__data-freshness--fresh {
+  border-color: color-mix(in oklch, var(--status-pass) 28%, var(--line-subtle));
+}
+
+.route-card-v2__data-freshness--fresh span {
+  color: var(--status-pass);
+}
+
+.route-card-v2__data-freshness--stale {
+  border-color: color-mix(in oklch, var(--status-warn) 38%, var(--line-subtle));
+}
+
+.route-card-v2__data-freshness--stale span {
+  color: var(--status-warn);
+}
+
 .route-card-v2__settings-toggle {
   background: none;
   border: 0;
@@ -2936,6 +2981,54 @@
 .add-ticker-modal {
   max-width: 760px;
   min-width: min(720px, calc(100vw - 32px));
+}
+
+.live-observations-modal {
+  max-height: min(840px, calc(100vh - 40px));
+  max-width: 1320px;
+  min-width: min(1240px, calc(100vw - 40px));
+}
+
+.live-observations-modal__body {
+  display: grid;
+  gap: var(--space-4);
+  grid-template-columns: minmax(520px, 0.95fr) minmax(560px, 1.05fr);
+  min-height: min(680px, calc(100vh - 168px));
+  overflow: hidden;
+}
+
+.live-observations-modal__body > .terminal-panel {
+  min-height: 0;
+  overflow: auto;
+}
+
+.observation-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.json-preview {
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.json-preview > span {
+  background: var(--surface-muted);
+  border-bottom: 1px solid var(--line-subtle);
+  color: var(--ink-muted);
+  display: block;
+  font-size: var(--font-size-xs);
+  padding: var(--space-2) var(--space-3);
+  text-transform: uppercase;
+}
+
+.json-preview pre {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: var(--space-3);
 }
 
 .terminal-modal__header,

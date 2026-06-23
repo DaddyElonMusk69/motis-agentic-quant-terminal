@@ -470,6 +470,17 @@ def create_app(
     def list_signal_sets(signal_engine_id: str) -> dict[str, Any]:
         return {"signal_sets": get_runtime_repository().list_signal_sets(signal_engine_id)}
 
+    @app.get("/api/v1/signal-engines/{signal_engine_id}/assets/{asset}/live-observations")
+    def list_live_signal_observations(signal_engine_id: str, asset: str, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        repository = get_runtime_repository()
+        lister = getattr(repository, "list_live_signal_observations", None)
+        if not callable(lister):
+            raise HTTPException(status_code=503, detail="live signal observations are not configured")
+        return _relative_nested_paths(
+            Path.cwd(),
+            lister(signal_engine_id=signal_engine_id, asset=asset, limit=limit, offset=offset),
+        )
+
     @app.post("/api/v1/signal-engines/{signal_engine_id}/signal-sets")
     def create_signal_set(signal_engine_id: str, request: SignalPoolCreateRequest) -> dict[str, Any]:
         repository = get_runtime_repository()

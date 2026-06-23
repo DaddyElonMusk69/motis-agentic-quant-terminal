@@ -137,6 +137,24 @@ export type SignalSet = {
   manifest: Record<string, unknown>;
 };
 
+export type LiveSignalObservation = {
+  observation_id: string;
+  signal_engine_id: string;
+  signal_engine_version: string;
+  asset: string;
+  instrument: string;
+  signal_id: string;
+  signal_timestamp: string;
+  route_id: string | null;
+  bundle_id: string | null;
+  packet_hash: string;
+  payload_schema: string;
+  payload: Record<string, unknown>;
+  decision: Record<string, unknown>;
+  scan_metadata: Record<string, unknown>;
+  observed_at: string;
+};
+
 export type SignalPoolExtendResult = {
   status: string;
   signal_engine_id: string;
@@ -940,7 +958,28 @@ export type DeploymentRoute = {
   archived?: boolean;
   archived_at?: string | null;
   blockers?: string[];
+  data_freshness?: DataFreshnessReport;
   created_at?: string;
+};
+
+export type DataFreshnessItem = {
+  status: "fresh" | "stale" | "missing" | "unknown" | string;
+  dataset_id?: string | null;
+  timestamp?: string | null;
+  age_seconds?: number;
+  reason?: string;
+};
+
+export type DataFreshnessReport = {
+  status: "fresh" | "stale" | "not_checked" | string;
+  reason?: string | null;
+  checked_at?: string;
+  wake_interval_seconds?: number;
+  grace_seconds?: number;
+  max_age_seconds?: number;
+  raw_5m?: DataFreshnessItem | null;
+  derived_5m?: DataFreshnessItem | null;
+  retry_result?: Record<string, unknown>;
 };
 
 export type ExchangeHealth = {
@@ -1015,6 +1054,7 @@ export type DataWarmupReport = {
   signal_engine_id?: string;
   reason?: string;
   requirements?: WarmupRequirement[];
+  data_freshness?: DataFreshnessReport;
 };
 
 export type SubmitWakeOrdersResult = {
@@ -1134,6 +1174,17 @@ export function fetchSignals(signalSetKey: string, limit = 5, descending = false
     params.set("descending", "true");
   }
   return requestJson<{ signals: SignalRecord[] }>(`/api/v1/signals?${params.toString()}`);
+}
+
+export function fetchLiveSignalObservations(
+  signalEngineId: string,
+  asset: string,
+  limit = 100
+): Promise<{ observations: LiveSignalObservation[]; total: number; limit: number; offset: number }> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  return requestJson<{ observations: LiveSignalObservation[]; total: number; limit: number; offset: number }>(
+    `/api/v1/signal-engines/${signalEngineId}/assets/${asset}/live-observations?${params.toString()}`
+  );
 }
 
 export function extendSignalPoolFromLocalCandles(request: { signal_engine_id: string; asset: string }): Promise<SignalPoolExtendResult | AsyncJobResponse> {

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from quant_terminal_worker.execution.data_warmup import warm_route_data
 
@@ -95,6 +95,20 @@ class FakeMarketDataRepository:
         return [dict(self.derived_ref)]
 
     def get_candle_ref(self, *, asset, timeframe, origin, data_type="candles"):
+        if (
+            asset == "AAVE"
+            and timeframe == "5m"
+            and origin == "raw"
+            and data_type == "candles"
+        ):
+            return dict(self.raw_ref)
+        if (
+            asset == "AAVE"
+            and timeframe == self.derived_ref["timeframe"]
+            and origin == "derived"
+            and data_type == "candles"
+        ):
+            return dict(self.derived_ref)
         if (
             self.feature_ref is not None
             and asset == "AAVE"
@@ -196,3 +210,112 @@ def test_warm_route_data_blocks_when_required_feature_cannot_be_built():
     assert feature_requirement["data_type"] == "feature_bollinger"
     assert feature_requirement["reason"] == "feature_refresh_produced_no_matching_dataset"
     assert runtime_repository.gate_updates == []
+
+
+def test_warm_route_data_reports_fresh_5m_candle_status():
+    runtime_repository = FakeRuntimeRepository()
+    runtime_repository.route["cron_interval_minutes"] = 5
+    runtime_repository.engines[0]["required_data"] = [
+        {"data_type": "candles", "origin": "raw", "timeframe": "5m"},
+        {
+            "data_type": "candles",
+            "origin": "derived",
+            "timeframe": "5m",
+            "source": {"data_type": "candles", "origin": "raw", "timeframe": "5m"},
+        },
+    ]
+    market_repository = FakeMarketDataRepository()
+    as_of = datetime(2026, 6, 1, 0, 5, tzinfo=UTC)
+    latest = as_of - timedelta(minutes=5)
+    market_repository.raw_ref["end_ts"] = latest
+    market_repository.derived_ref["timeframe"] = "5m"
+    market_repository.derived_ref["end_ts"] = latest
+
+    result = warm_route_data(
+        route_id="aave-live",
+        runtime_repository=runtime_repository,
+        market_data_repository=market_repository,
+        fill_service=lambda **kwargs: {"status": "current", "rows_added": 0, "end_ts": latest.isoformat()},
+        adapter=FakeAdapter(),
+        as_of=as_of,
+    )
+
+    assert result["status"] == "warmed"
+    assert result["data_freshness"]["status"] == "fresh"
+    assert result["data_freshness"]["raw_5m"]["status"] == "fresh"
+    assert result["data_freshness"]["derived_5m"]["status"] == "fresh"
+    assert result["data_freshness"]["candle_interval_seconds"] == 300
+    assert result["data_freshness"]["max_age_seconds"] == 690
+
+
+def test_warm_route_data_accepts_latest_confirmed_5m_candle_start_timestamp():
+    runtime_repository = FakeRuntimeRepository()
+    runtime_repository.route["cron_interval_minutes"] = 5
+    runtime_repository.engines[0]["required_data"] = [
+        {"data_type": "candles", "origin": "raw", "timeframe": "5m"},
+        {
+            "data_type": "candles",
+            "origin": "derived",
+            "timeframe": "5m",
+            "source": {"data_type": "candles", "origin": "raw", "timeframe": "5m"},
+        },
+    ]
+    market_repository = FakeMarketDataRepository()
+    as_of = datetime(2026, 6, 1, 0, 8, 17, tzinfo=UTC)
+    latest_confirmed_start = datetime(2026, 6, 1, 0, 0, tzinfo=UTC)
+    market_repository.raw_ref["end_ts"] = latest_confirmed_start
+    market_repository.derived_ref["timeframe"] = "5m"
+    market_repository.derived_ref["end_ts"] = latest_confirmed_start
+
+    result = warm_route_data(
+        route_id="aave-live",
+        runtime_repository=runtime_repository,
+        market_data_repository=market_repository,
+        fill_service=lambda **kwargs: {
+            "status": "current",
+            "rows_added": 0,
+            "end_ts": latest_confirmed_start.isoformat(),
+        },
+        adapter=FakeAdapter(),
+        as_of=as_of,
+    )
+
+    assert result["status"] == "warmed"
+    assert result["data_freshness"]["status"] == "fresh"
+    assert result["data_freshness"]["raw_5m"]["age_seconds"] == 497
+
+
+def test_warm_route_data_blocks_when_latest_5m_candle_is_stale_after_retry():
+    runtime_repository = FakeRuntimeRepository()
+    runtime_repository.route["cron_interval_minutes"] = 5
+    market_repository = FakeMarketDataRepository()
+    as_of = datetime(2026, 6, 1, 0, 30, tzinfo=UTC)
+    stale = as_of - timedelta(minutes=20)
+    market_repository.raw_ref["end_ts"] = stale
+    fill_calls = []
+
+    def fill_service(*, registration, repository, adapter):
+        fill_calls.append(registration["dataset_id"])
+        return {"status": "no_new_rows", "rows_added": 0, "end_ts": stale.isoformat()}
+
+    result = warm_route_data(
+        route_id="aave-live",
+        runtime_repository=runtime_repository,
+        market_data_repository=market_repository,
+        fill_service=fill_service,
+        adapter=FakeAdapter(),
+        feature_service=lambda **kwargs: {
+            "status": "enriched",
+            "family": kwargs["family"],
+            "feature_count": 1,
+            "features": [{"dataset_id": "AAVE-feature_bollinger-2h", "timeframe": "2h", "row_count": 100}],
+        },
+        as_of=as_of,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["reason"] == "market_data_stale"
+    assert result["data_freshness"]["status"] == "stale"
+    assert result["data_freshness"]["raw_5m"]["age_seconds"] == 1200
+    assert fill_calls == ["aave-raw-5m", "aave-raw-5m"]
+    assert runtime_repository.gate_updates == [{"data_warmed": False}]

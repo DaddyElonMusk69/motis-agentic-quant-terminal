@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -14,6 +16,7 @@ from quant_terminal_api.db.models import (
     deployment_routes,
     execution_bundles,
     jobs,
+    live_signal_observations,
     market_data_refs,
     owner_states,
     score_summaries,
@@ -945,6 +948,59 @@ class RuntimeRepository:
         with self.engine.connect() as connection:
             return [dict(row._mapping) for row in connection.execute(statement)]
 
+    def record_live_signal_observation(self, observation: dict[str, Any]) -> dict[str, Any]:
+        payload = _json_safe(observation.get("payload", {}))
+        values = {
+            "observation_id": observation.get("observation_id") or _live_signal_observation_id(observation),
+            "signal_engine_id": observation["signal_engine_id"],
+            "signal_engine_version": observation.get("signal_engine_version") or "unknown",
+            "asset": str(observation["asset"]).upper(),
+            "instrument": observation.get("instrument") or f"{str(observation['asset']).upper()}-USDT-SWAP",
+            "signal_id": observation["signal_id"],
+            "signal_timestamp": _coerce_datetime(observation.get("signal_timestamp") or observation["timestamp"]),
+            "route_id": observation.get("route_id"),
+            "bundle_id": observation.get("bundle_id"),
+            "packet_hash": observation.get("packet_hash") or _stable_json_hash(payload),
+            "payload_schema": observation.get("payload_schema") or payload.get("schema_version") or "signal_packet.v2",
+            "payload": payload,
+            "decision": _json_safe(observation.get("decision", {})),
+            "scan_metadata": _json_safe(observation.get("scan_metadata", {})),
+            "observed_at": _coerce_optional_datetime(observation.get("observed_at")) or datetime.now(UTC),
+        }
+        with self.engine.begin() as connection:
+            connection.execute(self._upsert_live_signal_observation(values))
+            row = connection.execute(
+                select(live_signal_observations).where(live_signal_observations.c.observation_id == values["observation_id"])
+            ).mappings().one()
+            return _normalize_live_signal_observation_row(dict(row))
+
+    def list_live_signal_observations(
+        self,
+        *,
+        signal_engine_id: str,
+        asset: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        safe_limit = max(1, min(int(limit), 500))
+        safe_offset = max(0, int(offset))
+        filters = [
+            live_signal_observations.c.signal_engine_id == signal_engine_id,
+            live_signal_observations.c.asset == asset.upper(),
+        ]
+        statement = (
+            select(live_signal_observations)
+            .where(*filters)
+            .order_by(live_signal_observations.c.signal_timestamp.desc(), live_signal_observations.c.observed_at.desc())
+            .limit(safe_limit)
+            .offset(safe_offset)
+        )
+        count_statement = select(func.count()).select_from(live_signal_observations).where(*filters)
+        with self.engine.connect() as connection:
+            rows = [_normalize_live_signal_observation_row(dict(row)) for row in connection.execute(statement).mappings()]
+            total = int(connection.execute(count_statement).scalar_one())
+        return {"observations": rows, "total": total, "limit": safe_limit, "offset": safe_offset}
+
     def create_strategy_development_run(self, run: dict[str, Any]) -> None:
         with self.engine.begin() as connection:
             connection.execute(self._insert_strategy_development_run_ignore_conflict(run))
@@ -1130,9 +1186,17 @@ class RuntimeRepository:
         with self.engine.connect() as connection:
             routes = [dict(row._mapping) for row in connection.execute(statement)]
         bundles = {bundle["bundle_id"]: bundle for bundle in self.list_execution_bundles()}
+        engines = {
+            (engine.get("signal_engine_id"), engine.get("version")): engine
+            for engine in self.list_signal_engines()
+        }
         for route in routes:
             _normalize_route_datetimes(route)
             route["active_bundle"] = bundles.get(route.get("active_bundle_id"))
+            route["data_freshness"] = self._route_data_freshness(
+                route,
+                engine=engines.get((route.get("signal_engine_id"), route.get("signal_engine_version"))),
+            )
             route["blockers"] = _route_blockers(route)
         return routes
 
@@ -1148,8 +1212,71 @@ class RuntimeRepository:
             route["active_bundle"] = self.get_execution_bundle(route["active_bundle_id"])
         else:
             route["active_bundle"] = None
+        route["data_freshness"] = self._route_data_freshness(route)
         route["blockers"] = _route_blockers(route)
         return route
+
+    def _route_data_freshness(self, route: dict[str, Any], *, engine: dict[str, Any] | None = None) -> dict[str, Any]:
+        checked_at = datetime.now(UTC)
+        try:
+            wake_interval_seconds = max(60, int(route.get("cron_interval_minutes") or 5) * 60)
+        except (TypeError, ValueError):
+            wake_interval_seconds = 300
+        candle_interval_seconds = _timeframe_seconds("5m")
+        grace_seconds = 90
+        max_age_seconds = candle_interval_seconds + wake_interval_seconds + grace_seconds
+        resolved_engine = engine or self._route_signal_engine(route)
+        required_data = list((resolved_engine or {}).get("required_data") or [])
+        raw_required = _route_requires_candle(required_data, origin="raw", timeframe="5m")
+        derived_required = _route_requires_candle(required_data, origin="derived", timeframe="5m")
+        raw_ref = self.get_candle_ref(
+            asset=route["asset"],
+            timeframe="5m",
+            origin="raw",
+            data_type="candles",
+        ) if raw_required else None
+        derived_ref = self.get_candle_ref(
+            asset=route["asset"],
+            timeframe="5m",
+            origin="derived",
+            data_type="candles",
+        ) if derived_required else None
+        raw_status = _market_ref_freshness(raw_ref, checked_at=checked_at, max_age_seconds=max_age_seconds)
+        derived_status = _market_ref_freshness(derived_ref, checked_at=checked_at, max_age_seconds=max_age_seconds)
+        status = "fresh"
+        reason = None
+        if raw_required and raw_status["status"] in {"missing", "stale"}:
+            status = "stale"
+            reason = "raw_5m_missing" if raw_status["status"] == "missing" else "raw_5m_stale"
+        elif derived_required and derived_status["status"] in {"missing", "stale"}:
+            status = "stale"
+            reason = "derived_5m_missing" if derived_status["status"] == "missing" else "derived_5m_stale"
+        elif derived_required and raw_status.get("timestamp") and derived_status.get("timestamp"):
+            raw_ts = _coerce_optional_datetime(raw_status["timestamp"])
+            derived_ts = _coerce_optional_datetime(derived_status["timestamp"])
+            if raw_ts is not None and derived_ts is not None and derived_ts < raw_ts:
+                status = "stale"
+                reason = "derived_5m_lagging_raw"
+        return {
+            "status": status,
+            "reason": reason,
+            "checked_at": checked_at.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "candle_interval_seconds": candle_interval_seconds,
+            "wake_interval_seconds": wake_interval_seconds,
+            "grace_seconds": grace_seconds,
+            "max_age_seconds": max_age_seconds,
+            "raw_5m": raw_status if raw_required else None,
+            "derived_5m": derived_status if derived_required else None,
+        }
+
+    def _route_signal_engine(self, route: dict[str, Any]) -> dict[str, Any] | None:
+        for engine in self.list_signal_engines():
+            if engine.get("signal_engine_id") != route.get("signal_engine_id"):
+                continue
+            if route.get("signal_engine_version") is not None and engine.get("version") != route.get("signal_engine_version"):
+                continue
+            return engine
+        return None
 
     def get_deployment_route_for_asset_account(
         self,
@@ -1233,6 +1360,8 @@ class RuntimeRepository:
         for key in ("last_wake_at", "next_wake_at", "archived_at"):
             if key in updates and updates[key] is not None:
                 updates[key] = _coerce_datetime(updates[key])
+        if "last_lifecycle_error" in updates:
+            updates["last_lifecycle_error"] = _json_safe(updates["last_lifecycle_error"] or {})
         if updates:
             statement = deployment_routes.update().where(deployment_routes.c.route_id == route_id).values(**updates)
             with self.engine.begin() as connection:
@@ -1777,6 +1906,25 @@ class RuntimeRepository:
             )
         return insert(signals).values(values).prefix_with("OR IGNORE")
 
+    def _upsert_live_signal_observation(self, values: dict[str, Any]):
+        if self.engine.dialect.name == "postgresql":
+            return postgres_insert(live_signal_observations).values(**values).on_conflict_do_update(
+                index_elements=["signal_engine_id", "asset", "signal_timestamp", "route_id"],
+                set_={
+                    "signal_engine_version": values["signal_engine_version"],
+                    "instrument": values["instrument"],
+                    "signal_id": values["signal_id"],
+                    "bundle_id": values["bundle_id"],
+                    "packet_hash": values["packet_hash"],
+                    "payload_schema": values["payload_schema"],
+                    "payload": values["payload"],
+                    "decision": values["decision"],
+                    "scan_metadata": values["scan_metadata"],
+                    "observed_at": values["observed_at"],
+                },
+            )
+        return insert(live_signal_observations).values(**values).prefix_with("OR REPLACE")
+
     def _insert_signal_engine_ignore_conflict(self, values: dict[str, Any]):
         if self.engine.dialect.name == "postgresql":
             return postgres_insert(signal_engines).values(**values).on_conflict_do_nothing(
@@ -1986,6 +2134,51 @@ def _route_blockers(route: dict[str, Any]) -> list[str]:
     return blockers
 
 
+def _market_ref_freshness(
+    ref: dict[str, Any] | None,
+    *,
+    checked_at: datetime,
+    max_age_seconds: int,
+) -> dict[str, Any]:
+    if ref is None:
+        return {"status": "missing"}
+    end_ts = ref.get("end_ts")
+    if end_ts is None:
+        return {
+            "status": "unknown",
+            "dataset_id": ref.get("dataset_id"),
+            "reason": "missing_end_ts",
+        }
+    timestamp = _coerce_datetime(end_ts)
+    age_seconds = max(0, int((checked_at - timestamp).total_seconds()))
+    return {
+        "status": "fresh" if age_seconds <= max_age_seconds else "stale",
+        "dataset_id": ref.get("dataset_id"),
+        "timestamp": timestamp.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "age_seconds": age_seconds,
+    }
+
+
+def _route_requires_candle(requirements: list[dict[str, Any]], *, origin: str, timeframe: str) -> bool:
+    return any(
+        requirement.get("data_type") == "candles"
+        and requirement.get("origin") == origin
+        and (requirement.get("timeframe") or "5m") == timeframe
+        for requirement in requirements
+    )
+
+
+def _timeframe_seconds(timeframe: str) -> int:
+    normalized = str(timeframe).strip().lower()
+    if normalized.endswith("m"):
+        return int(normalized[:-1]) * 60
+    if normalized.endswith("h"):
+        return int(normalized[:-1]) * 60 * 60
+    if normalized.endswith("d"):
+        return int(normalized[:-1]) * 24 * 60 * 60
+    return 300
+
+
 def _repair_stage1_manifest_references(
     *,
     manifest: dict[str, Any],
@@ -2054,6 +2247,25 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, tuple):
         return [_json_safe(item) for item in value]
     return value
+
+
+def _stable_json_hash(value: Any) -> str:
+    encoded = json.dumps(_json_safe(value), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _live_signal_observation_id(observation: dict[str, Any]) -> str:
+    timestamp = _coerce_datetime(observation.get("signal_timestamp") or observation["timestamp"]).strftime("%Y%m%dT%H%M%SZ")
+    route = observation.get("route_id") or "unrouted"
+    return f"live-observation:{observation['signal_engine_id']}:{str(observation['asset']).upper()}:{route}:{timestamp}"
+
+
+def _normalize_live_signal_observation_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **row,
+        "signal_timestamp": _coerce_datetime(row["signal_timestamp"]),
+        "observed_at": _coerce_datetime(row["observed_at"]),
+    }
 
 
 def _normalize_signal_set_row(row: dict[str, Any]) -> dict[str, Any]:

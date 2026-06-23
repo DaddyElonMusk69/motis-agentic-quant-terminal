@@ -148,6 +148,30 @@ signals = Table(
     Column("payload", JSON_DOCUMENT, nullable=False, default=dict),
 )
 
+live_signal_observations = Table(
+    "live_signal_observations",
+    metadata,
+    Column("observation_id", String, primary_key=True),
+    Column("signal_engine_id", String, nullable=False),
+    Column("signal_engine_version", String, nullable=False),
+    Column("asset", String, nullable=False),
+    Column("instrument", String, nullable=False),
+    Column("signal_id", String, nullable=False),
+    Column("signal_timestamp", DateTime(timezone=True), nullable=False),
+    Column("route_id", String, nullable=True),
+    Column("bundle_id", String, nullable=True),
+    Column("packet_hash", String, nullable=False),
+    Column("payload_schema", String, nullable=False),
+    Column("payload", JSON_DOCUMENT, nullable=False, default=dict),
+    Column("decision", JSON_DOCUMENT, nullable=False, default=dict),
+    Column("scan_metadata", JSON_DOCUMENT, nullable=False, default=dict),
+    Column("observed_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("signal_engine_id", "asset", "signal_timestamp", "route_id", name="uq_live_signal_observation_engine_asset_ts_route"),
+)
+
+Index("ix_live_signal_observations_engine_asset_ts", live_signal_observations.c.signal_engine_id, live_signal_observations.c.asset, live_signal_observations.c.signal_timestamp)
+Index("ix_live_signal_observations_observed_at", live_signal_observations.c.observed_at)
+
 strategy_modules = Table(
     "strategy_modules",
     metadata,

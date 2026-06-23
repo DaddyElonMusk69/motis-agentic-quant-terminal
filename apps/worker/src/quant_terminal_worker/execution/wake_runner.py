@@ -320,6 +320,14 @@ def run_route_wake(
         )
 
     decision = _run_entry_decision(runtime=runtime, route=route, signal=signal, snapshot=snapshot)
+    _record_live_signal_observation(
+        repository=repository,
+        route=route,
+        bundle=bundle,
+        signal=signal,
+        decision=decision,
+        signal_scan_result=signal_scan_result,
+    )
     order_intents = _normalize_strategy_order_intents(
         wake_id=wake_id,
         route=route,
@@ -365,6 +373,37 @@ def _route_blockers(route: dict[str, Any]) -> list[str]:
 
 def _record_wake(repository: Any, wake: dict[str, Any]) -> dict[str, Any]:
     return repository.record_wake_run(wake)
+
+
+def _record_live_signal_observation(
+    *,
+    repository: Any,
+    route: dict[str, Any],
+    bundle: dict[str, Any],
+    signal: dict[str, Any],
+    decision: dict[str, Any],
+    signal_scan_result: dict[str, Any],
+) -> None:
+    recorder = getattr(repository, "record_live_signal_observation", None)
+    if not callable(recorder):
+        return
+    recorder(
+        {
+            "signal_engine_id": signal.get("signal_engine_id") or route.get("signal_engine_id"),
+            "signal_engine_version": signal.get("signal_engine_version") or route.get("signal_engine_version") or "unknown",
+            "asset": signal.get("asset") or route.get("asset"),
+            "instrument": signal.get("instrument") or route.get("instrument"),
+            "signal_id": signal["signal_id"],
+            "signal_timestamp": signal.get("timestamp"),
+            "route_id": route.get("route_id"),
+            "bundle_id": bundle.get("bundle_id"),
+            "payload_schema": signal.get("payload_schema", "signal_packet.v2"),
+            "payload": signal.get("payload", {}),
+            "decision": decision,
+            "scan_metadata": signal_scan_result,
+            "observed_at": datetime.now(UTC),
+        }
+    )
 
 
 def _error_wake(

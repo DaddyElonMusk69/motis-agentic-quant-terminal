@@ -26,6 +26,7 @@ def test_schema_declares_core_product_tables():
         "execution_bundles",
         "deployment_routes",
         "wake_runs",
+        "live_signal_observations",
         "owner_states",
         "audit_log",
     }
@@ -61,6 +62,7 @@ def test_signal_engine_versions_declare_required_data_contract():
 def test_execution_runtime_tables_have_audit_keys():
     bundle_table = metadata.tables["execution_bundles"]
     wake_table = metadata.tables["wake_runs"]
+    observation_table = metadata.tables["live_signal_observations"]
     owner_table = metadata.tables["owner_states"]
 
     assert {"bundle_id", "bundle_uri", "execution_setup", "risk_limits", "evidence_refs", "content_hash", "status"}.issubset(
@@ -69,6 +71,19 @@ def test_execution_runtime_tables_have_audit_keys():
     assert {"wake_id", "route_id", "bundle_id", "status", "branch", "blockers", "order_intents", "adapter_results"}.issubset(
         set(wake_table.columns.keys())
     )
+    assert {
+        "observation_id",
+        "signal_engine_id",
+        "asset",
+        "instrument",
+        "signal_timestamp",
+        "route_id",
+        "bundle_id",
+        "packet_hash",
+        "payload",
+        "decision",
+        "observed_at",
+    }.issubset(set(observation_table.columns.keys()))
     assert {
         "owner_state_id",
         "route_id",

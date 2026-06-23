@@ -137,7 +137,7 @@ def _fetch_missing_rows(
 
         for row in normalized_rows:
             timestamp = _coerce_datetime(row["timestamp"])
-            if from_ts <= timestamp <= target:
+            if from_ts <= timestamp <= target and _source_candle_is_confirmed(row):
                 rows_by_timestamp[row["timestamp"]] = row
 
         oldest_ts = min(_coerce_datetime(row["timestamp"]) for row in normalized_rows)
@@ -146,6 +146,15 @@ def _fetch_missing_rows(
         cursor = str(_to_epoch_ms(oldest_ts))
 
     return sorted(rows_by_timestamp.values(), key=lambda row: row["timestamp"])
+
+
+def _source_candle_is_confirmed(row: dict[str, Any]) -> bool:
+    try:
+        return int(row["confirm"]) == 1
+    except (TypeError, ValueError):
+        return False
+    except KeyError:
+        return False
 
 
 def _write_dataset_rows(storage_uri: Path, rows: list[dict[str, Any]]) -> None:

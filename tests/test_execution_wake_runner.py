@@ -54,6 +54,7 @@ class FakeRepository:
         self.wakes = []
         self.closed_owner_states = []
         self.updated_owner_states = []
+        self.live_signal_observations = []
 
     def get_deployment_route(self, route_id):
         if route_id != self.route["route_id"]:
@@ -96,6 +97,10 @@ class FakeRepository:
     def record_wake_run(self, wake):
         self.wakes.append(wake)
         return wake
+
+    def record_live_signal_observation(self, observation):
+        self.live_signal_observations.append(observation)
+        return observation
 
     def has_live_entry_for_signal(self, *, route_id, signal_id):
         return any(
@@ -1064,6 +1069,31 @@ def test_wake_order_intent_uses_explicit_execution_sizing(tmp_path):
     assert wake["order_intents"][0]["quantity"] == "1.25"
     assert wake["order_intents"][0]["notional_usd"] == 10
     assert wake["order_intents"][0]["trade_mode"] == "isolated"
+
+
+def test_wake_records_live_observation_without_canonical_signal_insert(tmp_path):
+    bundle = _bundle(tmp_path)
+    repository = FakeRepository(route=_route(bundle), bundle=bundle)
+    signal = _signal("sig-1")
+
+    wake = run_route_wake(
+        route_id="aave-live",
+        repository=repository,
+        adapter=FakeAdapter(),
+        live_signal_scanner=lambda **kwargs: signal,
+    )
+
+    assert wake["signal_scan_result"]["status"] == "fresh_signal"
+    assert repository.signals == []
+    assert len(repository.live_signal_observations) == 1
+    observation = repository.live_signal_observations[0]
+    assert observation["signal_engine_id"] == signal["signal_engine_id"]
+    assert observation["asset"] == signal["asset"]
+    assert observation["route_id"] == "aave-live"
+    assert observation["bundle_id"] == bundle["bundle_id"]
+    assert observation["signal_id"] == signal["signal_id"]
+    assert observation["payload"] == signal["payload"]
+    assert observation["decision"]["signal_id"] == signal["signal_id"]
 
 
 def test_wake_entry_intent_uses_short_side_split_policy(tmp_path):

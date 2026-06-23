@@ -127,7 +127,8 @@ def test_lifecycle_does_not_block_live_wake_when_research_signal_extension_fails
         workspace_root=tmp_path,
     )
 
-    assert result["signal_update"]["status"] == "blocked"
+    assert result["signal_update"]["status"] == "skipped"
+    assert result["signal_update"]["reason"] == "live_execution_uses_observation_log"
     assert result["wake"]["status"] == "completed"
     assert result["wake"]["branch"] == "idle"
     assert result["wake"]["signal_scan_result"]["status"] == "no_fresh_signal"

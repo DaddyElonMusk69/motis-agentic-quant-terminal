@@ -59,3 +59,21 @@ def test_list_derived_refs_for_raw_filters_matching_candle_datasets():
     assert "market_data_refs.instrument = " in compiled
     assert "market_data_refs.data_type = " in compiled
     assert "market_data_refs.data_origin = " in compiled
+
+
+def test_get_candle_ref_statement_filters_by_origin_and_latest_end_ts():
+    repository = PostgresMarketDataRepository.__new__(PostgresMarketDataRepository)
+    statement = repository.build_candle_ref_statement(
+        asset="arb",
+        timeframe="5m",
+        origin="derived",
+        data_type="candles",
+    )
+    compiled = str(statement.compile(dialect=postgresql.dialect()))
+
+    assert "market_data_refs.asset = " in compiled
+    assert "market_data_refs.data_type = " in compiled
+    assert "market_data_refs.timeframe = " in compiled
+    assert "market_data_refs.data_origin = " in compiled
+    assert "ORDER BY market_data_refs.end_ts DESC" in compiled
+    assert "LIMIT " in compiled

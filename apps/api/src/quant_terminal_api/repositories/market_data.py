@@ -60,18 +60,53 @@ class PostgresMarketDataRepository:
             return dict(row) if row else None
 
     def get_raw_candle_ref(self, asset: str, timeframe: str = "5m") -> dict[str, Any] | None:
-        statement = (
-            select(market_data_refs)
-            .where(market_data_refs.c.asset == asset)
-            .where(market_data_refs.c.data_type == "candles")
-            .where(market_data_refs.c.timeframe == timeframe)
-            .where(market_data_refs.c.data_origin == "raw")
-            .order_by(market_data_refs.c.end_ts.desc())
-            .limit(1)
+        return self.get_candle_ref(asset=asset, timeframe=timeframe, origin="raw", data_type="candles")
+
+    def get_candle_ref(
+        self,
+        *,
+        asset: str,
+        timeframe: str,
+        origin: str,
+        data_type: str = "candles",
+    ) -> dict[str, Any] | None:
+        statement = self.build_candle_ref_statement(
+            asset=asset,
+            timeframe=timeframe,
+            origin=origin,
+            data_type=data_type,
         )
         with self.engine.connect() as connection:
             row = connection.execute(statement).mappings().first()
             return dict(row) if row else None
+
+    def get_data_ref(
+        self,
+        *,
+        asset: str,
+        timeframe: str,
+        origin: str,
+        data_type: str,
+    ) -> dict[str, Any] | None:
+        return self.get_candle_ref(asset=asset, timeframe=timeframe, origin=origin, data_type=data_type)
+
+    def build_candle_ref_statement(
+        self,
+        *,
+        asset: str,
+        timeframe: str,
+        origin: str,
+        data_type: str,
+    ):
+        return (
+            select(market_data_refs)
+            .where(market_data_refs.c.asset == asset.upper())
+            .where(market_data_refs.c.data_type == data_type)
+            .where(market_data_refs.c.timeframe == timeframe)
+            .where(market_data_refs.c.data_origin == origin)
+            .order_by(market_data_refs.c.end_ts.desc())
+            .limit(1)
+        )
 
     def update_ref(self, registration: dict[str, Any]) -> None:
         statement = (

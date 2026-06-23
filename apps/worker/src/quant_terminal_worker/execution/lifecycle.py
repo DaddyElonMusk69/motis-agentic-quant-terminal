@@ -143,6 +143,11 @@ def _extend_signals(
     signal_pool_extender: Any | None,
     workspace_root: Path,
 ) -> dict[str, Any]:
+    if route.get("account_mode") == "live":
+        return {
+            "status": "skipped",
+            "reason": "live_execution_uses_observation_log",
+        }
     if route.get("blockers"):
         return {
             "status": "skipped",

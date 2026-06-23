@@ -73,6 +73,91 @@ def test_runtime_repository_serializes_datetime_values_inside_wake_json_payloads
     assert stored["exchange_snapshot"]["positions"][0]["opened_at"] == "2026-06-06T04:12:21Z"
 
 
+def test_runtime_repository_records_live_signal_observation_by_engine_asset():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    timestamp = datetime(2026, 6, 23, 5, 0, tzinfo=UTC)
+
+    stored = repository.record_live_signal_observation(
+        {
+            "signal_engine_id": "vegas_ema_5m_cluster",
+            "signal_engine_version": "0.1",
+            "asset": "btc",
+            "instrument": "BTC-USDT-SWAP",
+            "signal_id": "sig-live-1",
+            "signal_timestamp": timestamp,
+            "route_id": "btc-live",
+            "bundle_id": "bundle-1",
+            "payload_schema": "signal_packet.v2",
+            "payload": {"schema_version": "signal_packet.v2", "timestamp": "2026-06-23T05:00:00Z"},
+            "decision": {"action": "ENTER", "signal_id": "sig-live-1"},
+            "scan_metadata": {"status": "fresh_signal"},
+            "observed_at": timestamp,
+        }
+    )
+
+    repository.record_live_signal_observation(
+        {
+            **stored,
+            "decision": {"action": "SKIP", "signal_id": "sig-live-1"},
+        }
+    )
+
+    page = repository.list_live_signal_observations(signal_engine_id="vegas_ema_5m_cluster", asset="BTC")
+
+    assert page["total"] == 1
+    assert page["observations"][0]["asset"] == "BTC"
+    assert page["observations"][0]["route_id"] == "btc-live"
+    assert page["observations"][0]["decision"]["action"] == "SKIP"
+    assert len(repository.list_signals(signal_engine_id="vegas_ema_5m_cluster", asset="BTC")) == 0
+
+
+def test_runtime_repository_serializes_datetime_inside_route_lifecycle_error():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    bundle = {
+        "bundle_id": "arb-vegas-bundle",
+        "asset": "ARB",
+        "instrument": "ARB-USDT-SWAP",
+        "signal_engine_id": "vegas_ema",
+        "signal_engine_version": "0.1",
+        "strategy_id": "arb-vegas",
+        "strategy_version": "v0.1",
+        "source_stage1_session_id": "stage1-arb-vegas",
+        "source_stage4_result_path": "stage4-vegas.json",
+        "bundle_uri": "artifacts/execution_bundles/arb-vegas",
+        "strategy_module_ref": "artifacts/execution_bundles/arb-vegas/strategy.py",
+        "execution_setup": {},
+        "risk_limits": {"max_notional_usd": 1000},
+        "evidence_refs": {},
+        "content_hash": "vegas",
+        "status": "promoted",
+    }
+    route = repository.upsert_deployment_route_for_bundle(
+        bundle=repository.create_execution_bundle(bundle),
+        account_mode="live",
+        execution_adapter="okx",
+    )
+    checked_at = datetime(2026, 6, 23, 7, 30, 0, tzinfo=UTC)
+
+    updated = repository.update_deployment_route_gate(
+        route["route_id"],
+        last_lifecycle_error={
+            "status": "blocked",
+            "checked_at": checked_at,
+            "nested": {"last_raw_candle_at": checked_at},
+        },
+    )
+
+    assert updated["last_lifecycle_error"] == {
+        "status": "blocked",
+        "checked_at": "2026-06-23T07:30:00Z",
+        "nested": {"last_raw_candle_at": "2026-06-23T07:30:00Z"},
+    }
+
+
 def test_runtime_repository_bulk_upserts_signals_and_ignores_duplicates():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     metadata.create_all(engine)

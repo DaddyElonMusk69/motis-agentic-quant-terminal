@@ -13,6 +13,7 @@ import {
   stopRouteLifecycle,
   submitWakeOrders,
   updateRouteSettings,
+  type DataFreshnessReport,
   type DataWarmupReport,
   type DeploymentRoute,
   type ExchangeHealth,
@@ -200,6 +201,17 @@ function formatPercent(value: unknown): string {
   return `${number.toFixed(number % 1 === 0 ? 0 : 1)}%`;
 }
 
+function formatAgeSeconds(value: unknown): string {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds)) {
+    return "n/a";
+  }
+  if (seconds < 60) {
+    return `${Math.max(0, Math.round(seconds))}s`;
+  }
+  return `${formatNumber(Math.round(seconds / 60))}m`;
+}
+
 type TradeSide = "LONG" | "SHORT";
 
 function sidePolicy(setup: Record<string, unknown>, side: TradeSide): Record<string, unknown> | null {
@@ -344,10 +356,44 @@ function formatSnapshotValue(value: unknown): string {
   return String(value);
 }
 
+function effectiveDataFreshness(route: DeploymentRoute, warmup: DataWarmupReport | null): DataFreshnessReport | null {
+  return warmup?.data_freshness ?? route.data_freshness ?? null;
+}
+
+function dataFreshnessSummary(report: DataFreshnessReport | null): string {
+  if (!report) {
+    return "Data freshness n/a";
+  }
+  const raw = report.raw_5m;
+  const derived = report.derived_5m;
+  const limit = formatAgeSeconds(report.max_age_seconds);
+  const parts = [
+    `raw ${raw?.timestamp ? formatTimestamp(raw.timestamp) : raw?.status ?? "n/a"} (${formatAgeSeconds(raw?.age_seconds)})`,
+    derived ? `derived ${derived.timestamp ? formatTimestamp(derived.timestamp) : derived.status} (${formatAgeSeconds(derived.age_seconds)})` : null,
+    `limit ${limit}`
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
+
+function dataFreshnessLabel(report: DataFreshnessReport | null): string {
+  if (!report) {
+    return "Data unchecked";
+  }
+  if (report.status === "stale") {
+    return `Data stale${report.reason ? `: ${String(report.reason).replaceAll("_", " ")}` : ""}`;
+  }
+  if (report.status === "fresh") {
+    return "Data fresh";
+  }
+  return `Data ${report.status}`;
+}
+
 function executionSteps(route: DeploymentRoute, warmup: DataWarmupReport | null, latestWake: WakeRun | null): Array<{ label: string; state: "done" | "pending" | "blocked" }> {
   const hardBlocked = hasHardBlockers(route);
+  const freshness = effectiveDataFreshness(route, warmup);
+  const dataBlocked = warmup?.reason === "market_data_stale" || freshness?.status === "stale";
   return [
-    { label: "Warm Data", state: route.data_warmed || warmup?.status === "warmed" ? "done" : hardBlocked ? "blocked" : "pending" },
+    { label: "Warm Data", state: dataBlocked ? "blocked" : route.data_warmed || warmup?.status === "warmed" ? "done" : hardBlocked ? "blocked" : "pending" },
     { label: "Signals", state: latestWake ? "done" : "pending" },
     { label: "Exchange", state: latestWake?.exchange_snapshot ? "done" : "pending" },
     { label: "Strategy", state: latestWake?.strategy_decision ? "done" : "pending" },
@@ -831,6 +877,7 @@ function RouteCard({
   const margin = Number(sizing.margin_allocation_pct ?? 0);
   const perLegMarginPct = legs > 0 ? margin / legs : margin;
   const tpSlRows = routeTpSlRows(route);
+  const freshness = effectiveDataFreshness(route, warmup);
   const setupLine = [
     tpSlRows.map((r) => r.value).join(" / "),
     `${formatNumber(legs)} legs`,
@@ -873,6 +920,10 @@ function RouteCard({
       </div>
 
       <div className="route-card-v2__setup-line">{setupLine}</div>
+      <div className={`route-card-v2__data-freshness route-card-v2__data-freshness--${freshness?.status === "stale" ? "stale" : freshness?.status === "fresh" ? "fresh" : "unknown"}`}>
+        <span>{dataFreshnessLabel(freshness)}</span>
+        <small>{dataFreshnessSummary(freshness)}</small>
+      </div>
 
       {settingsOpen ? (
         <div className="route-card-v2__settings">

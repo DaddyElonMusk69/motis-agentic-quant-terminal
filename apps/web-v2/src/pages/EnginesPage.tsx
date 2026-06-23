@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ArrowLeft, FileJson, MoreVertical, Plus, RefreshCw, SlidersHorizontal, X } from "lucide-react";
+import { ArrowLeft, Eye, FileJson, MoreVertical, Plus, RefreshCw, SlidersHorizontal, X } from "lucide-react";
 import {
   createSignalSet,
   extendSignalPoolFromLocalCandles,
   fetchJob,
   fetchJobs,
+  fetchLiveSignalObservations,
   fetchMarketDataCatalog,
   fetchSignalEngines,
   fetchSignals,
@@ -13,6 +14,7 @@ import {
   isJobResponse,
   updateSignalEngine,
   type CatalogAsset,
+  type LiveSignalObservation,
   type SignalEngine,
   type SignalPoolExtendResult,
   type SignalRecord,
@@ -185,6 +187,8 @@ export function EnginesPage() {
   const [renameValue, setRenameValue] = useState("");
   const [addTickerOpen, setAddTickerOpen] = useState(false);
   const [selectedTickerAssets, setSelectedTickerAssets] = useState<string[]>([]);
+  const [observationsOpen, setObservationsOpen] = useState(false);
+  const [selectedObservationId, setSelectedObservationId] = useState<string | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const enginesQuery = useQuery({ queryKey: ["signal-engines"], queryFn: fetchSignalEngines });
   const catalogQuery = useQuery({ queryKey: ["market-data-catalog"], queryFn: fetchMarketDataCatalog });
@@ -205,6 +209,11 @@ export function EnginesPage() {
     enabled: Boolean(selectedSignalSet?.signal_set_key),
     queryKey: ["signals", selectedSignalSet?.signal_set_key],
     queryFn: () => fetchSignals(selectedSignalSet!.signal_set_key, 5, true)
+  });
+  const liveObservationsQuery = useQuery({
+    enabled: observationsOpen && Boolean(selectedSignalSet),
+    queryKey: ["live-signal-observations", selectedSignalSet?.signal_engine_id, selectedSignalSet?.asset],
+    queryFn: () => fetchLiveSignalObservations(selectedSignalSet!.signal_engine_id, selectedSignalSet!.asset, 100)
   });
   const activeScopeKey = engineId && selectedSignalSet?.asset ? `signal_set:${engineId}:${selectedSignalSet.asset.toUpperCase()}` : null;
   const latestScopeJobsQuery = useQuery({
@@ -319,6 +328,11 @@ export function EnginesPage() {
   function closeAddTickerModal() {
     setSelectedTickerAssets([]);
     setAddTickerOpen(false);
+  }
+
+  function openObservationsModal() {
+    setSelectedObservationId(null);
+    setObservationsOpen(true);
   }
 
   function toggleTickerAsset(asset: string) {
@@ -485,6 +499,10 @@ export function EnginesPage() {
                 <button className="button button--secondary" onClick={openAddTickerModal} type="button">
                   <Plus aria-hidden="true" />
                   Add Ticker
+                </button>
+                <button className="button button--secondary" disabled={!selectedSignalSet} onClick={openObservationsModal} type="button">
+                  <Eye aria-hidden="true" />
+                  Live Observations
                 </button>
                 <button
                   className="button button--secondary"
@@ -662,6 +680,102 @@ export function EnginesPage() {
           </section>
         </div>
       ) : null}
+      {observationsOpen && selectedSignalSet ? (
+        <LiveObservationsModal
+          error={liveObservationsQuery.error}
+          loading={liveObservationsQuery.isLoading}
+          observations={liveObservationsQuery.data?.observations ?? []}
+          onClose={() => setObservationsOpen(false)}
+          selectedObservationId={selectedObservationId}
+          selectedSignalSet={selectedSignalSet}
+          total={liveObservationsQuery.data?.total ?? 0}
+          onSelectObservation={setSelectedObservationId}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function LiveObservationsModal({
+  error,
+  loading,
+  observations,
+  onClose,
+  onSelectObservation,
+  selectedObservationId,
+  selectedSignalSet,
+  total
+}: {
+  error: Error | null;
+  loading: boolean;
+  observations: LiveSignalObservation[];
+  onClose: () => void;
+  onSelectObservation: (id: string) => void;
+  selectedObservationId: string | null;
+  selectedSignalSet: SignalSet;
+  total: number;
+}) {
+  const selectedObservation = observations.find((item) => item.observation_id === selectedObservationId) ?? observations[0];
+  return (
+    <div className="terminal-modal-backdrop">
+      <section className="terminal-modal live-observations-modal" role="dialog" aria-modal="true" aria-labelledby="live-observations-title">
+        <header className="terminal-modal__header">
+          <div>
+            <span className="eyebrow">{selectedSignalSet.signal_engine_id} · {selectedSignalSet.asset}</span>
+            <h2 id="live-observations-title">Live Observations</h2>
+          </div>
+          <button className="icon-button" onClick={onClose} type="button" aria-label="Close live observations dialog">
+            <X aria-hidden="true" />
+          </button>
+        </header>
+        <div className="terminal-modal__body live-observations-modal__body">
+          <TerminalPanel title="Observed Signals">
+            <div className="field-stack">
+              <FieldRow label="Total observations" value={formatNumber(total)} />
+              <FieldRow label="Ownership" value="Engine + asset" />
+              <FieldRow label="Training usage" value="Excluded from canonical pools" />
+            </div>
+            {loading ? <div className="state-line">Loading live observations...</div> : null}
+            {error ? <div className="state-line state-line--error">{error.message}</div> : null}
+            {!loading && observations.length === 0 ? <div className="state-line">No live signals observed for this engine asset pair.</div> : null}
+            {observations.length ? (
+              <DataTable
+                columns={[
+                  { key: "time", header: "Signal Time", render: (row) => formatTimestamp(row.signal_timestamp) },
+                  { key: "route", header: "Route", render: (row) => row.route_id ?? "n/a" },
+                  { key: "action", header: "Decision", render: (row) => String(row.decision.action ?? row.decision.trade_action ?? "n/a") },
+                  { key: "observed", header: "Observed", render: (row) => formatTimestamp(row.observed_at) }
+                ]}
+                getRowKey={(row) => row.observation_id}
+                onRowClick={(row) => onSelectObservation(row.observation_id)}
+                rows={observations}
+              />
+            ) : null}
+          </TerminalPanel>
+          <TerminalPanel title="Observation Detail">
+            {selectedObservation ? (
+              <div className="observation-detail">
+                <div className="field-grid">
+                  <FieldRow label="Signal ID" value={selectedObservation.signal_id} />
+                  <FieldRow label="Bundle" value={selectedObservation.bundle_id ?? "n/a"} />
+                  <FieldRow label="Packet hash" value={selectedObservation.packet_hash.slice(0, 16)} />
+                  <FieldRow label="Schema" value={selectedObservation.payload_schema} />
+                </div>
+                <div className="json-preview">
+                  <span>Decision</span>
+                  <pre>{JSON.stringify(selectedObservation.decision, null, 2)}</pre>
+                </div>
+                <div className="json-preview">
+                  <span>Packet</span>
+                  <pre>{JSON.stringify(selectedObservation.payload, null, 2)}</pre>
+                </div>
+              </div>
+            ) : (
+              <div className="state-line">Select an observation to inspect payload and decision data.</div>
+            )}
+          </TerminalPanel>
+        </div>
+      </section>
     </div>
   );
 }
