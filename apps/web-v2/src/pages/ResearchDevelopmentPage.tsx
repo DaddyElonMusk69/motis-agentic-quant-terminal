@@ -96,6 +96,8 @@ type PortfolioBacktestModalState = {
   result: PortfolioBacktestResult | null;
 };
 
+const HEAVY_RESEARCH_QUERY_GC_MS = 30_000;
+
 type ExitSide = "LONG" | "SHORT";
 
 type DisplaySidePolicy = Stage2PolicyValues & {
@@ -674,6 +676,23 @@ function portfolioBacktestFromJob(job: RuntimeJob | null): PortfolioBacktestResu
   return result && typeof result === "object" ? result as PortfolioBacktestResult : null;
 }
 
+function clearRuntimeJobCache(jobId?: string | null) {
+  if (!jobId) {
+    return;
+  }
+  void queryClient.removeQueries({ queryKey: ["runtime-job", jobId] });
+}
+
+function clearHeavyDevelopmentCaches(sessionId?: string | null) {
+  if (sessionId) {
+    void queryClient.removeQueries({ queryKey: ["stage1-iteration-detail", sessionId] });
+    void queryClient.removeQueries({ queryKey: ["stage4-candidate-detail", sessionId] });
+    return;
+  }
+  void queryClient.removeQueries({ queryKey: ["stage1-iteration-detail"] });
+  void queryClient.removeQueries({ queryKey: ["stage4-candidate-detail"] });
+}
+
 function scoreExists(gate: Stage1GateSummary | null, role: Stage1SampleRole): boolean {
   return Boolean(gate?.roles[role]?.score);
 }
@@ -740,12 +759,14 @@ export function ResearchDevelopmentPage() {
   const iterationDetailQuery = useQuery({
     enabled: Boolean(session?.session_id && selectedIteration?.iteration_id),
     queryKey: ["stage1-iteration-detail", session?.session_id, selectedIteration?.iteration_id],
-    queryFn: () => fetchStage1IterationDetail({ session_id: session!.session_id, iteration_id: selectedIteration!.iteration_id })
+    queryFn: () => fetchStage1IterationDetail({ session_id: session!.session_id, iteration_id: selectedIteration!.iteration_id }),
+    gcTime: HEAVY_RESEARCH_QUERY_GC_MS
   });
   const stage4CandidateDetailQuery = useQuery({
     enabled: Boolean(session?.session_id && selectedStage4Candidate?.candidate_id),
     queryKey: ["stage4-candidate-detail", session?.session_id, selectedStage4Candidate?.candidate_id],
-    queryFn: () => fetchStage4CandidateDetail({ session_id: session!.session_id, candidate_id: selectedStage4Candidate!.candidate_id })
+    queryFn: () => fetchStage4CandidateDetail({ session_id: session!.session_id, candidate_id: selectedStage4Candidate!.candidate_id }),
+    gcTime: HEAVY_RESEARCH_QUERY_GC_MS
   });
   const gate = gateQuery.data?.gate ?? row?.stage1_gate ?? null;
   const completedStage4Assets = useMemo(
@@ -756,6 +777,7 @@ export function ResearchDevelopmentPage() {
     enabled: Boolean(activeJob?.jobId),
     queryKey: ["runtime-job", activeJob?.jobId],
     queryFn: () => fetchJob(activeJob!.jobId),
+    gcTime: 0,
     refetchInterval: (query) => {
       const job = query.state.data?.job;
       return !job || ["queued", "running"].includes(job.status) ? 1500 : false;
@@ -921,6 +943,7 @@ export function ResearchDevelopmentPage() {
         if ("portfolio_backtest" in result) {
           setPortfolioBacktestModal((current) => (current ? { ...current, result: result.portfolio_backtest } : current));
         }
+        portfolioBacktestMutation.reset();
       }
     }
   });
@@ -928,6 +951,7 @@ export function ResearchDevelopmentPage() {
     mutationFn: fetchPortfolioBacktestRun,
     onSuccess: (result) => {
       setPortfolioBacktestModal((current) => (current ? { ...current, result: result.portfolio_backtest } : current));
+      loadPortfolioRunMutation.reset();
     }
   });
   const deletePortfolioRunMutation = useMutation({
@@ -979,7 +1003,20 @@ export function ResearchDevelopmentPage() {
   useEffect(() => {
     setSelectedIteration(null);
     setSelectedStage4Candidate(null);
+    clearHeavyDevelopmentCaches();
   }, [session?.session_id]);
+
+  useEffect(() => {
+    setPortfolioBacktestModal(null);
+    portfolioBacktestMutation.reset();
+    loadPortfolioRunMutation.reset();
+  }, [pool?.universe_run_id]);
+
+  useEffect(() => {
+    return () => {
+      clearHeavyDevelopmentCaches();
+    };
+  }, []);
 
   useEffect(() => {
     if (!trackedJob || !activeJob || ["queued", "running"].includes(trackedJob.status)) {
@@ -991,10 +1028,23 @@ export function ResearchDevelopmentPage() {
         setPortfolioBacktestModal((current) => (current ? { ...current, result: portfolioResult } : current));
         void queryClient.invalidateQueries({ queryKey: ["portfolio-backtest-runs", portfolioResult.universe_run_id] });
       }
+      setActiveJob(null);
+      clearRuntimeJobCache(activeJob.jobId);
+      return;
     }
     invalidateDevelopment(activeJob.sessionId, pool?.universe_run_id);
+    if (trackedJob.status === "completed" && activeJob.action === "stage4") {
+      setActiveJob(null);
+      clearRuntimeJobCache(activeJob.jobId);
+      return;
+    }
     const timeout = window.setTimeout(() => setActiveJob(null), trackedJob.status === "completed" ? 2500 : 5000);
-    return () => window.clearTimeout(timeout);
+    return () => {
+      window.clearTimeout(timeout);
+      if (trackedJob.status === "completed") {
+        clearRuntimeJobCache(activeJob.jobId);
+      }
+    };
   }, [activeJob?.action, activeJob?.jobId, activeJob?.sessionId, pool?.universe_run_id, trackedJob, trackedJob?.status]);
 
   useEffect(() => {
@@ -1081,6 +1131,35 @@ export function ResearchDevelopmentPage() {
     const baseAllocation = completedStage4Assets.length ? Math.min(30, Math.floor(100 / completedStage4Assets.length)) : 0;
     const allocations = Object.fromEntries(completedStage4Assets.map((candidate) => [candidate.asset, baseAllocation]));
     setPortfolioBacktestModal({ initialCapital: 10000, allocations, result: null });
+  };
+
+  const closeIterationDetail = () => {
+    const sessionId = session?.session_id;
+    const iterationId = selectedIteration?.iteration_id;
+    setSelectedIteration(null);
+    if (sessionId && iterationId) {
+      void queryClient.removeQueries({ queryKey: ["stage1-iteration-detail", sessionId, iterationId] });
+    }
+  };
+
+  const closeStage4CandidateDetail = () => {
+    const sessionId = session?.session_id;
+    const candidateId = selectedStage4Candidate?.candidate_id;
+    setSelectedStage4Candidate(null);
+    if (sessionId && candidateId) {
+      void queryClient.removeQueries({ queryKey: ["stage4-candidate-detail", sessionId, candidateId] });
+    }
+  };
+
+  const closePortfolioBacktest = () => {
+    setPortfolioBacktestModal(null);
+    if (!portfolioBacktestMutation.isPending) {
+      portfolioBacktestMutation.reset();
+    }
+    loadPortfolioRunMutation.reset();
+    if (activeJob?.action === "portfolio" && !trackedJobRunning) {
+      clearRuntimeJobCache(activeJob.jobId);
+    }
   };
 
   const runPortfolioBacktestNow = () => {
@@ -1522,7 +1601,7 @@ export function ResearchDevelopmentPage() {
                 <span className="eyebrow">Iteration Detail</span>
                 <h2 id="iteration-detail-title">{selectedIteration.iteration_id}</h2>
               </div>
-              <button className="icon-button" onClick={() => setSelectedIteration(null)} type="button" aria-label="Close iteration details">
+              <button className="icon-button" onClick={closeIterationDetail} type="button" aria-label="Close iteration details">
                 <X aria-hidden="true" />
               </button>
             </header>
@@ -1533,7 +1612,7 @@ export function ResearchDevelopmentPage() {
             </div>
             <footer className="terminal-modal__footer">
               <span>Review the full signal ledger before auditing or spawning the next bundle.</span>
-              <button className="button button--secondary" onClick={() => setSelectedIteration(null)} type="button">Close</button>
+              <button className="button button--secondary" onClick={closeIterationDetail} type="button">Close</button>
             </footer>
           </section>
         </div>
@@ -1547,7 +1626,7 @@ export function ResearchDevelopmentPage() {
                 <span className="eyebrow">Stage 4 Candidate</span>
                 <h2 id="stage4-candidate-title">{selectedStage4Candidate.candidate_id}</h2>
               </div>
-              <button className="icon-button" onClick={() => setSelectedStage4Candidate(null)} type="button" aria-label="Close candidate detail">
+              <button className="icon-button" onClick={closeStage4CandidateDetail} type="button" aria-label="Close candidate detail">
                 <X aria-hidden="true" />
               </button>
             </header>
@@ -1558,7 +1637,7 @@ export function ResearchDevelopmentPage() {
             </div>
             <footer className="terminal-modal__footer">
               <span>Review realized equity and filled-trade outcomes before promoting or rerunning.</span>
-              <button className="button button--secondary" onClick={() => setSelectedStage4Candidate(null)} type="button">Close</button>
+              <button className="button button--secondary" onClick={closeStage4CandidateDetail} type="button">Close</button>
             </footer>
           </section>
         </div>
@@ -1573,7 +1652,7 @@ export function ResearchDevelopmentPage() {
           running={portfolioBacktestMutation.isPending || isJobRunning("portfolio")}
           loadingRunId={loadPortfolioRunMutation.variables?.run_id}
           deletingRunId={deletePortfolioRunMutation.variables?.run_id}
-          onClose={() => setPortfolioBacktestModal(null)}
+          onClose={closePortfolioBacktest}
           onDeleteRun={(runId) => pool && deletePortfolioRunMutation.mutate({ universe_run_id: pool.universe_run_id, run_id: runId })}
           onLoadRun={(runId) => pool && loadPortfolioRunMutation.mutate({ universe_run_id: pool.universe_run_id, run_id: runId })}
           onRun={runPortfolioBacktestNow}
