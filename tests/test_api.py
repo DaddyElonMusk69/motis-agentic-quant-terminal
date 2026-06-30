@@ -3649,6 +3649,42 @@ def test_stage4_endpoint_writes_realized_expectancy_from_full_decision_set(tmp_p
     assert len(gate_stage4["stage4_runs"]) == 1
 
 
+def test_stage4_run_delete_endpoint_restores_previous_latest(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repository = StubRuntimeRepository()
+    session, signals, candles = _stage4b_api_fixture(tmp_path, repository)
+    promotion_root = Path(session["artifact_root"]) / "promotion"
+    first_index = json.loads((promotion_root / "stage4_runs" / "index.json").read_text())
+    first_run_id = first_index["latest_run_id"]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    second = run_stage4_realized_expectancy(
+        workspace_root=tmp_path,
+        session=session,
+        signal_rows=signals,
+        candles=candles,
+        initial_capital_usdt=2000,
+        margin_allocation_pct=20,
+        leverage=3,
+        fees_bps_per_side=0,
+        slippage_bps_per_side=0,
+    )
+    second_run_id = second["run_id"]
+    assert second_run_id != first_run_id
+
+    delete_response = client.delete(f"/api/v1/research/stage1-sessions/{session['session_id']}/stage4/runs/{second_run_id}")
+
+    assert delete_response.status_code == 200
+    delete_result = delete_response.json()["stage4_run_delete"]
+    assert delete_result["deleted_run_id"] == second_run_id
+    assert delete_result["latest_run_id"] == first_run_id
+    assert delete_result["remaining_run_count"] == 1
+    assert delete_response.json()["gate"]["stage4_realized_expectancy"]["latest_run_id"] == first_run_id
+    latest = json.loads((promotion_root / "stage4_realized_expectancy.json").read_text())
+    assert latest["run_id"] == first_run_id
+    assert not (promotion_root / "stage4_runs" / second_run_id).exists()
+
+
 def test_stage4b_timing_prompt_endpoint_writes_prompt_and_updates_gate(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     repository = StubRuntimeRepository()
@@ -4563,6 +4599,53 @@ def test_promote_execution_bundle_selects_stage4b_when_walk_forward_is_better(tm
     assert skipped["trade_action"] == "SKIP"
     assert skipped["direction"] == "FLAT"
     assert skipped["reason_code"] == "timing_filter_utc_window"
+
+
+def test_promote_execution_bundle_prefers_highest_oos_protected_candidate(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'execution-protected-oos.db'}")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    _register_vegas_engine(repository)
+    session = _queue_session(tmp_path, "candidate-aave", "AAVE", "stage1a_frozen")
+    promotion_root = tmp_path / session["artifact_root"] / "promotion"
+    _write_promotable_stage4_branches(
+        promotion_root,
+        stage4a_wf=30,
+        stage4a_total=500,
+        stage4b_wf=35,
+        stage4b_total=650,
+    )
+    realized_path = promotion_root / "stage4_realized_expectancy.json"
+    realized = json.loads(realized_path.read_text())
+    protected = {
+        "candidate_id": "stage4a-protected",
+        "setup": {
+            "tp_pct": 2.0,
+            "sl_pct": 1.0,
+            "initial_sl_pct": 1.0,
+            "protection_enabled": True,
+            "protect_trigger_pct": 1.0,
+            "trail_sl_pct": 0.25,
+            "max_hold_hours": 36,
+        },
+        "account": {"net_pnl_usdt": 400, "ending_equity_usdt": 1400},
+        "slices": {"walk_forward_test": {"net_pnl_pct": 22, "profit_factor": 1.6}},
+    }
+    realized["candidates"].append(protected)
+    realized_path.write_text(json.dumps(realized))
+    repository.create_stage0_universe(_queue_universe_run(), [_queue_candidate("candidate-aave", "AAVE", "accepted", 91.2)])
+    repository.create_stage1_research_session(session)
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post(f"/api/v1/research/stage1-sessions/{session['session_id']}/promote-execution-bundle")
+
+    assert response.status_code == 200
+    bundle = response.json()["bundle"]
+    assert bundle["execution_setup"]["source"] == "stage4_realized_expectancy"
+    assert bundle["execution_setup"]["stage4_candidate_id"] == "stage4a-protected"
+    assert bundle["execution_setup"]["setup"]["protection_enabled"] is True
+    assert bundle["execution_setup"]["promotion_selection"]["criterion"] == "protected_walk_forward_net_pnl_pct"
 
 
 def test_stage1_gate_reports_resolved_promotion_candidate(tmp_path, monkeypatch):

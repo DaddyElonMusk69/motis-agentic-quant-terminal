@@ -635,20 +635,61 @@ def _stage4_realized_expectancy_state(artifact_root: Path) -> dict[str, Any]:
         best = optimal.get("best")
     if best is None and realized:
         best = realized.get("best_candidate")
+    if realized:
+        best = _stage4_display_best_candidate(realized, best or {})
     return {
         "exists": realized is not None and ledger_path.exists() and optimal is not None and summary_path.exists(),
         "realized_expectancy_path": str(realized_path) if realized_path.exists() else None,
         "trade_ledger_path": str(ledger_path) if ledger_path.exists() else None,
         "optimal_path": str(optimal_path) if optimal_path.exists() else None,
         "summary_path": str(summary_path) if summary_path.exists() else None,
-        "best_candidate_id": realized.get("best_candidate_id") if realized else None,
+        "best_candidate_id": best.get("candidate_id") if best else realized.get("best_candidate_id") if realized else None,
         "best_candidate": _compact_stage4_candidate(best or {}),
         "candidates": [_compact_stage4_candidate(item) for item in realized.get("candidates", [])] if realized else [],
         "latest_run_id": realized.get("run_id") if realized else run_index.get("latest_run_id"),
         "latest_simulation_inputs": realized.get("simulation_inputs", {}) if realized else {},
         "latest_account": (best or {}).get("account", {}) if best else {},
-        "stage4_runs": run_index.get("runs", []),
+        "stage4_runs": _stage4_run_history_rows(run_index),
     }
+
+
+def _stage4_run_history_rows(run_index: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = []
+    for run in run_index.get("runs", []):
+        if not isinstance(run, dict):
+            continue
+        realized_path = Path(str(run.get("realized_expectancy_path") or ""))
+        realized = _read_json_if_exists(realized_path) if realized_path.is_file() else None
+        if not realized:
+            rows.append(run)
+            continue
+        stored_best = run.get("best_candidate") or realized.get("best_candidate") or {}
+        best = _stage4_display_best_candidate(realized, stored_best)
+        rows.append(
+            {
+                **run,
+                "best_candidate_id": best.get("candidate_id") or run.get("best_candidate_id"),
+                "best_candidate": _compact_stage4_candidate(best),
+                "account": best.get("account") or run.get("account"),
+            }
+        )
+    return rows
+
+
+def _stage4_display_best_candidate(realized: dict[str, Any], stored_best: dict[str, Any]) -> dict[str, Any]:
+    candidates = _stage4_candidate_rows(realized, stored_best)
+    protected_eligible = [candidate for candidate in candidates if _candidate_has_protected_sl(candidate) and _wf_net_pnl_pct(candidate) > 0]
+    if protected_eligible:
+        selected = max(
+            protected_eligible,
+            key=lambda candidate: (
+                _wf_net_pnl_pct(candidate),
+                _wf_profit_factor(candidate),
+                _overall_net_pnl_usdt(candidate),
+            ),
+        )
+        return {**selected, "selection_mode": "protected_walk_forward_net_pnl_pct"}
+    return stored_best
 
 
 def _stage4b_timing_state(artifact_root: Path) -> dict[str, Any]:
@@ -661,6 +702,7 @@ def _stage4b_timing_state(artifact_root: Path) -> dict[str, Any]:
     summary_path = timing_root / "timing_summary.md"
     run_index_path = timing_root / "stage4b_runs" / "index.json"
     replay = _read_json_if_exists(replay_path)
+    overlay = _read_json_if_exists(overlay_path)
     run_index = _read_json_if_exists(run_index_path) or {}
     best = replay.get("best_candidate") if replay else {}
     return {
@@ -671,6 +713,7 @@ def _stage4b_timing_state(artifact_root: Path) -> dict[str, Any]:
         "prompt_path": str(prompt_path) if prompt_path.exists() else None,
         "context_path": str(context_path) if context_path.exists() else None,
         "overlay_path": str(overlay_path) if overlay_path.exists() else None,
+        "overlay_profile": _stage4b_overlay_profile(overlay),
         "timing_replay_path": str(replay_path) if replay_path.exists() else None,
         "timing_trade_ledger_path": str(ledger_path) if ledger_path.exists() else None,
         "summary_path": str(summary_path) if summary_path.exists() else None,
@@ -683,6 +726,16 @@ def _stage4b_timing_state(artifact_root: Path) -> dict[str, Any]:
     }
 
 
+def _stage4b_overlay_profile(overlay: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not overlay:
+        return None
+    return {
+        "exclude_utc_hours": overlay.get("exclude_utc_hours") or [],
+        "exclude_utc_weekdays": overlay.get("exclude_utc_weekdays") or [],
+        "applies_to": overlay.get("applies_to") or "all",
+    }
+
+
 def _promotion_candidate_state(artifact_root: Path) -> dict[str, Any]:
     promotion_root = artifact_root / "promotion"
     stage4_path = promotion_root / "stage4_realized_expectancy.json"
@@ -692,44 +745,46 @@ def _promotion_candidate_state(artifact_root: Path) -> dict[str, Any]:
     stage4 = _read_json_if_exists(stage4_path) or {}
     optimal = _read_json_if_exists(optimal_path) or {}
     stage4_best = optimal.get("best") or stage4.get("best_candidate") or {}
-    candidates = [
-        {
-            "exists": True,
-            "source": "stage4_realized_expectancy",
-            "label": "Stage 4A",
-            "candidate_id": stage4_best.get("candidate_id") or stage4.get("best_candidate_id"),
-            "best_candidate": _compact_stage4_candidate(stage4_best),
-            "walk_forward_net_pnl_pct": _wf_net_pnl_pct(stage4_best),
-            "walk_forward_profit_factor": _wf_profit_factor(stage4_best),
-            "overall_net_pnl_usdt": _overall_net_pnl_usdt(stage4_best),
-            "timing_skips": 0,
-            "warning": None,
-        }
-    ]
+    candidates = [_promotion_candidate_item("stage4_realized_expectancy", "Stage 4A", row, timing_skips=0) for row in _stage4_candidate_rows(stage4, stage4_best)]
     timing_root = promotion_root / "stage4b_timing"
     replay = _read_json_if_exists(timing_root / "timing_replay.json")
     overlay = _read_json_if_exists(timing_root / "timing_overlay.json")
     if replay and overlay and str(overlay.get("source_stage4_run_id") or "") == str(stage4.get("run_id") or ""):
-        best = replay.get("best_candidate") or {}
-        candidates.append(
-            {
-                "exists": True,
-                "source": "stage4b_timing",
-                "label": "Stage 4B Timing",
-                "candidate_id": best.get("candidate_id") or replay.get("best_candidate_id"),
-                "best_candidate": _compact_stage4_candidate(best),
-                "walk_forward_net_pnl_pct": _wf_net_pnl_pct(best),
-                "walk_forward_profit_factor": _wf_profit_factor(best),
-                "overall_net_pnl_usdt": _overall_net_pnl_usdt(best),
-                "timing_skips": best.get("skipped_timing_filter", 0),
-                "warning": None,
-            }
-        )
+        candidates.extend(_promotion_candidate_item("stage4b_timing", "Stage 4B Timing", row, timing_skips=row.get("skipped_timing_filter", 0)) for row in _stage4_candidate_rows(replay, replay.get("best_candidate") or {}))
+    protected_eligible = [candidate for candidate in candidates if _candidate_has_protected_sl(candidate.get("raw_candidate") or {}) and candidate["walk_forward_net_pnl_pct"] > 0]
+    if protected_eligible:
+        selected = max(protected_eligible, key=_promotion_candidate_rank)
+        return _public_promotion_candidate({**selected, "criterion": "protected_walk_forward_net_pnl_pct"})
     eligible = [candidate for candidate in candidates if candidate["walk_forward_net_pnl_pct"] > 0]
     if eligible:
-        return max(eligible, key=_promotion_candidate_rank)
+        return _public_promotion_candidate(max(eligible, key=_promotion_candidate_rank))
     selected = max(candidates, key=lambda item: (item["overall_net_pnl_usdt"], item["source"] == "stage4_realized_expectancy"))
-    return {**selected, "warning": "weak_walk_forward_fallback"}
+    return _public_promotion_candidate({**selected, "warning": "weak_walk_forward_fallback"})
+
+
+def _stage4_candidate_rows(payload: dict[str, Any], fallback_best: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = [row for row in payload.get("candidates", []) if isinstance(row, dict) and row.get("candidate_id")]
+    return rows or ([fallback_best] if fallback_best.get("candidate_id") else [])
+
+
+def _promotion_candidate_item(source: str, label: str, candidate: dict[str, Any], *, timing_skips: int | None) -> dict[str, Any]:
+    return {
+        "exists": True,
+        "source": source,
+        "label": label,
+        "candidate_id": candidate.get("candidate_id"),
+        "best_candidate": _compact_stage4_candidate(candidate),
+        "walk_forward_net_pnl_pct": _wf_net_pnl_pct(candidate),
+        "walk_forward_profit_factor": _wf_profit_factor(candidate),
+        "overall_net_pnl_usdt": _overall_net_pnl_usdt(candidate),
+        "timing_skips": timing_skips or 0,
+        "warning": None,
+        "raw_candidate": candidate,
+    }
+
+
+def _public_promotion_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in candidate.items() if key != "raw_candidate"}
 
 
 def _promotion_candidate_rank(candidate: dict[str, Any]) -> tuple[float, float, float, bool]:
@@ -739,6 +794,14 @@ def _promotion_candidate_rank(candidate: dict[str, Any]) -> tuple[float, float, 
         candidate["overall_net_pnl_usdt"],
         candidate["source"] == "stage4_realized_expectancy",
     )
+
+
+def _candidate_has_protected_sl(candidate: dict[str, Any]) -> bool:
+    setup = candidate.get("setup") if isinstance(candidate.get("setup"), dict) else candidate
+    if bool(setup.get("protection_enabled")):
+        return True
+    side_policies = setup.get("side_policies") if isinstance(setup.get("side_policies"), dict) else {}
+    return any(isinstance(policy, dict) and bool(policy.get("protection_enabled")) for policy in side_policies.values())
 
 
 def _wf_net_pnl_pct(best: dict[str, Any]) -> float:

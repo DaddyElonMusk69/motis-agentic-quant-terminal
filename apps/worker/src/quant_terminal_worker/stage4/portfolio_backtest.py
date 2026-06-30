@@ -97,6 +97,7 @@ def run_portfolio_backtest(
         "eligible_assets": eligible_summary,
         "summary": result["summary"],
         "account": result["account"],
+        "asset_breakdown": result["asset_breakdown"],
         "equity_curve": result["equity_curve"],
         "trade_ledger": result["trade_ledger"],
         "skipped_signals": result["skipped_signals"],
@@ -209,17 +210,19 @@ def _load_asset_contexts(
 
 
 def _resolve_portfolio_promotion_candidate(*, promotion_root: Path, scores: dict[str, Any]) -> dict[str, Any] | None:
-    stage4a = _stage4a_portfolio_candidate(promotion_root=promotion_root, scores=scores)
-    if stage4a is None:
+    stage4a_candidates = _stage4a_portfolio_candidates(promotion_root=promotion_root, scores=scores)
+    if not stage4a_candidates:
         return None
-    stage4b = _stage4b_portfolio_candidate(
+    stage4b_candidates = _stage4b_portfolio_candidates(
         promotion_root=promotion_root,
         scores=scores,
-        latest_stage4a_run_id=str(stage4a["result"].get("run_id") or ""),
+        latest_stage4a_run_id=str(stage4a_candidates[0]["result"].get("run_id") or ""),
     )
-    candidates = [stage4a]
-    if stage4b is not None:
-        candidates.append(stage4b)
+    candidates = [*stage4a_candidates, *stage4b_candidates]
+    protected_eligible = [candidate for candidate in candidates if _candidate_has_protected_sl(candidate["best"]) and _walk_forward_net_pnl_pct(candidate["best"]) > 0]
+    if protected_eligible:
+        selected = max(protected_eligible, key=_promotion_rank_key)
+        return {**selected, "criterion": "protected_walk_forward_net_pnl_pct"}
     eligible = [candidate for candidate in candidates if _walk_forward_net_pnl_pct(candidate["best"]) > 0]
     if eligible:
         return max(eligible, key=_promotion_rank_key)
@@ -227,67 +230,79 @@ def _resolve_portfolio_promotion_candidate(*, promotion_root: Path, scores: dict
     return {**best, "criterion": "overall_net_pnl_fallback", "warning": "weak_walk_forward_fallback"}
 
 
-def _stage4a_portfolio_candidate(*, promotion_root: Path, scores: dict[str, Any]) -> dict[str, Any] | None:
+def _stage4a_portfolio_candidates(*, promotion_root: Path, scores: dict[str, Any]) -> list[dict[str, Any]]:
     realized_path = promotion_root / "stage4_realized_expectancy.json"
     candidates_path = promotion_root / "stage4_candidates.json"
     if not realized_path.is_file():
-        return None
+        return []
     realized = json.loads(realized_path.read_text())
-    best = realized.get("best_candidate") or {}
-    candidate_id = str(realized.get("best_candidate_id") or best.get("candidate_id") or "")
-    if not candidate_id:
-        return None
-    candidate = _candidate_setup_for_id(candidates_path=candidates_path, candidate_id=candidate_id)
-    if candidate is None:
-        return None
-    return {
-        "source": PROMOTION_SOURCE_STAGE4A,
-        "label": "Stage 4A",
-        "criterion": "walk_forward_net_pnl_pct",
-        "result": realized,
-        "best": best,
-        "candidate_id": candidate_id,
-        "candidate": candidate,
-        "scores": scores,
-        "overlay": None,
-    }
+    rows = [row for row in realized.get("candidates", []) if isinstance(row, dict)]
+    if not rows and isinstance(realized.get("best_candidate"), dict):
+        rows = [realized["best_candidate"]]
+    return [
+        {
+            "source": PROMOTION_SOURCE_STAGE4A,
+            "label": "Stage 4A",
+            "criterion": "walk_forward_net_pnl_pct",
+            "result": realized,
+            "best": row,
+            "candidate_id": str(row["candidate_id"]),
+            "candidate": candidate,
+            "scores": scores,
+            "overlay": None,
+        }
+        for row in rows
+        if row.get("candidate_id")
+        for candidate in [_candidate_setup_for_id(candidates_path=candidates_path, candidate_id=str(row["candidate_id"]))]
+        if candidate is not None
+    ]
 
 
-def _stage4b_portfolio_candidate(*, promotion_root: Path, scores: dict[str, Any], latest_stage4a_run_id: str) -> dict[str, Any] | None:
+def _stage4b_portfolio_candidates(*, promotion_root: Path, scores: dict[str, Any], latest_stage4a_run_id: str) -> list[dict[str, Any]]:
     timing_root = promotion_root / "stage4b_timing"
     replay_path = timing_root / "timing_replay.json"
     overlay_path = timing_root / "timing_overlay.json"
     candidates_path = promotion_root / "stage4_candidates.json"
     if not replay_path.is_file() or not overlay_path.is_file():
-        return None
+        return []
     replay = json.loads(replay_path.read_text())
     overlay = json.loads(overlay_path.read_text())
     if str(overlay.get("source_stage4_run_id") or "") != latest_stage4a_run_id:
-        return None
-    best = replay.get("best_candidate") or {}
-    candidate_id = str(replay.get("best_candidate_id") or best.get("candidate_id") or "")
-    if not candidate_id:
-        return None
-    candidate = _candidate_setup_for_id(candidates_path=candidates_path, candidate_id=candidate_id)
-    if candidate is None:
-        return None
-    return {
-        "source": PROMOTION_SOURCE_STAGE4B,
-        "label": "Stage 4B Timing",
-        "criterion": "walk_forward_net_pnl_pct",
-        "result": replay,
-        "best": best,
-        "candidate_id": candidate_id,
-        "candidate": candidate,
-        "scores": scores,
-        "overlay": overlay,
-    }
+        return []
+    rows = [row for row in replay.get("candidates", []) if isinstance(row, dict)]
+    if not rows and isinstance(replay.get("best_candidate"), dict):
+        rows = [replay["best_candidate"]]
+    return [
+        {
+            "source": PROMOTION_SOURCE_STAGE4B,
+            "label": "Stage 4B Timing",
+            "criterion": "walk_forward_net_pnl_pct",
+            "result": replay,
+            "best": row,
+            "candidate_id": str(row["candidate_id"]),
+            "candidate": candidate,
+            "scores": scores,
+            "overlay": overlay,
+        }
+        for row in rows
+        if row.get("candidate_id")
+        for candidate in [_candidate_setup_for_id(candidates_path=candidates_path, candidate_id=str(row["candidate_id"]))]
+        if candidate is not None
+    ]
 
 
 def _candidate_setup_for_id(*, candidates_path: Path, candidate_id: str) -> dict[str, Any] | None:
     candidates_payload = json.loads(candidates_path.read_text()) if candidates_path.is_file() else {"candidates": []}
     normalized = _normalize_candidates(candidates_payload)
     return next((candidate for candidate in normalized if candidate["candidate_id"] == candidate_id), None)
+
+
+def _candidate_has_protected_sl(candidate: dict[str, Any]) -> bool:
+    setup = candidate.get("setup") if isinstance(candidate.get("setup"), dict) else candidate
+    if bool(setup.get("protection_enabled")):
+        return True
+    side_policies = setup.get("side_policies") if isinstance(setup.get("side_policies"), dict) else {}
+    return any(isinstance(policy, dict) and bool(policy.get("protection_enabled")) for policy in side_policies.values())
 
 
 def _promotion_rank_key(candidate: dict[str, Any]) -> tuple[float, float, float, bool]:
@@ -597,13 +612,71 @@ def _simulate(
         "continuous_5m_steps": continuous_5m_steps,
         "data_gap_candles": data_gap_candles,
     }
+    asset_breakdown = _asset_breakdown(
+        asset_contexts=asset_contexts,
+        trades=trade_ledger,
+        skipped_signals=skipped_signals,
+        portfolio_net_pnl_usdt=float(account.get("net_pnl_usdt") or 0.0),
+        initial_capital_usdt=initial_capital_usdt,
+    )
     return {
         "account": account,
         "summary": summary,
+        "asset_breakdown": asset_breakdown,
         "equity_curve": equity_curve,
         "trade_ledger": trade_ledger,
         "skipped_signals": skipped_signals,
     }
+
+
+def _asset_breakdown(
+    *,
+    asset_contexts: list[dict[str, Any]],
+    trades: list[dict[str, Any]],
+    skipped_signals: list[dict[str, Any]],
+    portfolio_net_pnl_usdt: float,
+    initial_capital_usdt: float,
+) -> list[dict[str, Any]]:
+    rows = []
+    for ctx in asset_contexts:
+        asset = ctx["asset"]
+        asset_trades = [trade for trade in trades if trade.get("asset") == asset]
+        asset_skips = [skip for skip in skipped_signals if skip.get("asset") == asset]
+        winning = [trade for trade in asset_trades if float(trade.get("net_pnl_usdt") or 0) > 0]
+        losing = [trade for trade in asset_trades if float(trade.get("net_pnl_usdt") or 0) < 0]
+        gross_pnl = sum(float(trade.get("gross_pnl_usdt") or 0) for trade in asset_trades)
+        net_pnl = sum(float(trade.get("net_pnl_usdt") or 0) for trade in asset_trades)
+        fees = sum(float(trade.get("total_fees_usdt") or 0) for trade in asset_trades)
+        slippage = sum(float(trade.get("total_slippage_usdt") or 0) for trade in asset_trades)
+        contribution_pct = net_pnl / portfolio_net_pnl_usdt * 100 if portfolio_net_pnl_usdt else 0.0
+        return_on_initial_capital_pct = net_pnl / initial_capital_usdt * 100 if initial_capital_usdt else 0.0
+        rows.append(
+            {
+                "asset": asset,
+                "session_id": ctx["session_id"],
+                "stage4_candidate_id": ctx["stage4_candidate_id"],
+                "promotion_source": ctx.get("promotion_source"),
+                "promotion_source_label": ctx.get("promotion_source_label"),
+                "margin_allocation_pct": ctx["margin_allocation_pct"],
+                "signal_count": len(ctx["signal_inputs"]),
+                "executed_positions": len(asset_trades),
+                "winning_positions": len(winning),
+                "losing_positions": len(losing),
+                "win_rate_pct": round(len(winning) / len(asset_trades) * 100, 8) if asset_trades else 0.0,
+                "gross_pnl_usdt": _round_money(gross_pnl),
+                "net_pnl_usdt": _round_money(net_pnl),
+                "portfolio_net_pnl_contribution_pct": round(contribution_pct, 8),
+                "return_on_initial_capital_pct": round(return_on_initial_capital_pct, 8),
+                "total_fees_usdt": _round_money(fees),
+                "total_slippage_usdt": _round_money(slippage),
+                "skipped_signals": len(asset_skips),
+                "skipped_insufficient_margin": sum(1 for skip in asset_skips if skip.get("skip_reason") == "insufficient_free_margin"),
+                "skipped_pyramid_margin": sum(1 for skip in asset_skips if skip.get("skip_reason") == "insufficient_free_margin_pyramid"),
+                "skipped_asset_open": sum(1 for skip in asset_skips if skip.get("skip_reason") == "asset_position_open"),
+                "skipped_timing_filter": sum(1 for skip in asset_skips if skip.get("skip_reason") == "timing_filter"),
+            }
+        )
+    return sorted(rows, key=lambda item: (item["net_pnl_usdt"], item["asset"]), reverse=True)
 
 
 def _manage_position(

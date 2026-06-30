@@ -352,6 +352,62 @@ def test_portfolio_backtest_ignores_zero_percent_allocations(tmp_path: Path, mon
     assert all(item["asset"] != "AAVE" for item in result["skipped_signals"])
 
 
+def test_portfolio_backtest_reports_asset_contribution_breakdown(tmp_path: Path, monkeypatch):
+    pool_id = "pool-asset-breakdown"
+    aave_root = _write_stage4_artifacts(
+        tmp_path,
+        asset="AAVE",
+        session_id="stage1-aave",
+        candidate_id="candidate-aave",
+        tp_pct=50.0,
+        sl_pct=50.0,
+        leverage=1.0,
+        max_hold_hours=12.0,
+        signal_records=[{"signal_id": "sig-aave-1", "decision_direction": "LONG", "agreement": "MATCH"}],
+    )
+    sol_root = _write_stage4_artifacts(
+        tmp_path,
+        asset="SOL",
+        session_id="stage1-sol",
+        candidate_id="candidate-sol",
+        tp_pct=50.0,
+        sl_pct=50.0,
+        leverage=1.0,
+        max_hold_hours=12.0,
+        signal_records=[{"signal_id": "sig-sol-1", "decision_direction": "LONG", "agreement": "MATCH"}],
+    )
+    aave_candles = _make_candles("2026-05-01T00:00:00Z", 200, base_price=100.0, trend=1.0)
+    sol_candles = _make_candles("2026-05-01T00:00:00Z", 200, base_price=100.0, trend=-1.0)
+    signals = {
+        "sigset-aave": [_make_signal("sig-aave-1", "2026-05-01T00:00:00Z", "LONG", 100.0)],
+        "sigset-sol": [_make_signal("sig-sol-1", "2026-05-01T00:05:00Z", "LONG", 100.0)],
+    }
+
+    monkeypatch.setattr(
+        "quant_terminal_worker.stage4.portfolio_backtest.MarketDataReader",
+        lambda **kw: MockMarketDataReader({"AAVE": aave_candles, "SOL": sol_candles}),
+    )
+
+    result = run_portfolio_backtest(
+        workspace_root=tmp_path,
+        universe_run={"universe_run_id": pool_id},
+        candidates=[_candidate(pool_id, "candidate-aave", "AAVE"), _candidate(pool_id, "candidate-sol", "SOL")],
+        sessions=[_session(pool_id, "candidate-aave", "AAVE", aave_root), _session(pool_id, "candidate-sol", "SOL", sol_root)],
+        initial_capital_usdt=1000,
+        margin_allocations_pct={"AAVE": 30, "SOL": 30},
+        repository=MockRepository(signals),
+    )
+
+    breakdown = {row["asset"]: row for row in result["asset_breakdown"]}
+    assert set(breakdown) == {"AAVE", "SOL"}
+    for asset, row in breakdown.items():
+        trades = [trade for trade in result["trade_ledger"] if trade["asset"] == asset]
+        assert row["executed_positions"] == len(trades)
+        assert row["net_pnl_usdt"] == round(sum(trade["net_pnl_usdt"] for trade in trades), 4)
+        assert row["total_fees_usdt"] == round(sum(trade["total_fees_usdt"] for trade in trades), 4)
+    assert sum(row["executed_positions"] for row in breakdown.values()) == result["summary"]["executed_positions"]
+
+
 def test_portfolio_backtest_uses_resolved_stage4b_promotion_candidate(tmp_path: Path, monkeypatch):
     pool_id = "pool-stage4b-selection"
     aave_root = _write_stage4_artifacts(
@@ -417,6 +473,72 @@ def test_portfolio_backtest_uses_resolved_stage4b_promotion_candidate(tmp_path: 
     assert result["summary"]["skipped_timing_filter"] == 1
     assert result["skipped_signals"][0]["skip_reason"] == "timing_filter"
     assert result["trade_ledger"][0]["candidate_id"] == "stage4b-candidate"
+
+
+def test_portfolio_backtest_uses_highest_oos_protected_promotion_candidate(tmp_path: Path, monkeypatch):
+    pool_id = "pool-protected-selection"
+    aave_root = _write_stage4_artifacts(
+        tmp_path,
+        asset="AAVE",
+        session_id="stage1-aave",
+        candidate_id="stage4a-unprotected",
+        tp_pct=1.0,
+        sl_pct=50.0,
+        leverage=1.0,
+        signal_records=[{"signal_id": "sig-aave-1", "decision_direction": "LONG", "agreement": "MATCH"}],
+    )
+    promotion_root = aave_root / "promotion"
+    stage4_candidates = json.loads((promotion_root / "stage4_candidates.json").read_text())
+    protected_setup = {
+        "candidate_id": "stage4a-protected",
+        "entry_model": "market",
+        "tp_pct": 10.0,
+        "sl_pct": 50.0,
+        "final_tp_pct": 10.0,
+        "initial_sl_pct": 50.0,
+        "protection_enabled": True,
+        "protect_trigger_pct": 2.0,
+        "trail_sl_pct": 0.5,
+        "max_hold_hours": 12.0,
+        "leverage": 1.0,
+    }
+    stage4_candidates["candidates"].append({"candidate_id": "stage4a-protected", "setup": protected_setup})
+    (promotion_root / "stage4_candidates.json").write_text(json.dumps(stage4_candidates))
+    realized = json.loads((promotion_root / "stage4_realized_expectancy.json").read_text())
+    realized["best_candidate"]["slices"] = {"walk_forward_test": {"net_pnl_pct": 40, "profit_factor": 2.0}}
+    realized["best_candidate"]["account"] = {"net_pnl_usdt": 900, "ending_equity_usdt": 1900}
+    realized["candidates"] = [
+        realized["best_candidate"],
+        {
+            "candidate_id": "stage4a-protected",
+            "setup": protected_setup,
+            "account": {"net_pnl_usdt": 500, "ending_equity_usdt": 1500},
+            "slices": {"walk_forward_test": {"net_pnl_pct": 25, "profit_factor": 1.7}},
+        },
+    ]
+    (promotion_root / "stage4_realized_expectancy.json").write_text(json.dumps(realized))
+    candles = _make_candles("2026-05-01T00:00:00Z", 200, base_price=100.0, trend=0.0)
+    signals = {"sigset-aave": [_make_signal("sig-aave-1", "2026-05-01T00:00:00Z", "LONG", 100.0)]}
+
+    monkeypatch.setattr(
+        "quant_terminal_worker.stage4.portfolio_backtest.MarketDataReader",
+        lambda **kw: MockMarketDataReader({"AAVE": candles}),
+    )
+
+    result = run_portfolio_backtest(
+        workspace_root=tmp_path,
+        universe_run={"universe_run_id": pool_id},
+        candidates=[_candidate(pool_id, "candidate-aave", "AAVE")],
+        sessions=[_session(pool_id, "candidate-aave", "AAVE", aave_root)],
+        initial_capital_usdt=1000,
+        margin_allocations_pct={"AAVE": 30},
+        repository=MockRepository(signals),
+    )
+
+    eligible = result["eligible_assets"][0]
+    assert eligible["stage4_candidate_id"] == "stage4a-protected"
+    assert eligible["promotion_selection_criterion"] == "protected_walk_forward_net_pnl_pct"
+    assert result["trade_ledger"][0]["candidate_id"] == "stage4a-protected"
 
 
 def test_portfolio_backtest_consumes_pyramid_margin_dynamically(tmp_path: Path, monkeypatch):

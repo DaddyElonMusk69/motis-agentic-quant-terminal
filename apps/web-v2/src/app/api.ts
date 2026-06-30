@@ -807,6 +807,30 @@ export type PortfolioBacktestResult = {
     sharpe_ratio?: number;
     sortino_ratio?: number;
   };
+  asset_breakdown?: Array<{
+    asset: string;
+    session_id?: string;
+    stage4_candidate_id?: string;
+    promotion_source?: "stage4_realized_expectancy" | "stage4b_timing" | string | null;
+    promotion_source_label?: string | null;
+    margin_allocation_pct?: number;
+    signal_count?: number;
+    executed_positions: number;
+    winning_positions?: number;
+    losing_positions?: number;
+    win_rate_pct?: number;
+    gross_pnl_usdt?: number;
+    net_pnl_usdt: number;
+    portfolio_net_pnl_contribution_pct?: number;
+    return_on_initial_capital_pct?: number;
+    total_fees_usdt?: number;
+    total_slippage_usdt?: number;
+    skipped_signals?: number;
+    skipped_insufficient_margin?: number;
+    skipped_pyramid_margin?: number;
+    skipped_asset_open?: number;
+    skipped_timing_filter?: number;
+  }>;
   equity_curve: Array<{
     timestamp: string | null;
     equity_usdt: number;
@@ -884,6 +908,14 @@ export type Stage4RealizedExpectancyState = {
   candidates: Stage4CandidateResult[];
 };
 
+export type Stage4RunDeleteResult = {
+  session_id: string;
+  deleted_run_id: string;
+  latest_run_id?: string | null;
+  remaining_run_count: number;
+  stage4_runs_index_path?: string;
+};
+
 export type Stage4BTimingState = {
   exists: boolean;
   prompt_exists?: boolean;
@@ -892,6 +924,11 @@ export type Stage4BTimingState = {
   prompt_path?: string | null;
   context_path?: string | null;
   overlay_path?: string | null;
+  overlay_profile?: {
+    exclude_utc_hours?: number[];
+    exclude_utc_weekdays?: number[];
+    applies_to?: "all" | "LONG" | "SHORT" | string;
+  } | null;
   timing_replay_path?: string | null;
   timing_trade_ledger_path?: string | null;
   summary_path?: string | null;
@@ -1304,6 +1341,10 @@ export function fetchPortfolioBacktestRun(request: { universe_run_id: string; ru
 
 export function deletePortfolioBacktestRun(request: { universe_run_id: string; run_id: string }): Promise<{ portfolio_backtest_delete: PortfolioBacktestDeleteResult }> {
   return requestJson<{ portfolio_backtest_delete: PortfolioBacktestDeleteResult }>(`/api/v1/research/stage0-universe-runs/${request.universe_run_id}/portfolio-backtest/runs/${request.run_id}`, { method: "DELETE" });
+}
+
+export function deleteStage4Run(request: { session_id: string; run_id: string }): Promise<{ stage4_run_delete: Stage4RunDeleteResult; gate: Stage1GateSummary }> {
+  return requestJson<{ stage4_run_delete: Stage4RunDeleteResult; gate: Stage1GateSummary }>(`/api/v1/research/stage1-sessions/${request.session_id}/stage4/runs/${request.run_id}`, { method: "DELETE" });
 }
 
 export function createStage0UniverseRun(request: {

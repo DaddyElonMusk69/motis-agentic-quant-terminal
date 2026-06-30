@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useMemo, useState, type Dispatch, type PointerEvent as ReactPointerEvent, type SetStateAction } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { BarChart3, Clipboard, Play, RefreshCw, RotateCcw, Trash2, UploadCloud, X } from "lucide-react";
 import {
   createStage1Iteration,
   createStage1ResearchSession,
   deletePortfolioBacktestRun,
+  deleteStage4Run,
   deleteStage1Iteration,
   deleteStage1ResearchSession,
   fetchPortfolioBacktestRun,
@@ -522,6 +523,82 @@ function shortId(value: string | undefined | null): string {
   return value.length > 26 ? `${value.slice(0, 23)}...` : value;
 }
 
+function formatUtcHourRanges(values: number[] | undefined): string {
+  const hours = Array.from(new Set((values ?? []).filter((value) => Number.isInteger(value) && value >= 0 && value <= 23))).sort((a, b) => a - b);
+  if (!hours.length) {
+    return "none";
+  }
+  const ranges: Array<[number, number]> = [];
+  for (const hour of hours) {
+    const last = ranges[ranges.length - 1];
+    if (last && hour === last[1] + 1) {
+      last[1] = hour;
+    } else {
+      ranges.push([hour, hour]);
+    }
+  }
+  return ranges.map(([start, end]) => {
+    const startLabel = start.toString().padStart(2, "0");
+    const endLabel = end.toString().padStart(2, "0");
+    return start === end ? startLabel : `${startLabel}-${endLabel}`;
+  }).join(", ");
+}
+
+function formatUtcWeekdays(values: number[] | undefined): string {
+  const labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const days = Array.from(new Set((values ?? []).filter((value) => Number.isInteger(value) && value >= 0 && value <= 6))).sort((a, b) => a - b);
+  if (!days.length) {
+    return "all days";
+  }
+  return days.map((day) => labels[day]).join(", ");
+}
+
+function formatStage4BAppliesTo(value: string | undefined): string {
+  const side = String(value ?? "all").toUpperCase();
+  if (side === "LONG") {
+    return "LONG only";
+  }
+  if (side === "SHORT") {
+    return "SHORT only";
+  }
+  return "all sides";
+}
+
+function formatStage4BTimingProfile(profile: Stage1GateSummary["stage4b_timing"]["overlay_profile"] | undefined | null): string {
+  if (!profile) {
+    return "missing";
+  }
+  return `Ignore UTC ${formatUtcHourRanges(profile.exclude_utc_hours)} · ${formatUtcWeekdays(profile.exclude_utc_weekdays)} · ${formatStage4BAppliesTo(profile.applies_to)}`;
+}
+
+function stage4WfNetPnlPct(candidate: Pick<Stage4CandidateResult, "slices">): number | null {
+  const value = candidate.slices?.walk_forward_test?.net_pnl_pct;
+  return typeof value === "number" && !Number.isNaN(value) ? value : null;
+}
+
+function stage4OverallNetPnlUsdt(candidate: Pick<Stage4CandidateResult, "account">): number {
+  const value = candidate.account?.net_pnl_usdt;
+  return typeof value === "number" && !Number.isNaN(value) ? value : Number.NEGATIVE_INFINITY;
+}
+
+function rankStage4Candidates<T extends Stage4CandidateResult>(candidates: T[]): Array<T & { display_rank: number }> {
+  return candidates
+    .slice()
+    .sort((left, right) => {
+      const leftWf = stage4WfNetPnlPct(left) ?? Number.NEGATIVE_INFINITY;
+      const rightWf = stage4WfNetPnlPct(right) ?? Number.NEGATIVE_INFINITY;
+      if (rightWf !== leftWf) {
+        return rightWf - leftWf;
+      }
+      const overallDelta = stage4OverallNetPnlUsdt(right) - stage4OverallNetPnlUsdt(left);
+      if (overallDelta !== 0) {
+        return overallDelta;
+      }
+      return String(left.candidate_id).localeCompare(String(right.candidate_id));
+    })
+    .map((candidate, index) => ({ ...candidate, display_rank: index + 1 }));
+}
+
 function formatRangeList(values: number[] | undefined): string {
   if (!values?.length) {
     return "-";
@@ -615,6 +692,56 @@ function formatUsd(value: number | undefined | null): string {
     return "-";
   }
   return `$${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+}
+
+function formatCompactUsd(value: number | undefined | null): string {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return "-";
+  }
+  const sign = value < 0 ? "-" : "";
+  const absolute = Math.abs(value);
+  const units = [
+    { threshold: 1_000_000_000, suffix: "B", divisor: 1_000_000_000 },
+    { threshold: 1_000_000, suffix: "M", divisor: 1_000_000 },
+    { threshold: 1_000, suffix: "k", divisor: 1_000 },
+  ];
+  const unit = units.find((item) => absolute >= item.threshold);
+  if (!unit) {
+    return `${sign}$${absolute.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+  }
+  const scaled = absolute / unit.divisor;
+  const digits = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
+  const label = scaled.toFixed(digits).replace(/\.0+$/, "").replace(/(\.\d*[1-9])0+$/, "$1");
+  return `${sign}$${label}${unit.suffix}`;
+}
+
+function buildLinearAxisTicks(min: number, max: number, count = 5): number[] {
+  if (!Number.isFinite(min) || !Number.isFinite(max) || count <= 0) {
+    return [];
+  }
+  if (count === 1 || min === max) {
+    return [min];
+  }
+  return Array.from({ length: count }, (_, index) => min + ((max - min) * index) / (count - 1));
+}
+
+function buildIndexAxisTicks<T>(items: T[], count = 5): Array<{ index: number; item: T }> {
+  if (items.length === 0 || count <= 0) {
+    return [];
+  }
+  if (items.length === 1 || count === 1) {
+    return [{ index: 0, item: items[0] }];
+  }
+  const seen = new Set<number>();
+  return Array.from({ length: Math.min(count, items.length) }, (_, tickIndex) => (
+    Math.round((tickIndex * (items.length - 1)) / (Math.min(count, items.length) - 1))
+  ))
+    .filter((index) => {
+      if (seen.has(index)) return false;
+      seen.add(index);
+      return true;
+    })
+    .map((index) => ({ index, item: items[index] }));
 }
 
 function stage4FilledTrades(trades: Stage4TradeLedgerRow[]): Stage4TradeLedgerRow[] {
@@ -1002,6 +1129,10 @@ export function ResearchDevelopmentPage() {
       ));
     }
   });
+  const deleteStage4RunMutation = useMutation({
+    mutationFn: deleteStage4Run,
+    onSuccess: (result) => invalidateDevelopment(result.stage4_run_delete.session_id, pool?.universe_run_id)
+  });
   const promoteMutation = useMutation({
     mutationFn: promoteExecutionBundle,
     onSuccess: (_result, sessionId) => invalidateDevelopment(sessionId, pool?.universe_run_id)
@@ -1345,6 +1476,7 @@ export function ResearchDevelopmentPage() {
     portfolioBacktestMutation.error,
     loadPortfolioRunMutation.error,
     deletePortfolioRunMutation.error,
+    deleteStage4RunMutation.error,
     promoteMutation.error
   ].filter(Boolean) as Error[];
 
@@ -1544,10 +1676,12 @@ export function ResearchDevelopmentPage() {
                 onOpenStage4BCandidate={(candidate) => setSelectedStage4Candidate({ candidate, source: "stage4b_timing", label: "Stage 4B Timing Candidate" })}
                 onPromote={() => session && promoteMutation.mutate(session.session_id)}
                 onGenerateStage4BPrompt={() => session && stage4BPromptMutation.mutate(session.session_id)}
+                onDeleteRun={(runId) => session && deleteStage4RunMutation.mutate({ session_id: session.session_id, run_id: runId })}
                 onRunStage4B={() => session && stage4BMutation.mutate(session.session_id)}
                 onRun={runStage4}
                 inputs={stage4Inputs}
                 onInputsChange={setStage4Inputs}
+                deletingRunId={deleteStage4RunMutation.variables?.run_id}
                 promoting={promoteMutation.isPending}
                 stage4BPrompting={stage4BPromptMutation.isPending}
                 stage4BRunning={stage4BMutation.isPending || isJobRunning("stage4b")}
@@ -2721,11 +2855,13 @@ function Stage4Panel({
   onOpenCandidate,
   onOpenStage4BCandidate,
   onGenerateStage4BPrompt,
+  onDeleteRun,
   onPromote,
   onRunStage4B,
   onRun,
   inputs,
   onInputsChange,
+  deletingRunId,
   promoting,
   stage4BPrompting,
   stage4BRunning,
@@ -2735,11 +2871,13 @@ function Stage4Panel({
   onOpenCandidate: (candidate: Stage4CandidateResult) => void;
   onOpenStage4BCandidate: (candidate: Stage4CandidateResult) => void;
   onGenerateStage4BPrompt: () => void;
+  onDeleteRun: (runId: string) => void;
   onPromote: () => void;
   onRunStage4B: () => void;
   onRun: () => void;
   inputs: { initial_capital_usdt: number; margin_allocation_pct: number; leverage: number };
   onInputsChange: (inputs: { initial_capital_usdt: number; margin_allocation_pct: number; leverage: number }) => void;
+  deletingRunId?: string;
   promoting: boolean;
   stage4BPrompting: boolean;
   stage4BRunning: boolean;
@@ -2765,9 +2903,14 @@ function Stage4Panel({
   const stage4b = gate?.stage4b_timing;
   const stage4bBest = stage4b?.best_candidate ?? {};
   const stage4bAccount = stage4bBest.account ?? {};
+  const stage4bBestSetup: Stage4CandidateResult["setup"] = stage4bBest.setup ?? {};
+  const stage4bExitMode = stage4bBest.candidate_id ? formatStage4ExitMode(stage4bBestSetup) : "n/a";
+  const stage4bPyramid = stage4bBestSetup.pyramid;
   const promotionCandidate = gate?.promotion_candidate;
   const stage4bLocked = !complete;
   const stage4bReplayDisabled = stage4bLocked || !stage4b?.overlay_exists || inputsDirty || stage4BRunning;
+  const stage4CandidateRows = useMemo(() => rankStage4Candidates(stage4?.candidates ?? []), [stage4?.candidates]);
+  const stage4bCandidateRows = useMemo(() => rankStage4Candidates(stage4b?.candidates ?? []), [stage4b?.candidates]);
   return (
     <div className="development-stage-body">
       <TerminalPanel
@@ -2906,11 +3049,13 @@ function Stage4Panel({
         <TerminalPanel className="scroll-panel stage4-results-panel" title="Candidate Results">
           <DataTable
             columns={[
+              { key: "rank", header: "Rank", align: "right", render: (item) => formatNumber(item.display_rank) },
               { key: "id", header: "Candidate", render: (item) => item.candidate_id },
               { key: "policy", header: "Policy", render: (item) => formatStage3Policy(item.setup) },
               { key: "protect", header: "Protection", render: (item) => formatStage3Protection(item.setup) },
               { key: "pyramid", header: "Pyramid", render: (item) => formatPyramidPolicy(item.setup) },
               { key: "net", header: "Net Exp", align: "right", render: (item) => formatPct(item.net_expectancy_pct) },
+              { key: "wf_net", header: "WF Net", align: "right", render: (item) => formatPct(stage4WfNetPnlPct(item)) },
               { key: "oos_exp", header: "OOS Exp", align: "right", render: (item) => {
                 const wf = item.slices?.walk_forward_test;
                 return wf ? formatPct(wf.net_expectancy_pct) : "-";
@@ -2936,7 +3081,7 @@ function Stage4Panel({
             ]}
             getRowKey={(item) => item.candidate_id}
             onRowClick={onOpenCandidate}
-            rows={stage4.candidates}
+            rows={stage4CandidateRows}
           />
         </TerminalPanel>
       ) : null}
@@ -2949,7 +3094,23 @@ function Stage4Panel({
               { key: "candidate", header: "Best", render: (item) => item.best_candidate_id ?? "n/a" },
               { key: "equity", header: "Ending Equity", align: "right", render: (item) => formatUsd(item.account?.ending_equity_usdt) },
               { key: "pnl", header: "Net PnL", align: "right", render: (item) => formatUsd(item.account?.net_pnl_usdt) },
-              { key: "fees", header: "Fees", align: "right", render: (item) => formatUsd(item.account?.total_fees_usdt) }
+              { key: "fees", header: "Fees", align: "right", render: (item) => formatUsd(item.account?.total_fees_usdt) },
+              { key: "actions", header: "", align: "right", render: (item) => (
+                <button
+                  aria-label={`Delete Stage 4 run ${item.run_id}`}
+                  className="icon-button"
+                  disabled={deletingRunId === item.run_id}
+                  onClick={() => {
+                    if (window.confirm(`Delete Stage 4 run ${item.run_id}? This removes its persisted run artifact and may change the latest Stage 4 result.`)) {
+                      onDeleteRun(item.run_id);
+                    }
+                  }}
+                  title="Delete run"
+                  type="button"
+                >
+                  {deletingRunId === item.run_id ? <RefreshCw aria-hidden="true" className="spin-icon" /> : <Trash2 aria-hidden="true" />}
+                </button>
+              ) }
             ]}
             getRowKey={(item) => item.run_id}
             rows={stage4.stage4_runs.slice().reverse()}
@@ -3008,30 +3169,56 @@ function Stage4Panel({
             <strong>{stage4b?.latest_run_id ?? "n/a"}</strong>
           </div>
         </div>
+        {stage4bBest.candidate_id ? <Stage4ExitPolicyPanel setup={stage4bBestSetup} /> : null}
         <div className="stage4-footnote-grid">
           <FieldRow label="Prompt" value={stage4b?.prompt_exists ? "generated" : "missing"} />
-          <FieldRow label="Overlay path" value={stage4b?.overlay_path ?? "n/a"} />
-          <FieldRow label="Promotion" value="unchanged; Stage 4A remains source" />
+          <FieldRow label="Timing profile" value={formatStage4BTimingProfile(stage4b?.overlay_profile)} />
+          <FieldRow label="Promotion" value="auto-selects best eligible Stage 4A/4B candidate" />
           <FieldRow label="Replay input" value="Stage 4 candidates + timing-filtered canonical decisions" />
+          <FieldRow label="Exit mode" value={stage4bExitMode} />
+          <FieldRow label="TP / Initial SL" value={formatStage3Policy(stage4bBestSetup)} />
+          <FieldRow label="Protect / Trail" value={formatStage3Protection(stage4bBestSetup)} />
+          <FieldRow label="Hard exit" value={stage4bBestSetup.max_hold_hours ? `${formatNumber(stage4bBestSetup.max_hold_hours)}h` : "n/a"} />
+          <FieldRow label="Pyramid" value={stage4bPyramid ? `${formatNumber(stage4bPyramid.max_legs)} legs @ ${formatPct(stage4bPyramid.step_pct)}` : "off"} />
+          <FieldRow label="Fees" value="OKX USDT swap taker default, 5 bps per fill" />
         </div>
         {stage4b?.exists ? (
           <DataTable
             columns={[
+              { key: "rank", header: "Rank", align: "right", render: (item) => formatNumber(item.display_rank) },
               { key: "id", header: "Candidate", render: (item) => item.candidate_id },
+              { key: "policy", header: "Policy", render: (item) => formatStage3Policy(item.setup) },
+              { key: "protect", header: "Protection", render: (item) => formatStage3Protection(item.setup) },
+              { key: "pyramid", header: "Pyramid", render: (item) => formatPyramidPolicy(item.setup) },
               { key: "net", header: "Net Exp", align: "right", render: (item) => formatPct(item.net_expectancy_pct) },
+              { key: "wf_net", header: "WF Net", align: "right", render: (item) => formatPct(stage4WfNetPnlPct(item)) },
               { key: "oos_exp", header: "OOS Exp", align: "right", render: (item) => {
                 const wf = item.slices?.walk_forward_test;
                 return wf ? formatPct(wf.net_expectancy_pct) : "-";
               } },
+              { key: "oos_pf", header: "OOS PF", align: "right", render: (item) => {
+                const wf = item.slices?.walk_forward_test;
+                return wf?.profit_factor != null ? wf.profit_factor.toFixed(2) : "-";
+              } },
+              { key: "oos_ratio", header: "OOS/Train", align: "right", render: (item) => {
+                const wf = item.slices?.walk_forward_test;
+                const tr = item.slices?.training;
+                if (wf?.net_expectancy_pct != null && tr?.net_expectancy_pct != null && tr.net_expectancy_pct !== 0) {
+                  const ratio = wf.net_expectancy_pct / tr.net_expectancy_pct;
+                  return `${ratio >= 0 ? "" : ""}${(ratio * 100).toFixed(0)}%`;
+                }
+                return "-";
+              } },
               { key: "timing", header: "Timing Skips", align: "right", render: (item) => formatNumber(item.skipped_timing_filter) },
               { key: "trades", header: "Trades", align: "right", render: (item) => formatNumber(item.executed_trades) },
               { key: "win", header: "Win Rate", align: "right", render: (item) => formatPct(item.win_rate_pct) },
-              { key: "pf", header: "PF", align: "right", render: (item) => item.profit_factor != null ? item.profit_factor.toFixed(2) : "-" },
-              { key: "pnl", header: "Account PnL", align: "right", render: (item) => formatPct(item.net_pnl_pct) }
+              { key: "pnl", header: "Account PnL", align: "right", render: (item) => formatPct(item.net_pnl_pct) },
+              { key: "fees", header: "Fees", align: "right", render: (item) => formatUsd(item.account?.total_fees_usdt) },
+              { key: "flag", header: "", render: (item) => item.oos_warning ? "⚠️" : item.oos_selection_mode === "oos_ratio_gate" ? "✓" : "" }
             ]}
             getRowKey={(item) => item.candidate_id}
             onRowClick={onOpenStage4BCandidate}
-            rows={stage4b.candidates}
+            rows={stage4bCandidateRows}
           />
         ) : null}
       </TerminalPanel>
@@ -3074,6 +3261,7 @@ function PortfolioBacktestModal({
     return { ...trade, asset, row_key: `${asset ?? "asset"}-${trade.position_id ?? trade.signal_id}-${index}` };
   });
   const skippedRows = (result?.skipped_signals ?? []).map((item, index) => ({ ...item, row_key: `${item.asset}-${item.signal_id ?? item.signal_ts ?? "skip"}-${index}` }));
+  const assetBreakdownRows = result?.asset_breakdown ?? [];
   const latestPoint = result?.equity_curve[result.equity_curve.length - 1];
 
   return (
@@ -3090,175 +3278,156 @@ function PortfolioBacktestModal({
         </header>
 
         <div className="terminal-modal__body portfolio-backtest-body">
-          <div className="portfolio-backtest-layout">
-            <div className="portfolio-backtest-controls">
-            <TerminalPanel eyebrow="inputs" title="Shared Account">
-              <div className="portfolio-control-stack">
-                <label className="stage4-number-control portfolio-capital-control">
-                  <span>Capital</span>
-                  <input
-                    min={100}
-                    onChange={(event) => {
-                      const next = Number(event.target.value);
-                      onStateChange((current) => (current ? { ...current, initialCapital: Number.isFinite(next) ? next : current.initialCapital } : current));
-                    }}
-                    step={100}
-                    type="number"
-                    value={state.initialCapital}
-                  />
-                  <em>USDT</em>
-                </label>
-                <FieldRow label="Eligible Assets" value={formatNumber(assets.length)} />
-                <FieldRow label="Allocation Sum" value={formatPct(allocationTotal)} tone={allocationTotal > 100 ? "warn" : "default"} />
-                <FieldRow label="Margin Basis" value="current equity" />
-              </div>
-            </TerminalPanel>
-
-            <TerminalPanel eyebrow="margin" title="Asset Allocation">
-              <div className="portfolio-allocation-list">
-                {assets.map((asset) => {
-                  const value = state.allocations[asset.asset] ?? 0;
-                  return (
-                    <label className="portfolio-allocation-row" key={asset.candidate_id}>
-                      <span>
-                        <strong>{asset.asset}</strong>
-                        <em>{asset.signal_engine_id}</em>
-                      </span>
-                      <input
-                        max={100}
-                        min={0}
-                        onChange={(event) => {
-                          const next = Number(event.target.value);
-                          onStateChange((current) => current ? {
-                            ...current,
-                            allocations: { ...current.allocations, [asset.asset]: Number.isFinite(next) ? next : value }
-                          } : current);
-                        }}
-                        step={1}
-                        type="range"
-                        value={value}
-                      />
-                      <strong>{formatPct(value)}</strong>
+            <div className="portfolio-backtest-layout">
+              <div className="portfolio-backtest-controls">
+                <section className="portfolio-rail-section portfolio-rail-section--account">
+                  <div className="portfolio-section-header">
+                    <span>inputs</span>
+                    <strong>Shared Account</strong>
+                  </div>
+                  <div className="portfolio-account-control">
+                    <label className="portfolio-capital-field">
+                      <span>Starting Capital</span>
+                      <div className="portfolio-capital-field__input">
+                        <input
+                          min={100}
+                          onChange={(event) => {
+                            const next = Number(event.target.value);
+                            onStateChange((current) => (current ? { ...current, initialCapital: Number.isFinite(next) ? next : current.initialCapital } : current));
+                          }}
+                          step={100}
+                          type="number"
+                          value={state.initialCapital}
+                        />
+                        <em>USDT</em>
+                      </div>
                     </label>
-                  );
-                })}
-              </div>
-            </TerminalPanel>
-
-            <TerminalPanel eyebrow="artifacts" title="Saved Runs">
-              <div className="portfolio-run-history-list">
-                {runHistory.length ? runHistory.map((run) => (
-                  <div className={run.run_id === result?.run_id ? "portfolio-run-history-row is-active" : "portfolio-run-history-row"} key={run.run_id}>
-                    <button className="portfolio-run-history-main" onClick={() => onLoadRun(run.run_id)} type="button">
-                      <strong>{run.run_id === latestRunId ? "Latest" : formatCompactUtcTimestamp(run.created_at)}</strong>
-                      <span>{formatUsd(run.account?.ending_equity_usdt)} · {formatUsd(run.account?.net_pnl_usdt)} PnL</span>
-                      <small>{formatNumber(run.summary?.executed_positions)} trades · {formatNumber(run.summary?.skipped_signals)} skipped</small>
-                    </button>
-                    <div className="portfolio-run-history-actions">
-                      <button
-                        className="button button--danger button--compact"
-                        disabled={deletingRunId === run.run_id}
-                        onClick={() => {
-                          if (window.confirm(`Delete portfolio backtest run ${run.run_id}? This removes its persisted run artifact.`)) {
-                            onDeleteRun(run.run_id);
-                          }
-                        }}
-                        type="button"
-                      >
-                        <Trash2 aria-hidden="true" />
-                        {deletingRunId === run.run_id ? "…" : ""}
-                      </button>
+                    <div className="portfolio-account-facts">
+                      <div>
+                        <span>Eligible</span>
+                        <strong>{formatNumber(assets.length)}</strong>
+                      </div>
+                      <div>
+                        <span>Allocation</span>
+                        <strong className={allocationTotal > 100 ? "tone-warn" : undefined}>{formatPct(allocationTotal)}</strong>
+                      </div>
+                      <div>
+                        <span>Margin Basis</span>
+                        <strong>Equity</strong>
+                      </div>
                     </div>
                   </div>
-                )) : <div className="state-line">No saved portfolio runs yet.</div>}
-              </div>
-            </TerminalPanel>
+                </section>
+
+                <section className="portfolio-rail-section portfolio-rail-section--allocation">
+                  <div className="portfolio-section-header">
+                    <span>margin</span>
+                    <strong>Asset Allocation</strong>
+                  </div>
+                  <div className="portfolio-allocation-list">
+                    {assets.map((asset) => {
+                      const value = state.allocations[asset.asset] ?? 0;
+                      return (
+                        <label className="portfolio-allocation-row" key={asset.candidate_id}>
+                          <span className="portfolio-allocation-row__head">
+                            <span className="portfolio-allocation-row__meta">
+                              <strong>{asset.asset}</strong>
+                              <em>{asset.signal_engine_id}</em>
+                            </span>
+                            <strong className="portfolio-allocation-row__value">{formatPct(value)}</strong>
+                          </span>
+                          <span className="portfolio-allocation-row__slider">
+                            <span>0</span>
+                            <input
+                              max={100}
+                              min={0}
+                              onChange={(event) => {
+                                const next = Number(event.target.value);
+                                onStateChange((current) => current ? {
+                                  ...current,
+                                  allocations: { ...current.allocations, [asset.asset]: Number.isFinite(next) ? next : value }
+                                } : current);
+                              }}
+                              step={1}
+                              type="range"
+                              value={value}
+                            />
+                            <span>100</span>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </section>
+
+                <section className="portfolio-rail-section portfolio-rail-section--runs">
+                  <div className="portfolio-section-header">
+                    <span>artifacts</span>
+                    <strong>Saved Runs</strong>
+                  </div>
+                  <div className="portfolio-run-history-list">
+                    {runHistory.length ? runHistory.map((run) => (
+                      <div className={run.run_id === result?.run_id ? "portfolio-run-history-row is-active" : "portfolio-run-history-row"} key={run.run_id}>
+                        <button className="portfolio-run-history-main" onClick={() => onLoadRun(run.run_id)} type="button">
+                          <strong>{run.run_id === latestRunId ? "Latest" : formatCompactUtcTimestamp(run.created_at)}</strong>
+                          <span>{formatUsd(run.account?.ending_equity_usdt)} · {formatUsd(run.account?.net_pnl_usdt)} PnL</span>
+                          <small>{formatNumber(run.summary?.executed_positions)} trades · {formatNumber(run.summary?.skipped_signals)} skipped</small>
+                        </button>
+                        <div className="portfolio-run-history-actions">
+                          <button
+                            className="button button--danger button--compact"
+                            disabled={deletingRunId === run.run_id}
+                            onClick={() => {
+                              if (window.confirm(`Delete portfolio backtest run ${run.run_id}? This removes its persisted run artifact.`)) {
+                                onDeleteRun(run.run_id);
+                              }
+                            }}
+                            type="button"
+                          >
+                            <Trash2 aria-hidden="true" />
+                            {deletingRunId === run.run_id ? "…" : ""}
+                          </button>
+                        </div>
+                      </div>
+                    )) : <div className="state-line">No saved portfolio runs yet.</div>}
+                  </div>
+                </section>
             </div>
 
-            <div className="portfolio-backtest-results">
+            <div className="portfolio-backtest-main">
             {result ? (
               <>
-                <div className="portfolio-summary-strip">
-                  <div className="portfolio-summary-strip__hero">
-                    <span className="portfolio-summary-strip__label">Net PnL</span>
-                    <strong className={`portfolio-summary-strip__value ${result.account.net_pnl_usdt >= 0 ? "tone-pass" : "tone-risk"}`}>{formatUsd(result.account.net_pnl_usdt)}</strong>
-                    <span className="portfolio-summary-strip__sub">{result.account.net_pnl_usdt >= 0 ? "profit" : "loss"}</span>
+                <div className="portfolio-performance-board">
+                  <div className="portfolio-performance-board__result">
+                    <span>Net PnL</span>
+                    <strong className={result.account.net_pnl_usdt >= 0 ? "tone-pass" : "tone-risk"}>{formatUsd(result.account.net_pnl_usdt)}</strong>
+                    <em>{result.account.net_pnl_usdt >= 0 ? "portfolio profit" : "portfolio loss"}</em>
                   </div>
-                  <div className="portfolio-summary-strip__group">
-                    <div className="portfolio-summary-strip__stat">
-                      <span className="portfolio-summary-strip__label">Return</span>
-                      <strong className="portfolio-summary-strip__value">{result.account.return_pct != null ? formatPct(result.account.return_pct) : "-"}</strong>
+                  <div className="portfolio-performance-board__primary">
+                    <div>
+                      <span>Ending Equity</span>
+                      <strong>{formatUsd(result.account.ending_equity_usdt)}</strong>
                     </div>
-                    <div className="portfolio-summary-strip__stat">
-                      <span className="portfolio-summary-strip__label">Win Rate</span>
-                      <strong className="portfolio-summary-strip__value">{result.summary.executed_positions > 0 ? formatPct((stage4FilledTrades(result.trade_ledger ?? []).filter((t) => (t.net_pnl_usdt ?? 0) > 0).length / result.summary.executed_positions) * 100) : "-"}</strong>
+                    <div>
+                      <span>Return</span>
+                      <strong>{result.account.return_pct != null ? formatPct(result.account.return_pct) : "-"}</strong>
                     </div>
-                    <div className="portfolio-summary-strip__stat">
-                      <span className="portfolio-summary-strip__label">Sharpe</span>
-                      <strong className="portfolio-summary-strip__value">{result.account.sharpe_ratio != null ? result.account.sharpe_ratio.toFixed(2) : "-"}</strong>
+                    <div>
+                      <span>Max DD</span>
+                      <strong className="portfolio-performance-board__cost">{result.account.max_drawdown_pct != null ? formatPct(result.account.max_drawdown_pct) : "-"}</strong>
                     </div>
-                    <div className="portfolio-summary-strip__stat">
-                      <span className="portfolio-summary-strip__label">Sortino</span>
-                      <strong className="portfolio-summary-strip__value">{result.account.sortino_ratio != null ? result.account.sortino_ratio.toFixed(2) : "-"}</strong>
-                    </div>
-                    <div className="portfolio-summary-strip__stat">
-                      <span className="portfolio-summary-strip__label">Max DD</span>
-                      <strong className="portfolio-summary-strip__value portfolio-summary-strip__value--cost">{result.account.max_drawdown_pct != null ? formatPct(result.account.max_drawdown_pct) : "-"}</strong>
-                    </div>
-                    <div className="portfolio-summary-strip__stat">
-                      <span className="portfolio-summary-strip__label">PF</span>
-                      <strong className="portfolio-summary-strip__value">{result.account.profit_factor != null ? result.account.profit_factor.toFixed(2) : "-"}</strong>
-                    </div>
-                    <div className="portfolio-summary-strip__stat">
-                      <span className="portfolio-summary-strip__label">Fees Paid</span>
-                      <strong className="portfolio-summary-strip__value portfolio-summary-strip__value--cost">{formatUsd(result.account.total_fees_usdt)}</strong>
-                    </div>
-                    <div className="portfolio-summary-strip__stat">
-                      <span className="portfolio-summary-strip__label">Ending Equity</span>
-                      <strong className="portfolio-summary-strip__value">{formatUsd(result.account.ending_equity_usdt)}</strong>
+                    <div>
+                      <span>Executed</span>
+                      <strong>{formatNumber(result.summary.executed_positions)}</strong>
                     </div>
                   </div>
-                  <div className="portfolio-summary-strip__group portfolio-summary-strip__group--muted">
-                    <div className="portfolio-summary-strip__stat">
-                      <span className="portfolio-summary-strip__label">Assets</span>
-                      <strong className="portfolio-summary-strip__value">{formatNumber(result.summary.eligible_asset_count)}</strong>
-                    </div>
-                    <div className="portfolio-summary-strip__stat">
-                      <span className="portfolio-summary-strip__label">Executed</span>
-                      <strong className="portfolio-summary-strip__value">{formatNumber(result.summary.executed_positions)}</strong>
-                    </div>
-                    <div className="portfolio-summary-strip__stat">
-                      <span className="portfolio-summary-strip__label">Margin Skips</span>
-                      <strong className="portfolio-summary-strip__value">{formatNumber(result.summary.skipped_insufficient_margin)}</strong>
-                    </div>
-                    <div className="portfolio-summary-strip__stat">
-                      <span className="portfolio-summary-strip__label">Asset Skips</span>
-                      <strong className="portfolio-summary-strip__value">{formatNumber(result.summary.skipped_asset_open)}</strong>
-                    </div>
-                    <div className="portfolio-summary-strip__stat">
-                      <span className="portfolio-summary-strip__label">Timing Skips</span>
-                      <strong className="portfolio-summary-strip__value">{formatNumber(result.summary.skipped_timing_filter ?? 0)}</strong>
-                    </div>
+                  <div className="portfolio-performance-board__diagnostics">
+                    <span>Win {result.summary.executed_positions > 0 ? formatPct((stage4FilledTrades(result.trade_ledger ?? []).filter((t) => (t.net_pnl_usdt ?? 0) > 0).length / result.summary.executed_positions) * 100) : "-"}</span>
+                    <span>PF {result.account.profit_factor != null ? result.account.profit_factor.toFixed(2) : "-"}</span>
+                    <span>Fees {formatUsd(result.account.total_fees_usdt)}</span>
+                    <span>Skips {formatNumber((result.summary.skipped_insufficient_margin ?? 0) + (result.summary.skipped_asset_open ?? 0) + (result.summary.skipped_timing_filter ?? 0))}</span>
                   </div>
                 </div>
-
-                <TerminalPanel className="scroll-panel" eyebrow="strategy source" title="Selected Portfolio Inputs">
-                  <DataTable
-                    columns={[
-                      { key: "asset", header: "Asset", render: (item) => item.asset },
-                      { key: "source", header: "Source", render: (item) => item.promotion_source_label ?? (item.promotion_source === "stage4b_timing" ? "Stage 4B Timing" : "Stage 4A") },
-                      { key: "candidate", header: "Candidate", render: (item) => item.stage4_candidate_id },
-                      { key: "wf", header: "WF Return", align: "right", render: (item) => formatPct(item.walk_forward_net_pnl_pct) },
-                      { key: "pf", header: "WF PF", align: "right", render: (item) => item.walk_forward_profit_factor != null ? item.walk_forward_profit_factor.toFixed(2) : "-" },
-                      { key: "pnl", header: "Total PnL", align: "right", render: (item) => formatUsd(item.overall_net_pnl_usdt) },
-                      { key: "timing", header: "Timing Skips", align: "right", render: (item) => formatNumber(item.timing_skips ?? 0) },
-                      { key: "margin", header: "Margin", align: "right", render: (item) => formatPct(item.margin_allocation_pct) },
-                      { key: "warning", header: "Warning", render: (item) => item.promotion_warning ?? "" }
-                    ]}
-                    getRowKey={(item) => `${item.asset}-${item.stage4_candidate_id}-${item.promotion_source ?? "stage4a"}`}
-                    rows={result.eligible_assets ?? []}
-                  />
-                </TerminalPanel>
 
                 <div className="stage4-detail-chart-card portfolio-chart-card">
                   <div className="stage4-detail-chart-card__header">
@@ -3332,6 +3501,51 @@ function PortfolioBacktestModal({
               </div>
             )}
             </div>
+
+            <aside className="portfolio-backtest-inspector" aria-label="Portfolio backtest diagnostics">
+              {result ? (
+                <>
+                  <section className="portfolio-inspector-section">
+                    <div className="portfolio-section-header">
+                      <span>strategy source</span>
+                      <strong>Selected Inputs</strong>
+                    </div>
+                    <DataTable
+                      columns={[
+                        { key: "asset", header: "Asset", render: (item) => item.asset },
+                        { key: "source", header: "Source", render: (item) => item.promotion_source_label ?? (item.promotion_source === "stage4b_timing" ? "Stage 4B" : "Stage 4A") },
+                        { key: "wf", header: "WF", align: "right", render: (item) => formatPct(item.walk_forward_net_pnl_pct) },
+                        { key: "margin", header: "Margin", align: "right", render: (item) => formatPct(item.margin_allocation_pct) }
+                      ]}
+                      getRowKey={(item) => `${item.asset}-${item.stage4_candidate_id}-${item.promotion_source ?? "stage4a"}`}
+                      rows={result.eligible_assets ?? []}
+                    />
+                  </section>
+
+                  <section className="portfolio-inspector-section">
+                    <div className="portfolio-section-header">
+                      <span>asset pnl</span>
+                      <strong>Asset Contribution</strong>
+                    </div>
+                    <DataTable
+                      columns={[
+                        { key: "asset", header: "Asset", render: (item) => item.asset },
+                        { key: "net", header: "Net PnL", align: "right", render: (item) => formatUsd(item.net_pnl_usdt) },
+                        { key: "contribution", header: "Share", align: "right", render: (item) => formatPct(item.portfolio_net_pnl_contribution_pct) },
+                        { key: "trades", header: "Trades", align: "right", render: (item) => formatNumber(item.executed_positions) }
+                      ]}
+                      getRowKey={(item) => `${item.asset}-${item.stage4_candidate_id ?? "candidate"}`}
+                      rows={assetBreakdownRows}
+                    />
+                  </section>
+                </>
+              ) : (
+                <div className="portfolio-inspector-empty">
+                  <strong>Diagnostics</strong>
+                  <span>Selected inputs and asset contribution appear after a run.</span>
+                </div>
+              )}
+            </aside>
           </div>
         </div>
 
@@ -3351,11 +3565,18 @@ function PortfolioBacktestModal({
 }
 
 function PortfolioEquityCurve({ points }: { points: PortfolioBacktestResult["equity_curve"] }) {
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const [zoomRange, setZoomRange] = useState<{ start: number; end: number } | null>(null);
+  const [dragStart, setDragStart] = useState<number | null>(null);
+  const [dragEnd, setDragEnd] = useState<number | null>(null);
   const curve = points.filter((point) => typeof point.equity_usdt === "number" && !Number.isNaN(point.equity_usdt));
   if (curve.length < 2) {
     return <div className="state-line">Not enough equity points to render the chart.</div>;
   }
-  const equities = curve.map((point) => point.equity_usdt);
+  const visibleStart = zoomRange?.start ?? 0;
+  const visibleEnd = zoomRange?.end ?? curve.length - 1;
+  const visibleCurve = curve.slice(visibleStart, visibleEnd + 1);
+  const equities = visibleCurve.map((point) => point.equity_usdt);
   const min = Math.min(...equities);
   const max = Math.max(...equities);
   const span = max - min || 1;
@@ -3370,30 +3591,155 @@ function PortfolioEquityCurve({ points }: { points: PortfolioBacktestResult["equ
   const bottom = 36;
   const plotWidth = width - left - right;
   const plotHeight = height - top - bottom;
-  const path = curve.map((point, index) => {
-    const x = left + (index / Math.max(curve.length - 1, 1)) * plotWidth;
+  const plotPoints = visibleCurve.map((point, index) => {
+    const x = left + (index / Math.max(visibleCurve.length - 1, 1)) * plotWidth;
     const y = top + ((paddedMax - point.equity_usdt) / paddedSpan) * plotHeight;
-    return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
-  }).join(" ");
-  const baselineY = top + ((paddedMax - curve[0].equity_usdt) / paddedSpan) * plotHeight;
-  const firstTimestamp = curve.find((point) => point.timestamp)?.timestamp;
-  const lastTimestamp = curve.slice().reverse().find((point) => point.timestamp)?.timestamp;
+    return { point, x, y, originalIndex: visibleStart + index };
+  });
+  const path = plotPoints.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`).join(" ");
+  const areaPath = plotPoints.length
+    ? `${path} L ${plotPoints[plotPoints.length - 1].x.toFixed(2)} ${(height - bottom).toFixed(2)} L ${plotPoints[0].x.toFixed(2)} ${(height - bottom).toFixed(2)} Z`
+    : "";
+  const baselineY = top + ((paddedMax - visibleCurve[0].equity_usdt) / paddedSpan) * plotHeight;
+  const yTicks = buildLinearAxisTicks(min, max, 5).map((value) => ({
+    value,
+    y: top + ((paddedMax - value) / paddedSpan) * plotHeight,
+  }));
+  const seenXLabels = new Set<string>();
+  const xTicks = buildIndexAxisTicks(visibleCurve, 5)
+    .map((tick) => {
+      const x = left + (tick.index / Math.max(visibleCurve.length - 1, 1)) * plotWidth;
+      const label = formatCompactUtcTimestamp(tick.item.timestamp);
+      return { ...tick, x, label };
+    })
+    .filter((tick) => {
+      if (seenXLabels.has(tick.label)) return false;
+      seenXLabels.add(tick.label);
+      return true;
+    });
+  const active = hoverIndex == null ? null : plotPoints.find((point) => point.originalIndex === hoverIndex) ?? null;
+  const tooltipWidth = 220;
+  const tooltipHeight = 86;
+  const tooltipX = active ? Math.min(Math.max(active.x + 12, left), width - right - tooltipWidth) : 0;
+  const tooltipY = active ? Math.min(Math.max(active.y - tooltipHeight - 10, top), height - bottom - tooltipHeight) : 0;
+  const indexFromPointer = (event: ReactPointerEvent<SVGSVGElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const relativeX = ((event.clientX - rect.left) / rect.width) * width;
+    const clampedX = Math.min(Math.max(relativeX, left), width - right);
+    const localIndex = Math.round(((clampedX - left) / plotWidth) * (visibleCurve.length - 1));
+    return Math.min(Math.max(visibleStart + localIndex, visibleStart), visibleEnd);
+  };
+  const xForIndex = (index: number) => {
+    const localIndex = Math.min(Math.max(index - visibleStart, 0), visibleCurve.length - 1);
+    return left + (localIndex / Math.max(visibleCurve.length - 1, 1)) * plotWidth;
+  };
+  const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
+    const index = indexFromPointer(event);
+    setHoverIndex(index);
+    if (dragStart != null) {
+      setDragEnd(index);
+    }
+  };
+  const handlePointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
+    const index = indexFromPointer(event);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragStart(index);
+    setDragEnd(index);
+    setHoverIndex(index);
+  };
+  const handlePointerUp = (event: ReactPointerEvent<SVGSVGElement>) => {
+    if (dragStart == null) {
+      return;
+    }
+    const index = indexFromPointer(event);
+    const start = Math.min(dragStart, index);
+    const end = Math.max(dragStart, index);
+    if (end - start >= 2) {
+      setZoomRange({ start, end });
+      setHoverIndex(start);
+    }
+    setDragStart(null);
+    setDragEnd(null);
+  };
+  const brushStart = dragStart == null || dragEnd == null ? null : Math.min(dragStart, dragEnd);
+  const brushEnd = dragStart == null || dragEnd == null ? null : Math.max(dragStart, dragEnd);
+  const brushX = brushStart == null ? 0 : xForIndex(brushStart);
+  const brushWidth = brushStart == null || brushEnd == null ? 0 : Math.max(2, xForIndex(brushEnd) - brushX);
+  const latestPlotPoint = plotPoints[plotPoints.length - 1];
 
   return (
     <div className="stage4-equity-curve">
-      <svg aria-label="Portfolio shared account equity curve" preserveAspectRatio="none" viewBox={`0 0 ${width} ${height}`}>
+      <svg
+        aria-label="Portfolio shared account equity curve"
+        onPointerDown={handlePointerDown}
+        onPointerLeave={() => {
+          setHoverIndex(null);
+          setDragStart(null);
+          setDragEnd(null);
+        }}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        preserveAspectRatio="none"
+        viewBox={`0 0 ${width} ${height}`}
+      >
         <line className="stage4-equity-curve__axis" x1={left} x2={left} y1={top} y2={height - bottom} />
         <line className="stage4-equity-curve__axis" x1={left} x2={width - right} y1={height - bottom} y2={height - bottom} />
+        {yTicks.map((tick) => (
+          <line
+            className="stage4-equity-curve__grid"
+            key={`portfolio-y-${tick.value}`}
+            x1={left}
+            x2={width - right}
+            y1={tick.y}
+            y2={tick.y}
+          />
+        ))}
         <line className="stage4-equity-curve__baseline" x1={left} x2={width - right} y1={baselineY} y2={baselineY} />
-        <text className="stage4-equity-curve__axis-label" x={left - 10} y={top + 4} textAnchor="end">{formatUsd(max)}</text>
-        <text className="stage4-equity-curve__axis-label" x={left - 10} y={height - bottom} textAnchor="end">{formatUsd(min)}</text>
-        <text className="stage4-equity-curve__axis-label" x={left} y={height - 10} textAnchor="start">{formatCompactUtcTimestamp(firstTimestamp)}</text>
-        <text className="stage4-equity-curve__axis-label" x={width - right} y={height - 10} textAnchor="end">{formatCompactUtcTimestamp(lastTimestamp)}</text>
+        {yTicks.map((tick) => (
+          <text className="stage4-equity-curve__axis-label" key={`portfolio-y-label-${tick.value}`} x={left - 10} y={tick.y + 4} textAnchor="end">
+            {formatCompactUsd(tick.value)}
+          </text>
+        ))}
+        {xTicks.map((tick, index) => (
+          <text
+            className="stage4-equity-curve__axis-label"
+            key={`portfolio-x-${tick.index}`}
+            x={tick.x}
+            y={height - 10}
+            textAnchor={index === 0 ? "start" : index === xTicks.length - 1 ? "end" : "middle"}
+          >
+            {tick.label}
+          </text>
+        ))}
+        <path className="stage4-equity-curve__area" d={areaPath} vectorEffect="non-scaling-stroke" />
         <path className="stage4-equity-curve__path" d={path} vectorEffect="non-scaling-stroke" />
+        {latestPlotPoint ? <circle className="stage4-equity-curve__endpoint" cx={latestPlotPoint.x} cy={latestPlotPoint.y} r={3.5} /> : null}
+        <rect className="stage4-equity-curve__hitbox" x={left} y={top} width={plotWidth} height={plotHeight} />
+        {brushStart != null && brushEnd != null ? <rect className="stage4-equity-curve__brush" x={brushX} y={top} width={brushWidth} height={plotHeight} /> : null}
+        {active ? (
+          <>
+            <line className="stage4-equity-curve__cursor" x1={active.x} x2={active.x} y1={top} y2={height - bottom} />
+            <circle className="stage4-equity-curve__point" cx={active.x} cy={active.y} r={4} />
+            <g className="stage4-equity-curve__tooltip" transform={`translate(${tooltipX} ${tooltipY})`}>
+              <rect width={tooltipWidth} height={tooltipHeight} rx={6} />
+              <text className="stage4-equity-curve__tooltip-time" x={10} y={18}>{formatCompactUtcTimestamp(active.point.timestamp)}</text>
+              <text className="stage4-equity-curve__tooltip-label" x={10} y={40}>Equity</text>
+              <text className="stage4-equity-curve__tooltip-value" x={tooltipWidth - 10} y={40} textAnchor="end">{formatUsd(active.point.equity_usdt)}</text>
+              <text className="stage4-equity-curve__tooltip-label" x={10} y={60}>Free</text>
+              <text className="stage4-equity-curve__tooltip-value" x={tooltipWidth - 10} y={60} textAnchor="end">{formatUsd(active.point.free_margin_usdt)}</text>
+              <text className="stage4-equity-curve__tooltip-label" x={10} y={78}>Used</text>
+              <text className="stage4-equity-curve__tooltip-value" x={tooltipWidth - 10} y={78} textAnchor="end">{formatUsd(active.point.used_margin_usdt)}</text>
+            </g>
+          </>
+        ) : null}
       </svg>
       <div className="stage4-equity-curve__scale">
-        <span>Shared equity</span>
-        <span>Replay order</span>
+        <span>{active ? `${formatCompactUtcTimestamp(active.point.timestamp)} · ${formatUsd(active.point.equity_usdt)}` : zoomRange ? "Zoomed equity range" : "Drag on chart to zoom"}</span>
+        {zoomRange ? (
+          <button className="stage4-equity-curve__reset" onClick={() => { setZoomRange(null); setHoverIndex(null); }} type="button">Reset Zoom</button>
+        ) : (
+          <span>Replay order</span>
+        )}
       </div>
     </div>
   );
@@ -3411,55 +3757,81 @@ function Stage4CandidateDetailPanel({ detail }: { detail: Stage4CandidateDetail 
   const totalSkipped = (candidate.skipped_decisions ?? 0) + (candidate.skipped_position_open ?? 0);
   const expectancyPerTrade = filledTrades.length ? totalNetPnl / filledTrades.length : null;
   const maxDrawdownPct = stage4MaxDrawdownPct(filledTrades);
+  const account = candidate.account ?? {};
+  const trainingSlice = candidate.slices?.training;
+  const walkForwardSlice = candidate.slices?.walk_forward_test;
+  const oosTrainRatio = (() => {
+    const wf = walkForwardSlice?.net_expectancy_pct;
+    const tr = trainingSlice?.net_expectancy_pct;
+    return wf == null || tr == null || tr === 0 ? null : wf / tr;
+  })();
+  const oosTrainTone = oosTrainRatio == null ? "" : oosTrainRatio >= 0.6 ? "tone-pass" : oosTrainRatio >= 0.3 ? "tone-warn" : "tone-risk";
+  const headlineTone = (account.net_pnl_usdt ?? 0) >= 0 ? "tone-pass" : "tone-risk";
+  const detailMetrics = [
+    { label: "Policy", value: formatStage3Policy(setup) },
+    { label: "Protection", value: formatStage3Protection(setup) },
+    { label: "Pyramid", value: formatPyramidPolicy(setup) },
+    { label: "Trades", value: formatNumber(filledTrades.length) },
+    { label: "Win Rate", value: formatPct(candidate.win_rate_pct) },
+    { label: "Expectancy / Trade", value: formatUsd(expectancyPerTrade) },
+    { label: "Max Drawdown", value: formatPct(maxDrawdownPct) },
+    { label: "Skipped", value: formatNumber(totalSkipped) },
+  ];
+  const sliceRows = [
+    { label: "Net PnL", training: formatPct(trainingSlice?.net_pnl_pct), walkForward: formatPct(walkForwardSlice?.net_pnl_pct) },
+    { label: "Expectancy", training: formatPct(trainingSlice?.net_expectancy_pct), walkForward: formatPct(walkForwardSlice?.net_expectancy_pct) },
+    { label: "Win Rate", training: formatPct(trainingSlice?.win_rate_pct), walkForward: formatPct(walkForwardSlice?.win_rate_pct) },
+    { label: "Profit Factor", training: trainingSlice?.profit_factor?.toFixed(2) ?? "-", walkForward: walkForwardSlice?.profit_factor?.toFixed(2) ?? "-" },
+    { label: "Trades", training: formatNumber(trainingSlice?.executed_trades), walkForward: formatNumber(walkForwardSlice?.executed_trades) },
+  ];
 
   return (
     <div className="stage4-detail-layout">
-      <div className="stage4-detail-summary">
-        <FieldRow label="Run" value={detail.run_id ?? "n/a"} />
-        <FieldRow label="Policy" value={formatStage3Policy(setup)} />
-        <FieldRow label="Protection" value={formatStage3Protection(setup)} />
-        <FieldRow label="Pyramid" value={formatPyramidPolicy(setup)} />
-        <FieldRow label="Initial Capital" value={formatUsd(candidate.account?.initial_capital_usdt)} />
-        <FieldRow label="Ending Equity" value={formatUsd(candidate.account?.ending_equity_usdt)} />
-        <FieldRow label="Net PnL" value={formatUsd(candidate.account?.net_pnl_usdt)} />
-        <FieldRow label="Return" value={formatPct(candidate.account?.return_pct)} />
-        <FieldRow label="Fees" value={formatUsd(totalFees)} />
-        <FieldRow label="Filled Trades" value={formatNumber(filledTrades.length)} />
-        <FieldRow label="Win Rate" value={formatPct(candidate.win_rate_pct)} />
-        <FieldRow label="Expectancy / Trade" value={formatUsd(expectancyPerTrade)} />
-        <FieldRow label="Max Drawdown" value={formatPct(maxDrawdownPct)} />
-        <FieldRow label="Skipped Signals" value={formatNumber(totalSkipped)} />
+      <div className="stage4-detail-overview">
+        <section className="stage4-account-card" aria-label="Stage 4 account summary">
+          <div className="stage4-account-card__topline">
+            <span>Ending Equity</span>
+            <strong className={headlineTone}>{formatUsd(account.ending_equity_usdt)}</strong>
+            <em>{formatUsd(account.net_pnl_usdt)} net · {formatPct(account.return_pct)} return</em>
+          </div>
+          <div className="stage4-account-card__meta">
+            <span>Initial</span>
+            <strong>{formatUsd(account.initial_capital_usdt)}</strong>
+            <span>Fees</span>
+            <strong>{formatUsd(totalFees)}</strong>
+            <span>Run</span>
+            <strong title={detail.run_id ?? undefined}>{shortId(detail.run_id ?? "n/a")}</strong>
+          </div>
+        </section>
+
+        <section className="stage4-detail-metrics" aria-label="Stage 4 candidate metrics">
+          {detailMetrics.map((item) => (
+            <div className="stage4-detail-metric" key={item.label}>
+              <span>{item.label}</span>
+              <strong title={item.value}>{item.value}</strong>
+            </div>
+          ))}
+        </section>
       </div>
 
       {candidate.slices ? (
-        <div className="stage4-oos-split">
-          <div className="stage4-oos-split__col">
-            <span className="stage4-oos-split__label">Training</span>
-            <FieldRow label="Net PnL" value={formatPct(candidate.slices.training?.net_pnl_pct)} />
-            <FieldRow label="Expectancy" value={formatPct(candidate.slices.training?.net_expectancy_pct)} />
-            <FieldRow label="Win Rate" value={formatPct(candidate.slices.training?.win_rate_pct)} />
-            <FieldRow label="Profit Factor" value={candidate.slices.training?.profit_factor?.toFixed(2) ?? "-"} />
-            <FieldRow label="Trades" value={formatNumber(candidate.slices.training?.executed_trades)} />
+        <div className="stage4-slice-strip">
+          <div className="stage4-slice-strip__title">
+            <strong>Training vs Walk-Forward</strong>
+            <div className="stage4-slice-strip__badges">
+              {oosTrainRatio == null ? null : <span className={oosTrainTone}>OOS/Train {(oosTrainRatio * 100).toFixed(0)}%</span>}
+              {candidate.oos_warning ? <span className="tone-risk">OOS fallback</span> : null}
+            </div>
           </div>
-          <div className="stage4-oos-split__col">
-            <span className="stage4-oos-split__label">Walk-Forward (OOS)</span>
-            <FieldRow label="Net PnL" value={formatPct(candidate.slices.walk_forward_test?.net_pnl_pct)} />
-            <FieldRow label="Expectancy" value={formatPct(candidate.slices.walk_forward_test?.net_expectancy_pct)} />
-            <FieldRow label="Win Rate" value={formatPct(candidate.slices.walk_forward_test?.win_rate_pct)} />
-            <FieldRow label="Profit Factor" value={candidate.slices.walk_forward_test?.profit_factor?.toFixed(2) ?? "-"} />
-            <FieldRow label="Trades" value={formatNumber(candidate.slices.walk_forward_test?.executed_trades)} />
-          </div>
-          <div className="stage4-oos-split__ratio">
-            {(() => {
-              const wf = candidate.slices.walk_forward_test?.net_expectancy_pct;
-              const tr = candidate.slices.training?.net_expectancy_pct;
-              if (wf == null || tr == null || tr === 0) return null;
-              const ratio = wf / tr;
-              const tone = ratio >= 0.6 ? "tone-pass" : ratio >= 0.3 ? "tone-warn" : "tone-risk";
-              return <span className={tone}>OOS/Train: {(ratio * 100).toFixed(0)}%</span>;
-            })()}
-            {candidate.oos_warning ? <span className="tone-risk">⚠ Training-optimized (OOS fallback)</span> : null}
-          </div>
+          {sliceRows.map((row) => (
+            <div className="stage4-slice-strip__metric" key={row.label}>
+              <span>{row.label}</span>
+              <strong>
+                <em>T</em>{row.training}
+                <b>WF</b>{row.walkForward}
+              </strong>
+            </div>
+          ))}
         </div>
       ) : null}
 
@@ -3505,6 +3877,10 @@ function Stage4CandidateDetailPanel({ detail }: { detail: Stage4CandidateDetail 
 }
 
 function Stage4EquityCurve({ trades }: { trades: Stage4TradeLedgerRow[] }) {
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const [zoomRange, setZoomRange] = useState<{ start: number; end: number } | null>(null);
+  const [dragStart, setDragStart] = useState<number | null>(null);
+  const [dragEnd, setDragEnd] = useState<number | null>(null);
   if (!trades.length) {
     return <div className="state-line">No filled trades were recorded for this candidate.</div>;
   }
@@ -3529,8 +3905,11 @@ function Stage4EquityCurve({ trades }: { trades: Stage4TradeLedgerRow[] }) {
   if (points.length < 2) {
     return <div className="state-line">Not enough equity points to render the chart.</div>;
   }
-  const equities = points.map((point) => point.equity);
-  const times = points.map((point) => point.time);
+  const visibleStart = zoomRange?.start ?? 0;
+  const visibleEnd = zoomRange?.end ?? points.length - 1;
+  const visiblePoints = points.slice(visibleStart, visibleEnd + 1);
+  const equities = visiblePoints.map((point) => point.equity);
+  const times = visiblePoints.map((point) => point.time);
   const min = Math.min(...equities);
   const max = Math.max(...equities);
   const minTime = Math.min(...times);
@@ -3548,32 +3927,168 @@ function Stage4EquityCurve({ trades }: { trades: Stage4TradeLedgerRow[] }) {
   const bottom = 36;
   const plotWidth = width - left - right;
   const plotHeight = height - top - bottom;
-  const path = points
-    .map((point, index) => {
-      const xRatio = timeSpan > 0 ? (point.time - minTime) / timeSpan : index / Math.max(points.length - 1, 1);
-      const x = left + (xRatio * plotWidth);
-      const y = top + ((paddedMax - point.equity) / paddedSpan) * plotHeight;
-      return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
-    })
-    .join(" ");
-  const initialEquity = points[0].equity;
+  const plotPoints = visiblePoints.map((point, index) => {
+    const xRatio = timeSpan > 0 ? (point.time - minTime) / timeSpan : index / Math.max(visiblePoints.length - 1, 1);
+    const x = left + (xRatio * plotWidth);
+    const y = top + ((paddedMax - point.equity) / paddedSpan) * plotHeight;
+    return { point, x, y, originalIndex: visibleStart + index };
+  });
+  const path = plotPoints.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`).join(" ");
+  const areaPath = plotPoints.length
+    ? `${path} L ${plotPoints[plotPoints.length - 1].x.toFixed(2)} ${(height - bottom).toFixed(2)} L ${plotPoints[0].x.toFixed(2)} ${(height - bottom).toFixed(2)} Z`
+    : "";
+  const initialEquity = visiblePoints[0].equity;
   const baselineY = top + ((paddedMax - initialEquity) / paddedSpan) * plotHeight;
+  const yTicks = buildLinearAxisTicks(min, max, 5).map((value) => ({
+    value,
+    y: top + ((paddedMax - value) / paddedSpan) * plotHeight,
+  }));
+  const seenXLabels = new Set<string>();
+  const xTicks = buildLinearAxisTicks(minTime, maxTime, 5)
+    .map((value) => {
+      const xRatio = timeSpan > 0 ? (value - minTime) / timeSpan : 0;
+      const label = formatCompactUtcTimestamp(value);
+      return {
+        label,
+        value,
+        x: left + (xRatio * plotWidth),
+      };
+    })
+    .filter((tick) => {
+      if (seenXLabels.has(tick.label)) return false;
+      seenXLabels.add(tick.label);
+      return true;
+    });
+  const active = hoverIndex == null ? null : plotPoints.find((point) => point.originalIndex === hoverIndex) ?? null;
+  const tooltipWidth = 210;
+  const tooltipHeight = 66;
+  const tooltipX = active ? Math.min(Math.max(active.x + 12, left), width - right - tooltipWidth) : 0;
+  const tooltipY = active ? Math.min(Math.max(active.y - tooltipHeight - 10, top), height - bottom - tooltipHeight) : 0;
+  const indexFromPointer = (event: ReactPointerEvent<SVGSVGElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const relativeX = ((event.clientX - rect.left) / rect.width) * width;
+    const clampedX = Math.min(Math.max(relativeX, left), width - right);
+    let nearest = plotPoints[0];
+    for (const candidate of plotPoints) {
+      if (Math.abs(candidate.x - clampedX) < Math.abs(nearest.x - clampedX)) {
+        nearest = candidate;
+      }
+    }
+    return nearest.originalIndex;
+  };
+  const xForIndex = (index: number) => {
+    const point = plotPoints.find((candidate) => candidate.originalIndex === index);
+    if (point) {
+      return point.x;
+    }
+    const localIndex = Math.min(Math.max(index - visibleStart, 0), visiblePoints.length - 1);
+    return left + (localIndex / Math.max(visiblePoints.length - 1, 1)) * plotWidth;
+  };
+  const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
+    const index = indexFromPointer(event);
+    setHoverIndex(index);
+    if (dragStart != null) {
+      setDragEnd(index);
+    }
+  };
+  const handlePointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
+    const index = indexFromPointer(event);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragStart(index);
+    setDragEnd(index);
+    setHoverIndex(index);
+  };
+  const handlePointerUp = (event: ReactPointerEvent<SVGSVGElement>) => {
+    if (dragStart == null) {
+      return;
+    }
+    const index = indexFromPointer(event);
+    const start = Math.min(dragStart, index);
+    const end = Math.max(dragStart, index);
+    if (end - start >= 2) {
+      setZoomRange({ start, end });
+      setHoverIndex(start);
+    }
+    setDragStart(null);
+    setDragEnd(null);
+  };
+  const brushStart = dragStart == null || dragEnd == null ? null : Math.min(dragStart, dragEnd);
+  const brushEnd = dragStart == null || dragEnd == null ? null : Math.max(dragStart, dragEnd);
+  const brushX = brushStart == null ? 0 : xForIndex(brushStart);
+  const brushWidth = brushStart == null || brushEnd == null ? 0 : Math.max(2, xForIndex(brushEnd) - brushX);
+  const latestPlotPoint = plotPoints[plotPoints.length - 1];
 
   return (
     <div className="stage4-equity-curve">
-      <svg aria-label="Stage 4 account growth curve" preserveAspectRatio="none" viewBox={`0 0 ${width} ${height}`}>
+      <svg
+        aria-label="Stage 4 account growth curve"
+        onPointerDown={handlePointerDown}
+        onPointerLeave={() => {
+          setHoverIndex(null);
+          setDragStart(null);
+          setDragEnd(null);
+        }}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        preserveAspectRatio="none"
+        viewBox={`0 0 ${width} ${height}`}
+      >
         <line className="stage4-equity-curve__axis" x1={left} x2={left} y1={top} y2={height - bottom} />
         <line className="stage4-equity-curve__axis" x1={left} x2={width - right} y1={height - bottom} y2={height - bottom} />
+        {yTicks.map((tick) => (
+          <line
+            className="stage4-equity-curve__grid"
+            key={`stage4-y-${tick.value}`}
+            x1={left}
+            x2={width - right}
+            y1={tick.y}
+            y2={tick.y}
+          />
+        ))}
         <line className="stage4-equity-curve__baseline" x1={left} x2={width - right} y1={baselineY} y2={baselineY} />
-        <text className="stage4-equity-curve__axis-label" x={left - 10} y={top + 4} textAnchor="end">{formatUsd(max)}</text>
-        <text className="stage4-equity-curve__axis-label" x={left - 10} y={height - bottom} textAnchor="end">{formatUsd(min)}</text>
-        <text className="stage4-equity-curve__axis-label" x={left} y={height - 10} textAnchor="start">{formatCompactUtcTimestamp(minTime)}</text>
-        <text className="stage4-equity-curve__axis-label" x={width - right} y={height - 10} textAnchor="end">{formatCompactUtcTimestamp(maxTime)}</text>
+        {yTicks.map((tick) => (
+          <text className="stage4-equity-curve__axis-label" key={`stage4-y-label-${tick.value}`} x={left - 10} y={tick.y + 4} textAnchor="end">
+            {formatCompactUsd(tick.value)}
+          </text>
+        ))}
+        {xTicks.map((tick, index) => (
+          <text
+            className="stage4-equity-curve__axis-label"
+            key={`stage4-x-${tick.value}`}
+            x={tick.x}
+            y={height - 10}
+            textAnchor={index === 0 ? "start" : index === xTicks.length - 1 ? "end" : "middle"}
+          >
+            {tick.label}
+          </text>
+        ))}
+        <path className="stage4-equity-curve__area" d={areaPath} vectorEffect="non-scaling-stroke" />
         <path className="stage4-equity-curve__path" d={path} vectorEffect="non-scaling-stroke" />
+        {latestPlotPoint ? <circle className="stage4-equity-curve__endpoint" cx={latestPlotPoint.x} cy={latestPlotPoint.y} r={3.5} /> : null}
+        <rect className="stage4-equity-curve__hitbox" x={left} y={top} width={plotWidth} height={plotHeight} />
+        {brushStart != null && brushEnd != null ? <rect className="stage4-equity-curve__brush" x={brushX} y={top} width={brushWidth} height={plotHeight} /> : null}
+        {active ? (
+          <>
+            <line className="stage4-equity-curve__cursor" x1={active.x} x2={active.x} y1={top} y2={height - bottom} />
+            <circle className="stage4-equity-curve__point" cx={active.x} cy={active.y} r={4} />
+            <g className="stage4-equity-curve__tooltip" transform={`translate(${tooltipX} ${tooltipY})`}>
+              <rect width={tooltipWidth} height={tooltipHeight} rx={6} />
+              <text className="stage4-equity-curve__tooltip-time" x={10} y={18}>{formatCompactUtcTimestamp(active.point.time)}</text>
+              <text className="stage4-equity-curve__tooltip-label" x={10} y={42}>Equity</text>
+              <text className="stage4-equity-curve__tooltip-value" x={tooltipWidth - 10} y={42} textAnchor="end">{formatUsd(active.point.equity)}</text>
+              <text className="stage4-equity-curve__tooltip-label" x={10} y={60}>Point</text>
+              <text className="stage4-equity-curve__tooltip-value" x={tooltipWidth - 10} y={60} textAnchor="end">{formatNumber(active.point.index)}</text>
+            </g>
+          </>
+        ) : null}
       </svg>
       <div className="stage4-equity-curve__scale">
-        <span>Account size</span>
-        <span>Time</span>
+        <span>{active ? `${formatCompactUtcTimestamp(active.point.time)} · ${formatUsd(active.point.equity)}` : zoomRange ? "Zoomed equity range" : "Drag on chart to zoom"}</span>
+        {zoomRange ? (
+          <button className="stage4-equity-curve__reset" onClick={() => { setZoomRange(null); setHoverIndex(null); }} type="button">Reset Zoom</button>
+        ) : (
+          <span>Time</span>
+        )}
       </div>
     </div>
   );

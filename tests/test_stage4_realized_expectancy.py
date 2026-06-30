@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+from quant_terminal_worker.stage1.workspace import build_stage1_gate_summary
+from quant_terminal_worker.stage4.realized_expectancy import delete_stage4_realized_expectancy_run
 from quant_terminal_worker.stage4.realized_expectancy import run_stage4_realized_expectancy
 from quant_terminal_worker.stage4.timing import generate_stage4b_timing_prompt
 from quant_terminal_worker.stage4.timing import run_stage4b_timing_replay
@@ -157,7 +159,13 @@ def test_stage4_backtest_accounts_for_okx_taker_fees_and_equity(tmp_path: Path):
         records=[_record("sig-1", "LONG")],
         setup={"tp_pct": 1.0, "sl_pct": 5.0, "max_hold_hours": 1},
     )
-    session = _session(artifact_root)
+    session = {
+        **_session(artifact_root),
+        "train_start": "2026-05-01",
+        "train_end": "2026-05-01",
+        "walk_forward_start": "2026-05-02",
+        "walk_forward_end": "2026-05-02",
+    }
     signals = [_signal("sig-1", "2026-05-01T00:00:00Z", 100)]
     candles = [{"timestamp": "2026-05-01T00:05:00Z", "open": 100, "high": 101.5, "low": 99.5, "close": 101}]
 
@@ -463,6 +471,193 @@ def test_stage4_backtest_keeps_run_history_and_updates_latest_compatibility_file
     assert latest["run_id"] == second["run_id"]
     assert latest["source_run_path"].endswith(f"stage4_runs/{second['run_id']}/stage4_realized_expectancy.json")
     assert optimal["run_id"] == second["run_id"]
+
+
+def test_stage4_delete_run_restores_previous_latest_and_clears_when_empty(tmp_path: Path):
+    artifact_root = _write_stage4_fixture(
+        tmp_path,
+        records=[_record("sig-1", "LONG")],
+        setup={"tp_pct": 1.0, "sl_pct": 5.0, "max_hold_hours": 1},
+    )
+    session = _session(artifact_root)
+    signals = [_signal("sig-1", "2026-05-01T00:00:00Z", 100)]
+    candles = [{"timestamp": "2026-05-01T00:05:00Z", "open": 100, "high": 101.5, "low": 99.5, "close": 101}]
+
+    first = run_stage4_realized_expectancy(
+        workspace_root=tmp_path,
+        session=session,
+        signal_rows=signals,
+        candles=candles,
+        initial_capital_usdt=1000,
+        margin_allocation_pct=30,
+        leverage=5,
+        fees_bps_per_side=0,
+        slippage_bps_per_side=0,
+    )
+    second = run_stage4_realized_expectancy(
+        workspace_root=tmp_path,
+        session=session,
+        signal_rows=signals,
+        candles=candles,
+        initial_capital_usdt=2000,
+        margin_allocation_pct=20,
+        leverage=3,
+        fees_bps_per_side=0,
+        slippage_bps_per_side=0,
+    )
+
+    result = delete_stage4_realized_expectancy_run(workspace_root=tmp_path, session=session, run_id=second["run_id"])
+
+    assert result["deleted_run_id"] == second["run_id"]
+    assert result["latest_run_id"] == first["run_id"]
+    assert result["remaining_run_count"] == 1
+    assert not (artifact_root / "promotion" / "stage4_runs" / second["run_id"]).exists()
+    latest = json.loads((artifact_root / "promotion" / "stage4_realized_expectancy.json").read_text())
+    assert latest["run_id"] == first["run_id"]
+
+    result = delete_stage4_realized_expectancy_run(workspace_root=tmp_path, session=session, run_id=first["run_id"])
+
+    assert result["latest_run_id"] is None
+    assert result["remaining_run_count"] == 0
+    assert not (artifact_root / "promotion" / "stage4_realized_expectancy.json").exists()
+    assert not (artifact_root / "promotion" / "stage4_trade_ledger.json").exists()
+    assert not (artifact_root / "promotion" / "stage4_optimal.json").exists()
+    assert not (artifact_root / "promotion" / "stage4_summary.md").exists()
+
+
+def test_stage4_best_candidate_prefers_protected_positive_oos_candidate(tmp_path: Path):
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas/stage1-aave"
+    promotion_root = artifact_root / "promotion"
+    promotion_root.mkdir(parents=True)
+    (promotion_root / "stage1a_canonical_full_cycle_scores.json").write_text(
+        json.dumps(
+            {
+                "records": [
+                    {**_record("sig-train", "LONG"), "sample_role": "training"},
+                    {**_record("sig-wf", "LONG"), "sample_role": "walk_forward_test"},
+                ]
+            }
+        )
+    )
+    (promotion_root / "stage4_candidates.json").write_text(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "candidate_id": "unprotected_high_oos",
+                        "setup": {
+                            "entry_model": "market",
+                            "timeout_policy": "close_at_cutoff",
+                            "tp_pct": 5.0,
+                            "sl_pct": 5.0,
+                            "max_hold_hours": 0.1,
+                            "protection_enabled": False,
+                        },
+                    },
+                    {
+                        "candidate_id": "protected_lower_oos",
+                        "setup": {
+                            "entry_model": "market",
+                            "timeout_policy": "close_at_cutoff",
+                            "tp_pct": 1.0,
+                            "sl_pct": 5.0,
+                            "max_hold_hours": 0.1,
+                            "protection_enabled": True,
+                            "protect_trigger_pct": 0.5,
+                            "trail_sl_pct": 0.2,
+                        },
+                    },
+                ]
+            }
+        )
+    )
+    session = {
+        **_session(artifact_root),
+        "train_start": "2026-05-01",
+        "train_end": "2026-05-01",
+        "walk_forward_start": "2026-05-02",
+        "walk_forward_end": "2026-05-02",
+    }
+    signals = [
+        _signal("sig-train", "2026-05-01T00:00:00Z", 100),
+        _signal("sig-wf", "2026-05-02T00:00:00Z", 100),
+    ]
+    candles = [
+        {"timestamp": "2026-05-01T00:05:00Z", "open": 100, "high": 104, "low": 99.5, "close": 104},
+        {"timestamp": "2026-05-02T00:05:00Z", "open": 100, "high": 104, "low": 99.5, "close": 104},
+    ]
+
+    result = run_stage4_realized_expectancy(
+        workspace_root=tmp_path,
+        session=session,
+        signal_rows=signals,
+        candles=candles,
+        initial_capital_usdt=1000,
+        margin_allocation_pct=30,
+        leverage=5,
+        fees_bps_per_side=0,
+        slippage_bps_per_side=0,
+    )
+
+    assert result["best_candidate"]["candidate_id"] == "protected_lower_oos"
+    assert result["best_candidate"]["selection_mode"] == "protected_walk_forward_net_pnl_pct"
+
+
+def test_stage4_gate_displays_protected_best_for_existing_old_selection_artifact(tmp_path: Path):
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas/stage1-aave"
+    promotion_root = artifact_root / "promotion"
+    promotion_root.mkdir(parents=True)
+    unprotected = {
+        "candidate_id": "unprotected_old_best",
+        "setup": {"protection_enabled": False},
+        "account": {"net_pnl_usdt": 2000},
+        "slices": {"walk_forward_test": {"net_pnl_pct": 40, "profit_factor": 3}},
+    }
+    protected = {
+        "candidate_id": "protected_display_best",
+        "setup": {"protection_enabled": True},
+        "account": {"net_pnl_usdt": 1000},
+        "slices": {"walk_forward_test": {"net_pnl_pct": 20, "profit_factor": 2}},
+    }
+    realized_payload = {
+        "run_id": "stage4-old-run",
+        "best_candidate_id": unprotected["candidate_id"],
+        "best_candidate": unprotected,
+        "candidates": [unprotected, protected],
+        "simulation_inputs": {"initial_capital_usdt": 1000, "margin_allocation_pct": 30, "leverage": 5},
+    }
+    (promotion_root / "stage4_realized_expectancy.json").write_text(json.dumps(realized_payload))
+    (promotion_root / "stage4_trade_ledger.json").write_text(json.dumps({"candidates": []}))
+    (promotion_root / "stage4_optimal.json").write_text(json.dumps({"run_id": "stage4-old-run", "best": unprotected}))
+    (promotion_root / "stage4_summary.md").write_text("# Stage 4\n")
+    run_root = promotion_root / "stage4_runs" / "stage4-old-run"
+    run_root.mkdir(parents=True)
+    run_realized_path = run_root / "stage4_realized_expectancy.json"
+    run_realized_path.write_text(json.dumps(realized_payload))
+    (promotion_root / "stage4_runs" / "index.json").write_text(
+        json.dumps(
+            {
+                "latest_run_id": "stage4-old-run",
+                "runs": [
+                    {
+                        "run_id": "stage4-old-run",
+                        "created_at": "2026-06-01T00:00:00Z",
+                        "best_candidate_id": unprotected["candidate_id"],
+                        "best_candidate": unprotected,
+                        "account": unprotected["account"],
+                        "realized_expectancy_path": str(run_realized_path),
+                    }
+                ],
+            }
+        )
+    )
+
+    gate = build_stage1_gate_summary(workspace_root=tmp_path, session=_session(artifact_root))
+
+    stage4 = gate["stage4_realized_expectancy"]
+    assert stage4["best_candidate_id"] == "protected_display_best"
+    assert stage4["best_candidate"]["selection_mode"] == "protected_walk_forward_net_pnl_pct"
+    assert stage4["stage4_runs"][0]["best_candidate_id"] == "protected_display_best"
 
 
 def test_stage4b_timing_replay_requires_stage4a_baseline(tmp_path: Path):

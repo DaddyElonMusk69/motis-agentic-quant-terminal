@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -170,6 +171,50 @@ def run_stage4_realized_expectancy(
     }
 
 
+def delete_stage4_realized_expectancy_run(*, workspace_root: Path, session: dict[str, Any], run_id: str) -> dict[str, Any]:
+    artifact_root = _session_artifact_root(workspace_root=workspace_root, session=session)
+    promotion_root = artifact_root / "promotion"
+    runs_root = promotion_root / "stage4_runs"
+    run_root = runs_root / run_id
+    index_path = runs_root / "index.json"
+    if not run_root.exists():
+        raise FileNotFoundError(f"Stage 4 run not found: {run_id}")
+    index = _read_json_if_exists(index_path) or {"schema_version": "0.1", "artifact_role": "stage4_run_index", "runs": []}
+    remaining_runs = [item for item in index.get("runs", []) if item.get("run_id") != run_id]
+    shutil.rmtree(run_root)
+    latest = remaining_runs[-1] if remaining_runs else None
+    if latest:
+        _restore_stage4_latest_from_run(
+            promotion_root=promotion_root,
+            realized_path=Path(latest["realized_expectancy_path"]),
+            ledger_path=Path(latest["trade_ledger_path"]),
+            optimal_path=Path(latest["optimal_path"]),
+            summary_path=Path(latest["summary_path"]),
+        )
+    else:
+        _clear_stage4_latest_artifacts(promotion_root)
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "0.1",
+                "artifact_role": "stage4_run_index",
+                "latest_run_id": latest.get("run_id") if latest else None,
+                "runs": remaining_runs,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return {
+        "session_id": session["session_id"],
+        "deleted_run_id": run_id,
+        "latest_run_id": latest.get("run_id") if latest else None,
+        "remaining_run_count": len(remaining_runs),
+        "stage4_runs_index_path": str(index_path),
+    }
+
+
 def _score_candidate(
     *,
     candidate: dict[str, Any],
@@ -309,6 +354,37 @@ def _update_stage4_runs_index(*, promotion_root: Path, run: dict[str, Any]) -> N
         )
         + "\n"
     )
+
+
+def _restore_stage4_latest_from_run(
+    *,
+    promotion_root: Path,
+    realized_path: Path,
+    ledger_path: Path,
+    optimal_path: Path,
+    summary_path: Path,
+) -> None:
+    targets = [
+        (realized_path, promotion_root / "stage4_realized_expectancy.json"),
+        (ledger_path, promotion_root / "stage4_trade_ledger.json"),
+        (optimal_path, promotion_root / "stage4_optimal.json"),
+        (summary_path, promotion_root / "stage4_summary.md"),
+    ]
+    for source, target in targets:
+        if not source.is_file():
+            raise FileNotFoundError(f"Stage 4 run artifact not found: {source}")
+        target.write_text(source.read_text())
+
+
+def _clear_stage4_latest_artifacts(promotion_root: Path) -> None:
+    for path in [
+        promotion_root / "stage4_realized_expectancy.json",
+        promotion_root / "stage4_trade_ledger.json",
+        promotion_root / "stage4_optimal.json",
+        promotion_root / "stage4_summary.md",
+    ]:
+        if path.exists():
+            path.unlink()
 
 
 def _simulate_account_position(
@@ -899,8 +975,9 @@ def _choose_best_candidate(results: list[dict[str, Any]]) -> dict[str, Any]:
     """Select the best candidate using walk-forward OOS performance.
 
     Selection priority:
-    1. Candidates with OOS expectancy >= 30% of training expectancy (option 2)
-    2. If none pass the ratio gate, fall back to combined metric (option 3)
+    1. Protected-SL candidates with positive OOS return
+    2. Candidates with OOS expectancy >= 30% of training expectancy (option 2)
+    3. If none pass the ratio gate, fall back to combined metric (option 3)
        and flag the winner with oos_warning.
     """
     OOS_RATIO_THRESHOLD = 0.30
@@ -921,6 +998,21 @@ def _choose_best_candidate(results: list[dict[str, Any]]) -> dict[str, Any]:
             float(tr.get("profit_factor", 0)),
         )
 
+    protected_eligible = [item for item in results if _candidate_has_protected_sl(item) and _walk_forward_net_pnl_pct(item) > 0]
+    if protected_eligible:
+        best = max(protected_eligible, key=lambda item: (
+            _walk_forward_net_pnl_pct(item),
+            _oos_metrics(item)[1],
+            _overall_net_pnl_usdt(item),
+            -item["unfilled"],
+        ))
+        return {
+            **best,
+            "selection_mode": "protected_walk_forward_net_pnl_pct",
+            "oos_selection_mode": "protected_walk_forward_net_pnl_pct",
+            "oos_warning": False,
+        }
+
     # Option 2: candidates where OOS expectancy >= 30% of training expectancy
     viable = []
     for item in results:
@@ -939,11 +1031,29 @@ def _choose_best_candidate(results: list[dict[str, Any]]) -> dict[str, Any]:
             _oos_metrics(item)[1],
             -item["unfilled"],
         ))
-        return {**best, "oos_selection_mode": "oos_ratio_gate", "oos_warning": False}
+        return {**best, "selection_mode": "oos_ratio_gate", "oos_selection_mode": "oos_ratio_gate", "oos_warning": False}
 
     # Option 3: fallback to combined metric, flag with warning
     best = max(results, key=lambda item: (item["net_expectancy_pct"], item["profit_factor"], -item["unfilled"]))
-    return {**best, "oos_selection_mode": "fallback_combined", "oos_warning": True}
+    return {**best, "selection_mode": "fallback_combined", "oos_selection_mode": "fallback_combined", "oos_warning": True}
+
+
+def _candidate_has_protected_sl(candidate: dict[str, Any]) -> bool:
+    setup = candidate.get("setup") if isinstance(candidate.get("setup"), dict) else candidate
+    if bool(setup.get("protection_enabled")):
+        return True
+    side_policies = setup.get("side_policies") if isinstance(setup.get("side_policies"), dict) else {}
+    return any(isinstance(policy, dict) and bool(policy.get("protection_enabled")) for policy in side_policies.values())
+
+
+def _walk_forward_net_pnl_pct(candidate: dict[str, Any]) -> float:
+    wf = (candidate.get("slices") or {}).get("walk_forward_test") or {}
+    return float(wf.get("net_pnl_pct", 0) or 0)
+
+
+def _overall_net_pnl_usdt(candidate: dict[str, Any]) -> float:
+    account = candidate.get("account") or {}
+    return float(account.get("net_pnl_usdt", 0) or 0)
 
 
 def _render_summary(payload: dict[str, Any]) -> str:

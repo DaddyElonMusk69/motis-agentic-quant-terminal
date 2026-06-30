@@ -68,6 +68,7 @@ from quant_terminal_worker.stage4.portfolio_backtest import delete_portfolio_bac
 from quant_terminal_worker.stage4.portfolio_backtest import list_portfolio_backtest_runs
 from quant_terminal_worker.stage4.portfolio_backtest import read_portfolio_backtest_run
 from quant_terminal_worker.stage4.portfolio_backtest import run_portfolio_backtest
+from quant_terminal_worker.stage4.realized_expectancy import delete_stage4_realized_expectancy_run
 from quant_terminal_worker.stage4.realized_expectancy import run_stage4_realized_expectancy
 from quant_terminal_worker.stage4.timing import generate_stage4b_timing_prompt
 from quant_terminal_worker.stage4.timing import run_stage4b_timing_replay
@@ -1158,6 +1159,30 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {
             "stage4_realized_expectancy": _relative_nested_paths(Path.cwd(), result),
+            "gate": _relative_nested_paths(
+                Path.cwd(),
+                build_stage1_gate_summary(workspace_root=Path.cwd(), session=session),
+            ),
+        }
+
+    @app.delete("/api/v1/research/stage1-sessions/{session_id}/stage4/runs/{run_id}")
+    def delete_stage4_realized_expectancy_run_history(session_id: str, run_id: str) -> dict[str, Any]:
+        repository = get_runtime_repository()
+        session = repository.get_stage1_research_session(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Stage 1 session not found")
+        try:
+            result = delete_stage4_realized_expectancy_run(
+                workspace_root=Path.cwd(),
+                session=session,
+                run_id=run_id,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "stage4_run_delete": _relative_nested_paths(Path.cwd(), result),
             "gate": _relative_nested_paths(
                 Path.cwd(),
                 build_stage1_gate_summary(workspace_root=Path.cwd(), session=session),
@@ -2572,20 +2597,18 @@ def _resolve_stage4_promotion_candidate(*, promotion_root: Path) -> dict[str, An
     stage4a_best = optimal.get("best") or realized.get("best_candidate") or {}
     if not stage4a_best:
         raise ValueError("Stage 4 optimal artifact does not include a best candidate")
-    stage4a = {
-        "source": "stage4_realized_expectancy",
-        "result": realized,
-        "result_path": realized_path,
-        "optimal_path": optimal_path,
-        "summary_path": summary_path,
-        "best": stage4a_best,
-        "criterion": "walk_forward_net_pnl_pct",
-        "overlay": None,
-    }
-    stage4b = _stage4b_promotion_candidate(promotion_root=promotion_root, latest_stage4a_run_id=str(realized.get("run_id") or ""))
-    candidates = [stage4a]
-    if stage4b is not None:
-        candidates.append(stage4b)
+    candidates = _stage4a_promotion_candidates(
+        realized=realized,
+        fallback_best=stage4a_best,
+        realized_path=realized_path,
+        optimal_path=optimal_path,
+        summary_path=summary_path,
+    )
+    candidates.extend(_stage4b_promotion_candidates(promotion_root=promotion_root, latest_stage4a_run_id=str(realized.get("run_id") or "")))
+    protected_eligible = [candidate for candidate in candidates if _candidate_has_protected_sl(candidate["best"]) and _walk_forward_net_pnl_pct(candidate["best"]) > 0]
+    if protected_eligible:
+        selected = max(protected_eligible, key=_promotion_rank_key)
+        return {**selected, "criterion": "protected_walk_forward_net_pnl_pct"}
     eligible = [candidate for candidate in candidates if _walk_forward_net_pnl_pct(candidate["best"]) > 0]
     if eligible:
         return max(eligible, key=_promotion_rank_key)
@@ -2593,30 +2616,61 @@ def _resolve_stage4_promotion_candidate(*, promotion_root: Path) -> dict[str, An
     return {**best, "criterion": "overall_net_pnl_fallback", "warning": "weak_walk_forward_fallback"}
 
 
-def _stage4b_promotion_candidate(*, promotion_root: Path, latest_stage4a_run_id: str) -> dict[str, Any] | None:
+def _stage4a_promotion_candidates(
+    *,
+    realized: dict[str, Any],
+    fallback_best: dict[str, Any],
+    realized_path: Path,
+    optimal_path: Path,
+    summary_path: Path,
+) -> list[dict[str, Any]]:
+    rows = [row for row in realized.get("candidates", []) if isinstance(row, dict)]
+    if not rows:
+        rows = [fallback_best]
+    return [
+        {
+            "source": "stage4_realized_expectancy",
+            "result": realized,
+            "result_path": realized_path,
+            "optimal_path": optimal_path,
+            "summary_path": summary_path,
+            "best": row,
+            "criterion": "walk_forward_net_pnl_pct",
+            "overlay": None,
+        }
+        for row in rows
+        if row.get("candidate_id")
+    ]
+
+
+def _stage4b_promotion_candidates(*, promotion_root: Path, latest_stage4a_run_id: str) -> list[dict[str, Any]]:
     timing_root = promotion_root / "stage4b_timing"
     replay_path = timing_root / "timing_replay.json"
     overlay_path = timing_root / "timing_overlay.json"
     ledger_path = timing_root / "timing_trade_ledger.json"
     summary_path = timing_root / "timing_summary.md"
     if not (replay_path.is_file() and overlay_path.is_file() and ledger_path.is_file() and summary_path.is_file()):
-        return None
+        return []
     replay = _read_json_file(replay_path)
     overlay = _read_json_file(overlay_path)
     if str(overlay.get("source_stage4_run_id") or "") != latest_stage4a_run_id:
-        return None
-    best = replay.get("best_candidate") or {}
-    if not best:
-        return None
-    return {
-        "source": "stage4b_timing",
-        "result": replay,
-        "result_path": replay_path,
-        "summary_path": summary_path,
-        "best": best,
-        "criterion": "walk_forward_net_pnl_pct",
-        "overlay": overlay,
-    }
+        return []
+    rows = [row for row in replay.get("candidates", []) if isinstance(row, dict)]
+    if not rows and isinstance(replay.get("best_candidate"), dict):
+        rows = [replay["best_candidate"]]
+    return [
+        {
+            "source": "stage4b_timing",
+            "result": replay,
+            "result_path": replay_path,
+            "summary_path": summary_path,
+            "best": row,
+            "criterion": "walk_forward_net_pnl_pct",
+            "overlay": overlay,
+        }
+        for row in rows
+        if row.get("candidate_id")
+    ]
 
 
 def _promotion_rank_key(candidate: dict[str, Any]) -> tuple[float, float, float, bool]:
@@ -2627,6 +2681,14 @@ def _promotion_rank_key(candidate: dict[str, Any]) -> tuple[float, float, float,
         _overall_net_pnl_usdt(best),
         candidate["source"] == "stage4_realized_expectancy",
     )
+
+
+def _candidate_has_protected_sl(candidate: dict[str, Any]) -> bool:
+    setup = candidate.get("setup") if isinstance(candidate.get("setup"), dict) else candidate
+    if bool(setup.get("protection_enabled")):
+        return True
+    side_policies = setup.get("side_policies") if isinstance(setup.get("side_policies"), dict) else {}
+    return any(isinstance(policy, dict) and bool(policy.get("protection_enabled")) for policy in side_policies.values())
 
 
 def _walk_forward_net_pnl_pct(best: dict[str, Any]) -> float:
