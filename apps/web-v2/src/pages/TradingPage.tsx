@@ -25,6 +25,7 @@ import { queryClient } from "../app/queryClient";
 import { useAppRouter } from "../app/router";
 import { DataTable } from "../components/DataTable";
 import { FieldRow } from "../components/FieldRow";
+import { ListSkeleton } from "../components/ListSkeleton";
 import { SplitPane } from "../components/SplitPane";
 import { StatusBadge } from "../components/StatusBadge";
 import { TerminalPanel } from "../components/TerminalPanel";
@@ -240,6 +241,45 @@ function routeTpSlRows(route: DeploymentRoute): Array<{ label: string; value: st
     ];
   }
   return [{ label: "TP / SL", value: formatTpSlPolicy(setup) }];
+}
+
+function boolValue(value: unknown): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    return ["true", "1", "yes", "on"].includes(value.toLowerCase());
+  }
+  return Boolean(value);
+}
+
+function formatProtectionPolicy(policy: Record<string, unknown>): string {
+  const enabled = boolValue(readRecordValue(policy, "protection_enabled"));
+  if (!enabled) {
+    return "Off";
+  }
+  const trigger = readRecordValue(policy, "protect_trigger_pct");
+  const trail = readRecordValue(policy, "trail_sl_pct");
+  const lock = readRecordValue(policy, "lock_profit_pct");
+  return [
+    "On",
+    `trigger ${formatSetupValue(trigger, "%")}`,
+    `trail ${formatSetupValue(trail, "%")}`,
+    lock !== undefined ? `lock ${formatSetupValue(lock, "%")}` : null
+  ].filter(Boolean).join(" · ");
+}
+
+function routeProtectionRows(route: DeploymentRoute): Array<{ label: string; value: string }> {
+  const setup = routeSetup(route);
+  const long = sidePolicy(setup, "LONG");
+  const short = sidePolicy(setup, "SHORT");
+  if (long && short) {
+    return [
+      { label: "Long SL Protection", value: formatProtectionPolicy(long) },
+      { label: "Short SL Protection", value: formatProtectionPolicy(short) }
+    ];
+  }
+  return [{ label: "SL Protection", value: formatProtectionPolicy(setup) }];
 }
 
 function executionInterval(route: DeploymentRoute): string {
@@ -618,7 +658,7 @@ export function TradingPage() {
                 </button>
               </div>
             </div>
-            {routesQuery.isLoading ? <div className="state-line">Loading promoted routes...</div> : null}
+            {routesQuery.isLoading ? <ListSkeleton count={5} label="Loading promoted routes" variant="card" /> : null}
             {routes.length === 0 && !routesQuery.isLoading ? <div className="state-line">No promoted routes yet. Promote a Stage 4 bundle first.</div> : null}
             <div className="trading-route-list-v2">
               {routes.map((item) => (
@@ -651,7 +691,7 @@ export function TradingPage() {
               <div className="header-actions">
                 <ExchangeHealthPill health={healthQuery.data ?? null} loading={healthQuery.isLoading} />
                 <button className="button button--secondary" disabled={!route || healthQuery.isFetching} onClick={() => void healthQuery.refetch()} type="button">
-                  <RefreshCw aria-hidden="true" />
+                  <RefreshCw aria-hidden="true" className={healthQuery.isFetching ? "spin-icon" : undefined} />
                   Check CLI
                 </button>
               </div>
@@ -795,7 +835,14 @@ export function TradingPage() {
                     ]}
                     getRowKey={(wake) => wake.wake_id}
                     rows={wakes}
+                    loading={wakesQuery.isLoading}
+                    loadingLabel="Loading wake history"
+                    loadingRowCount={8}
+                    emptyLabel={route ? "No wake history for this route yet." : "Select a route to load wake history."}
                   />
+                  {wakesQuery.isFetching && !wakesQuery.isLoading && wakes.length > 0 ? (
+                    <div className="state-line state-line--subtle">Refreshing wake history...</div>
+                  ) : null}
                 </TerminalPanel>
               </>
             ) : null}
@@ -1062,9 +1109,8 @@ function ArchivedStrategiesModal({ deleteBusyRouteId, loading, onClose, onDelete
           </button>
         </header>
         <div className="terminal-modal__body">
-          {loading ? <div className="state-line">Loading archived strategies...</div> : null}
           {!loading && routes.length === 0 ? <div className="state-line">No archived strategies yet.</div> : null}
-          {routes.length > 0 ? (
+          {loading || routes.length > 0 ? (
             <DataTable
               columns={[
                 { key: "route", header: "Strategy", render: (item) => <strong>{item.asset} / {item.signal_engine_id}</strong> },
@@ -1090,6 +1136,10 @@ function ArchivedStrategiesModal({ deleteBusyRouteId, loading, onClose, onDelete
               ]}
               getRowKey={(item) => item.route_id}
               rows={routes}
+              loading={loading}
+              loadingLabel="Loading archived strategies"
+              loadingRowCount={6}
+              emptyLabel="No archived strategies yet."
             />
           ) : null}
         </div>
@@ -1258,10 +1308,17 @@ function BundleReadout({ route }: { route: DeploymentRoute }) {
   const margin = Number(sizing.margin_allocation_pct ?? 0);
   const perLegMarginPct = legs > 0 ? margin / legs : margin;
   const tpSlRows = routeTpSlRows(route);
+  const protectionRows = routeProtectionRows(route);
   return (
     <div className="strategy-readout-grid">
       {tpSlRows.map((row) => (
         <div className="strategy-readout-grid__item" key={row.label}>
+          <span>{row.label}</span>
+          <strong>{row.value}</strong>
+        </div>
+      ))}
+      {protectionRows.map((row) => (
+        <div className="strategy-readout-grid__item strategy-readout-grid__item--wide" key={row.label}>
           <span>{row.label}</span>
           <strong>{row.value}</strong>
         </div>

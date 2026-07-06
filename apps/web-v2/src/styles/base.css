@@ -57,6 +57,18 @@ h2 {
   font-family: "SFMono-Regular", "Cascadia Code", "Roboto Mono", monospace;
 }
 
+.sr-only {
+  border: 0;
+  clip: rect(0 0 0 0);
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  padding: 0;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
+}
+
 .eyebrow {
   color: var(--ink-muted);
   display: block;
@@ -91,11 +103,29 @@ h2 {
   justify-content: center;
   min-height: 32px;
   padding: 0 var(--space-3);
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease, opacity 140ms ease, transform 120ms ease;
 }
 
 .button:hover,
 .icon-button:hover {
   border-color: var(--line-strong);
+}
+
+.button:active:not(:disabled),
+.icon-button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.button:focus-visible,
+.icon-button:focus-visible {
+  outline: 2px solid color-mix(in oklch, var(--status-live) 72%, white);
+  outline-offset: 2px;
+}
+
+.button:disabled,
+.icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .button svg,
@@ -152,5 +182,14 @@ h2 {
 @keyframes spin-icon {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .button,
+  .icon-button,
+  .spin-icon {
+    animation: none;
+    transition: none;
   }
 }

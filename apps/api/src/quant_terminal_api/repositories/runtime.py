@@ -7,9 +7,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import Engine, create_engine, func, insert, select
+from sqlalchemy import Engine, func, insert, select
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 
+from quant_terminal_api.db.engine import get_database_engine
 from quant_terminal_api.db.models import (
     backtest_runs,
     decisions,
@@ -39,7 +40,7 @@ from quant_terminal_api.db.models import (
 class RuntimeRepository:
     def __init__(self, engine_or_database_url: Engine | str) -> None:
         self.engine = (
-            create_engine(engine_or_database_url)
+            get_database_engine(engine_or_database_url)
             if isinstance(engine_or_database_url, str)
             else engine_or_database_url
         )

@@ -689,6 +689,7 @@ export type Stage4TradeLedgerRow = {
   agreement?: string;
   decision_direction?: "LONG" | "SHORT" | "FLAT" | string;
   reference_price?: number;
+  entry_fill_model?: string;
   position_id?: string;
   entry_status?: string;
   exit_status?: string;
@@ -721,6 +722,7 @@ export type Stage4TradeLedgerRow = {
     entry_ts?: string;
     exit_ts?: string;
     entry_price?: number;
+    raw_entry_price?: number;
     exit_price?: number;
     tp_price?: number;
     exit_status?: string;
@@ -755,6 +757,8 @@ export type PortfolioBacktestResult = {
   simulation_inputs: {
     initial_capital_usdt: number;
     margin_allocations_pct: Record<string, number>;
+    signal_offset_count?: number;
+    entry_fill_model?: "reference_price" | "adverse_candle_extreme" | string;
     margin_basis?: string;
     pyramid_margin_mode?: string;
   };
@@ -772,6 +776,8 @@ export type PortfolioBacktestResult = {
     timing_skips?: number | null;
     margin_allocation_pct: number;
     leverage?: number | null;
+    raw_signal_count?: number | null;
+    signal_offset_count?: number | null;
     signal_count?: number | null;
     candle_count?: number | null;
   }>;
@@ -863,6 +869,7 @@ export type PortfolioBacktestRunIndex = {
   runs: Array<{
     run_id: string;
     created_at: string;
+    simulation_inputs?: PortfolioBacktestResult["simulation_inputs"];
     summary: PortfolioBacktestResult["summary"];
     account: PortfolioBacktestResult["account"];
     portfolio_backtest_path?: string;
@@ -1320,13 +1327,17 @@ export function runPortfolioBacktest(request: {
   universe_run_id: string;
   initial_capital_usdt: number;
   margin_allocations_pct: Record<string, number>;
+  signal_offset_count?: number;
+  entry_fill_model?: "reference_price" | "adverse_candle_extreme";
 }): Promise<{ portfolio_backtest: PortfolioBacktestResult } | AsyncJobResponse> {
   return requestJson(`/api/v1/research/stage0-universe-runs/${request.universe_run_id}/portfolio-backtest`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       initial_capital_usdt: request.initial_capital_usdt,
-      margin_allocations_pct: request.margin_allocations_pct
+      margin_allocations_pct: request.margin_allocations_pct,
+      signal_offset_count: request.signal_offset_count ?? 0,
+      entry_fill_model: request.entry_fill_model ?? "reference_price"
     })
   });
 }

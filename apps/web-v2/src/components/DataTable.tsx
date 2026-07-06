@@ -13,11 +13,25 @@ type DataTableProps<T> = {
   getRowKey: (row: T) => string;
   getRowClassName?: (row: T) => string | undefined;
   onRowClick?: (row: T) => void;
+  emptyLabel?: string;
+  loading?: boolean;
+  loadingLabel?: string;
+  loadingRowCount?: number;
 };
 
-export function DataTable<T>({ columns, rows, getRowClassName, getRowKey, onRowClick }: DataTableProps<T>) {
+export function DataTable<T>({
+  columns,
+  rows,
+  getRowClassName,
+  getRowKey,
+  onRowClick,
+  emptyLabel = "No rows available.",
+  loading = false,
+  loadingLabel = "Loading rows...",
+  loadingRowCount = 6
+}: DataTableProps<T>) {
   return (
-    <div className="table-frame">
+    <div className="table-frame" aria-busy={loading}>
       <table className="data-table">
         <thead>
           <tr>
@@ -29,10 +43,21 @@ export function DataTable<T>({ columns, rows, getRowClassName, getRowKey, onRowC
           </tr>
         </thead>
         <tbody>
-          {rows.length === 0 ? (
+          {loading ? (
+            Array.from({ length: loadingRowCount }, (_, rowIndex) => (
+              <tr className="table-loading-row" key={`loading-${rowIndex}`}>
+                {columns.map((column, columnIndex) => (
+                  <td className={column.align ? `is-${column.align}` : undefined} key={column.key}>
+                    <span className={columnIndex === 0 ? "table-loading-cell table-loading-cell--wide" : "table-loading-cell"} />
+                    {rowIndex === 0 && columnIndex === 0 ? <span className="sr-only">{loadingLabel}</span> : null}
+                  </td>
+                ))}
+              </tr>
+            ))
+          ) : rows.length === 0 ? (
             <tr>
               <td className="table-empty" colSpan={columns.length}>
-                No rows available.
+                {emptyLabel}
               </td>
             </tr>
           ) : (

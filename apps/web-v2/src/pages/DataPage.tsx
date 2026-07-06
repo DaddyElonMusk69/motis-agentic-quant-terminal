@@ -20,6 +20,7 @@ import { queryClient } from "../app/queryClient";
 import { useAppRouter } from "../app/router";
 import { DataTable } from "../components/DataTable";
 import { FieldRow } from "../components/FieldRow";
+import { ListSkeleton } from "../components/ListSkeleton";
 import { SplitPane } from "../components/SplitPane";
 import { StatusBadge } from "../components/StatusBadge";
 import { TerminalPanel } from "../components/TerminalPanel";
@@ -333,7 +334,7 @@ export function DataPage() {
               <span>Catalog Assets</span>
               <Search aria-hidden="true" />
             </div>
-            {catalogQuery.isLoading ? <div className="state-line">Loading local market data coverage...</div> : null}
+            {catalogQuery.isLoading ? <ListSkeleton count={6} label="Loading local market data coverage" /> : null}
             {catalogQuery.error ? <div className="state-line state-line--error">{catalogQuery.error.message}</div> : null}
             {catalog?.assets.map((asset) => {
               const dataTypes = new Set(asset.datasets.map((dataset) => dataset.data_type));
@@ -367,7 +368,7 @@ export function DataPage() {
               <div className="header-actions">
                 <StatusBadge tone="info">{catalog ? `${formatNumber(catalog.summary.assets)} assets` : "Catalog"}</StatusBadge>
                 <button className="button button--secondary" disabled={catalogQuery.isFetching} onClick={() => void catalogQuery.refetch()} type="button">
-                  <RefreshCw aria-hidden="true" />
+                  <RefreshCw aria-hidden="true" className={catalogQuery.isFetching ? "spin-icon" : undefined} />
                   {catalogQuery.isFetching ? "Refreshing" : "Refresh"}
                 </button>
               </div>
@@ -455,7 +456,13 @@ export function DataPage() {
                 getRowKey={(row) => row.dataset_id}
                 onRowClick={(row) => updateDataUrl({ asset: row.asset, dataType: selectedDataType, dataset: row.dataset_id })}
                 rows={visibleDatasets}
+                loading={catalogQuery.isLoading}
+                loadingLabel="Loading dataset coverage"
+                emptyLabel={selectedAsset ? "No datasets match this asset and data type." : "No datasets are available."}
               />
+              {catalogQuery.isFetching && !catalogQuery.isLoading && visibleDatasets.length > 0 ? (
+                <div className="state-line state-line--subtle">Refreshing dataset coverage...</div>
+              ) : null}
             </TerminalPanel>
 
             <div className="workbench-grid workbench-grid--wide-left">
@@ -499,15 +506,20 @@ export function DataPage() {
             </div>
 
             <TerminalPanel title={selectedDataType === "ema" ? "EMA Preview" : featureCategoryForDataType(selectedDataType) ? "Feature Preview" : "Candle Preview"}>
-              {rowPreviewQuery.isLoading ? <div className="state-line">Loading row preview...</div> : null}
               {rowPreviewQuery.error ? <div className="state-line state-line--error">{rowPreviewQuery.error.message}</div> : null}
-              {rowPreviewQuery.data ? (
+              {selectedDataset ? (
                 <DataTable
-                  columns={previewColumns(selectedDataType, rowPreviewQuery.data.rows)}
+                  columns={previewColumns(selectedDataType, rowPreviewQuery.data?.rows ?? [])}
                   getRowKey={(row) => String(row.timestamp ?? row.ts ?? JSON.stringify(row))}
-                  rows={rowPreviewQuery.data.rows}
+                  rows={rowPreviewQuery.data?.rows ?? []}
+                  loading={rowPreviewQuery.isLoading}
+                  loadingLabel="Loading row preview"
+                  loadingRowCount={5}
+                  emptyLabel="No preview rows are available for this dataset."
                 />
-              ) : null}
+              ) : (
+                <div className="state-line">Select a dataset to preview rows.</div>
+              )}
             </TerminalPanel>
           </>
         }

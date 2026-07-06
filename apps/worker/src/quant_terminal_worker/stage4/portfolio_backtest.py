@@ -25,6 +25,7 @@ from quant_terminal_worker.stage4.realized_expectancy import (
 
 PROMOTION_SOURCE_STAGE4A = "stage4_realized_expectancy"
 PROMOTION_SOURCE_STAGE4B = "stage4b_timing"
+PORTFOLIO_ENTRY_FILL_MODELS = {"reference_price", "adverse_candle_extreme"}
 
 
 def run_portfolio_backtest(
@@ -35,10 +36,19 @@ def run_portfolio_backtest(
     sessions: list[dict[str, Any]],
     initial_capital_usdt: float = 10_000.0,
     margin_allocations_pct: dict[str, float] | None = None,
+    signal_offset_count: int = 0,
+    entry_fill_model: str = "reference_price",
     repository: Any = None,
 ) -> dict[str, Any]:
     if initial_capital_usdt <= 0:
         raise ValueError("initial_capital_usdt must be greater than zero")
+    signal_offset_count = int(signal_offset_count)
+    if signal_offset_count < 0:
+        raise ValueError("signal_offset_count must be zero or greater")
+    entry_fill_model = str(entry_fill_model or "reference_price")
+    if entry_fill_model not in PORTFOLIO_ENTRY_FILL_MODELS:
+        allowed = ", ".join(sorted(PORTFOLIO_ENTRY_FILL_MODELS))
+        raise ValueError(f"entry_fill_model must be one of: {allowed}")
     if repository is None:
         raise ValueError("Portfolio backtest requires a market data repository")
     universe_run_id = str(universe_run["universe_run_id"])
@@ -50,6 +60,8 @@ def run_portfolio_backtest(
         candidates=candidates,
         sessions=sessions,
         margin_allocations_pct=margin_allocations_pct,
+        signal_offset_count=signal_offset_count,
+        entry_fill_model=entry_fill_model,
         repository=repository,
     )
     if not asset_contexts:
@@ -76,6 +88,8 @@ def run_portfolio_backtest(
             "timing_skips": ctx.get("timing_skips"),
             "margin_allocation_pct": ctx["margin_allocation_pct"],
             "leverage": ctx["leverage"],
+            "raw_signal_count": ctx["raw_signal_count"],
+            "signal_offset_count": ctx["signal_offset_count"],
             "signal_count": len(ctx["signal_inputs"]),
             "candle_count": len(ctx["candles"]),
         }
@@ -91,6 +105,8 @@ def run_portfolio_backtest(
         "simulation_inputs": {
             "initial_capital_usdt": initial_capital_usdt,
             "margin_allocations_pct": margin_allocations_pct,
+            "signal_offset_count": signal_offset_count,
+            "entry_fill_model": entry_fill_model,
             "margin_basis": "current_equity",
             "simulation_mode": "candle_by_candle",
         },
@@ -116,6 +132,8 @@ def _load_asset_contexts(
     candidates: list[dict[str, Any]],
     sessions: list[dict[str, Any]],
     margin_allocations_pct: dict[str, float],
+    signal_offset_count: int,
+    entry_fill_model: str,
     repository: Any,
 ) -> list[dict[str, Any]]:
     accepted_candidate_ids = {
@@ -169,6 +187,9 @@ def _load_asset_contexts(
             timing_overlay=selection.get("overlay"),
             repository=repository,
         )
+        raw_signal_count = len(signal_inputs)
+        if signal_offset_count:
+            signal_inputs = signal_inputs[signal_offset_count:]
 
         # Load candles
         candles = _load_candles(
@@ -200,6 +221,9 @@ def _load_asset_contexts(
             "candidate": best_candidate,
             "leverage": leverage,
             "margin_allocation_pct": margin_pct,
+            "raw_signal_count": raw_signal_count,
+            "signal_offset_count": signal_offset_count,
+            "entry_fill_model": entry_fill_model,
             "max_position_notional_usdt": max_notional,
             "fees_bps_per_side": fees_bps,
             "slippage_bps_per_side": slippage_bps,
@@ -485,6 +509,7 @@ def _simulate(
                 available_cash=available_cash,
             )
             available_cash -= managed["margin_consumed"]
+            available_cash += managed["cash_released"]
             skipped_signals.extend(managed["pyramid_skips"])
             closed = managed["closed"]
             if closed:
@@ -692,7 +717,7 @@ def _manage_position(
     policy = _candidate_policy_for_direction(candidate, direction)
     fee_rate = ctx["fees_bps_per_side"] / 10_000
     slippage_rate = ctx["slippage_bps_per_side"] / 10_000
-    result: dict[str, Any] = {"closed": None, "margin_consumed": 0.0, "pyramid_skips": []}
+    result: dict[str, Any] = {"closed": None, "margin_consumed": 0.0, "cash_released": 0.0, "pyramid_skips": []}
 
     # Check hard exit
     cutoff = position["signal_ts"] + timedelta(hours=policy["max_hold_hours"])
@@ -724,9 +749,16 @@ def _manage_position(
                     requested_margin=per_leg_margin,
                 ))
             else:
+                fill_price = _entry_fill_price(
+                    direction=direction,
+                    candle=candle,
+                    reference_price=next_entry,
+                    entry_fill_model=ctx["entry_fill_model"],
+                )
                 leg = _open_leg(
                     leg_number=len(position["legs"]) + 1,
-                    entry_price=next_entry,
+                    entry_price=fill_price,
+                    raw_entry_price=next_entry,
                     entry_ts=ts,
                     tp_pct=policy["tp_pct"],
                     direction=direction,
@@ -782,8 +814,24 @@ def _manage_position(
         # All legs closed — close the position
         result["closed"] = _close_position(position=position, exit_price=closed_legs[-1][2], exit_ts=ts, exit_status=_resolve_exit_status(position["legs"]))
         return result
+    for leg, _, _, _ in closed_legs:
+        if not leg.get("cash_released"):
+            result["cash_released"] += float(leg.get("margin_usdt") or 0) + float(leg.get("net_pnl_usdt") or 0)
+            leg["cash_released"] = True
 
     return result
+
+
+def _entry_fill_price(
+    *,
+    direction: str,
+    candle: dict[str, Any],
+    reference_price: float,
+    entry_fill_model: str,
+) -> float:
+    if entry_fill_model == "adverse_candle_extreme":
+        return float(candle["high"] if direction == "LONG" else candle["low"])
+    return float(reference_price)
 
 
 def _open_position(
@@ -798,7 +846,13 @@ def _open_position(
     candidate = ctx["candidate"]
     direction = signal["direction"]
     policy = _candidate_policy_for_direction(candidate, direction)
-    entry_price = float(signal["reference_price"])
+    reference_price = float(signal["reference_price"])
+    entry_price = _entry_fill_price(
+        direction=direction,
+        candle=candle,
+        reference_price=reference_price,
+        entry_fill_model=ctx["entry_fill_model"],
+    )
     max_legs = int((policy.get("pyramid") or {}).get("max_legs", 1))
     max_legs = max(1, max_legs)
     per_leg_margin = margin_budget / max_legs
@@ -815,6 +869,7 @@ def _open_position(
     leg = _open_leg(
         leg_number=1,
         entry_price=entry_price,
+        raw_entry_price=reference_price,
         entry_ts=signal["signal_ts"],
         tp_pct=policy["tp_pct"],
         direction=direction,
@@ -830,6 +885,8 @@ def _open_position(
         "ctx": ctx,
         "signal": signal,
         "direction": direction,
+        "reference_price": reference_price,
+        "entry_fill_model": ctx["entry_fill_model"],
         "entry_price": entry_price,
         "signal_ts": signal["signal_ts"],
         "position_id": position_id,
@@ -872,6 +929,11 @@ def _close_position(
     exit_fees = sum(float(leg.get("exit_fee_usdt") or 0) for leg in legs)
     slippage = sum(float(leg.get("entry_slippage_usdt") or 0) + float(leg.get("exit_slippage_usdt") or 0) for leg in legs)
     position_margin = sum(float(leg.get("margin_usdt") or 0) for leg in legs)
+    unreleased_legs = [leg for leg in legs if not leg.get("cash_released")]
+    release_margin = sum(float(leg.get("margin_usdt") or 0) for leg in unreleased_legs)
+    release_net_pnl = sum(float(leg.get("net_pnl_usdt") or 0) for leg in unreleased_legs)
+    for leg in unreleased_legs:
+        leg["cash_released"] = True
     position_notional = sum(float(leg.get("entry_notional_usdt") or 0) for leg in legs)
     equity = float(position.get("entry_account_equity") or position_margin)
     equity_after = equity + net_pnl
@@ -892,7 +954,8 @@ def _close_position(
         "open_duration_hours": open_duration_hours,
         "agreement": signal.get("agreement"),
         "decision_direction": direction,
-        "reference_price": round(position["entry_price"], 8),
+        "reference_price": round(position["reference_price"], 8),
+        "entry_fill_model": position["entry_fill_model"],
         "position_id": position["position_id"],
         "entry_status": "FILLED",
         "exit_status": _resolve_exit_status(legs) if exit_status == "HARD_EXIT" else exit_status,
@@ -921,7 +984,7 @@ def _close_position(
         "portfolio_entry_equity_usdt": _round_money(equity),
         "portfolio_margin_allocation_pct": ctx["margin_allocation_pct"],
     }
-    return {"trade": trade, "net_pnl": net_pnl, "position_margin": position_margin}
+    return {"trade": trade, "net_pnl": release_net_pnl, "position_margin": release_margin}
 
 
 def _force_close_position(
@@ -948,6 +1011,7 @@ def _open_leg(
     *,
     leg_number: int,
     entry_price: float,
+    raw_entry_price: float | None = None,
     entry_ts: datetime,
     tp_pct: float,
     direction: str,
@@ -961,7 +1025,7 @@ def _open_leg(
     return {
         "leg": leg_number,
         "entry_price": entry_price,
-        "raw_entry_price": entry_price,
+        "raw_entry_price": entry_price if raw_entry_price is None else raw_entry_price,
         "entry_ts": _to_iso(entry_ts),
         "tp_price": _target_price(entry_price, tp_pct=tp_pct, direction=direction),
         "margin_usdt": margin_usdt,
@@ -1271,7 +1335,14 @@ def _write_artifacts(*, workspace_root: Path, universe_run_id: str, run_id: str,
     index_path = root / "runs" / "index.json"
     index = json.loads(index_path.read_text()) if index_path.is_file() else {"schema_version": "0.1", "artifact_role": "portfolio_backtest_run_index", "runs": []}
     index["runs"] = [item for item in index.get("runs", []) if item.get("run_id") != run_id] + [
-        {"run_id": run_id, "created_at": payload["created_at"], "summary": payload["summary"], "account": payload["account"], "portfolio_backtest_path": str(run_path)}
+        {
+            "run_id": run_id,
+            "created_at": payload["created_at"],
+            "simulation_inputs": payload.get("simulation_inputs", {}),
+            "summary": payload["summary"],
+            "account": payload["account"],
+            "portfolio_backtest_path": str(run_path),
+        }
     ]
     index["latest_run_id"] = run_id
     index_path.write_text(json.dumps(index, indent=2) + "\n")
@@ -1379,12 +1450,15 @@ def _sync_latest_files_after_delete(*, root: Path, next_latest: str | None) -> N
 def _render_summary(payload: dict[str, Any]) -> str:
     account = payload["account"]
     summary = payload["summary"]
+    simulation_inputs = payload.get("simulation_inputs") if isinstance(payload.get("simulation_inputs"), dict) else {}
     return "\n".join(
         [
             "# Portfolio Backtest",
             "",
             f"Pool: `{payload['universe_run_id']}`",
             f"Mode: `candle_by_candle`",
+            f"Signal offset: `{simulation_inputs.get('signal_offset_count', 0)}`",
+            f"Entry fill model: `{simulation_inputs.get('entry_fill_model', 'reference_price')}`",
             f"Ending equity: `${account['ending_equity_usdt']:.4f}`",
             f"Net PnL: `${account['net_pnl_usdt']:.4f}`",
             f"Available cash: `${summary.get('available_cash_usdt', 0):.4f}`",

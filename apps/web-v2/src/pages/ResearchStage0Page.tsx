@@ -23,7 +23,9 @@ import { formatNumber, formatTimestamp } from "../app/format";
 import { queryClient } from "../app/queryClient";
 import { useAppRouter } from "../app/router";
 import { DataTable } from "../components/DataTable";
+import { DetailSkeleton } from "../components/DetailSkeleton";
 import { FieldRow } from "../components/FieldRow";
+import { ListSkeleton } from "../components/ListSkeleton";
 import { SplitPane } from "../components/SplitPane";
 import { StatusBadge } from "../components/StatusBadge";
 import { TerminalPanel } from "../components/TerminalPanel";
@@ -211,6 +213,9 @@ export function ResearchStage0Page() {
   );
   const selectedCandidate = selectedRow ? candidateById.get(selectedRow.candidate_id) : undefined;
   const progress = poolProgress(selectedRun, queueRows);
+  const candidateListLoading = Boolean(selectedRun?.universe_run_id) && queueQuery.isLoading;
+  const candidateDetailsLoading = Boolean(selectedRun?.universe_run_id) && candidatesQuery.isLoading;
+  const candidateEvidenceLoading = candidateListLoading || (Boolean(selectedRow) && candidateDetailsLoading);
 
   const createPoolMutation = useMutation({
     mutationFn: createStage0UniverseRun,
@@ -350,10 +355,10 @@ export function ResearchStage0Page() {
                 <Plus aria-hidden="true" />
               </button>
             </div>
-            {runsQuery.isLoading ? <div className="state-line">Loading training pools...</div> : null}
+            {runsQuery.isLoading ? <ListSkeleton count={6} label="Loading training pools" variant="card" /> : null}
             {runsQuery.error ? <div className="state-line state-line--error">{runsQuery.error.message}</div> : null}
             {deletePoolMutation.error ? <div className="state-line state-line--error">{deletePoolMutation.error.message}</div> : null}
-            {runsQuery.data?.runs.length === 0 ? <div className="state-line">No training pools yet.</div> : null}
+            {!runsQuery.isLoading && runsQuery.data?.runs.length === 0 ? <div className="state-line">No training pools yet.</div> : null}
             {runsQuery.data?.runs.map((run) => (
               <div
                 className={run.universe_run_id === selectedRun?.universe_run_id ? "training-pool-card is-selected" : "training-pool-card"}
@@ -415,8 +420,8 @@ export function ResearchStage0Page() {
                   {isScoring ? "Scoring" : "Score Pending"}
                 </button>
                 <button className="button button--secondary" disabled={runsQuery.isFetching} onClick={() => void runsQuery.refetch()} type="button">
-                  <RefreshCw aria-hidden="true" />
-                  Refresh
+                  <RefreshCw aria-hidden="true" className={runsQuery.isFetching ? "spin-icon" : undefined} />
+                  {runsQuery.isFetching ? "Refreshing" : "Refresh"}
                 </button>
               </div>
             </div>
@@ -472,6 +477,9 @@ export function ResearchStage0Page() {
               <TerminalPanel className="candidate-list-panel" title="Pool Candidates">
                 {queueQuery.error ? <div className="state-line state-line--error">{queueQuery.error.message}</div> : null}
                 {candidatesQuery.error ? <div className="state-line state-line--error">{candidatesQuery.error.message}</div> : null}
+                {queueQuery.isFetching && !candidateListLoading && queueRows.length > 0 ? (
+                  <div className="state-line state-line--subtle">Refreshing pool candidates...</div>
+                ) : null}
                 <DataTable
                   columns={[
                     { key: "asset", header: "Asset", render: (row) => <strong>{row.asset}</strong> },
@@ -483,13 +491,19 @@ export function ResearchStage0Page() {
                   ]}
                   getRowClassName={(row) => row.candidate_id === selectedRow?.candidate_id ? "is-selected" : undefined}
                   getRowKey={(row) => row.candidate_id}
+                  loading={candidateListLoading}
+                  loadingLabel="Loading pool candidates"
+                  loadingRowCount={Math.min(10, Math.max(6, selectedRun?.summary.total_candidates ?? 0))}
+                  emptyLabel={selectedRun ? "No candidates in this training pool." : "Select a training pool to load candidates."}
                   onRowClick={(row) => updateTrainingPoolUrl({ pool: row.universe_run_id, candidate: row.candidate_id })}
                   rows={queueRows}
                 />
               </TerminalPanel>
 
               <TerminalPanel eyebrow={selectedRow?.asset ?? "candidate"} title="Candidate Evidence">
-                {selectedRow ? (
+                {candidateEvidenceLoading ? (
+                  <DetailSkeleton fields={["Asset", "Signal engine", "Evaluated signals", "Trigger rate", "Source packets"]} label="Loading candidate evidence" />
+                ) : selectedRow ? (
                   <div className="field-stack">
                     <FieldRow label="Asset" value={selectedRow.asset} />
                     <FieldRow label="Signal engine" value={selectedRow.signal_engine_id} />
@@ -674,7 +688,7 @@ export function ResearchStage0Page() {
               </div>
             </div>
             <div className="add-ticker-list">
-              {appendableAssetsQuery.isLoading ? <div className="state-line">Loading eligible tickers...</div> : null}
+              {appendableAssetsQuery.isLoading ? <ListSkeleton count={8} label="Loading eligible tickers" /> : null}
               {appendableAssetsQuery.error ? <div className="state-line state-line--error">{appendableAssetsQuery.error.message}</div> : null}
               {appendableAssets.map((asset) => {
                 const selected = appendSelectedSet.has(asset);

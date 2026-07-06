@@ -62,7 +62,9 @@ import { queryClient } from "../app/queryClient";
 import { useAppRouter } from "../app/router";
 import { buildStage1Consistency, type Stage1ConsistencyMonth, type Stage1ConsistencySide } from "../app/stage1Consistency";
 import { DataTable } from "../components/DataTable";
+import { DetailSkeleton } from "../components/DetailSkeleton";
 import { FieldRow } from "../components/FieldRow";
+import { ListSkeleton } from "../components/ListSkeleton";
 import { SplitPane } from "../components/SplitPane";
 import { StatusBadge } from "../components/StatusBadge";
 import { TerminalPanel } from "../components/TerminalPanel";
@@ -95,6 +97,8 @@ type ActiveDevelopmentJob = {
 
 type PortfolioBacktestModalState = {
   initialCapital: number;
+  signalOffsetCount: number;
+  entryFillModel: "reference_price" | "adverse_candle_extreme";
   allocations: Record<string, number>;
   result: PortfolioBacktestResult | null;
 };
@@ -368,6 +372,13 @@ function formatCompactUtcTimestamp(value: string | number | null | undefined): s
     minute: "2-digit",
     hour12: false,
   }).replace(",", "") + " UTC";
+}
+
+function formatPortfolioEntryFillModel(value: string | undefined | null): string {
+  if (value === "adverse_candle_extreme") {
+    return "Worse 5m fill";
+  }
+  return "Normal fill";
 }
 
 function roleIterations(iterations: Stage1IterationSummary[]): Record<Stage1SampleRole, Stage1IterationSummary[]> {
@@ -1298,7 +1309,7 @@ export function ResearchDevelopmentPage() {
     }
     const baseAllocation = completedStage4Assets.length ? Math.min(30, Math.floor(100 / completedStage4Assets.length)) : 0;
     const allocations = Object.fromEntries(completedStage4Assets.map((candidate) => [candidate.asset, baseAllocation]));
-    setPortfolioBacktestModal({ initialCapital: 10000, allocations, result: null });
+    setPortfolioBacktestModal({ initialCapital: 10000, signalOffsetCount: 0, entryFillModel: "reference_price", allocations, result: null });
   };
 
   const closeIterationDetail = () => {
@@ -1338,7 +1349,9 @@ export function ResearchDevelopmentPage() {
     portfolioBacktestMutation.mutate({
       universe_run_id: pool.universe_run_id,
       initial_capital_usdt: portfolioBacktestModal.initialCapital,
-      margin_allocations_pct: portfolioBacktestModal.allocations
+      margin_allocations_pct: portfolioBacktestModal.allocations,
+      signal_offset_count: portfolioBacktestModal.signalOffsetCount,
+      entry_fill_model: portfolioBacktestModal.entryFillModel
     });
   };
 
@@ -1512,8 +1525,8 @@ export function ResearchDevelopmentPage() {
               <strong>{pool ? shortPoolId(pool.universe_run_id) : "No pool"}</strong>
               <span>{splitWindowLine(pool)}</span>
             </div>
-            {queueQuery.isLoading || sessionsQuery.isLoading ? <div className="state-line">Loading development queue...</div> : null}
-            {acceptedRows.length === 0 && !queueQuery.isLoading ? <div className="state-line">No accepted candidates in this training pool.</div> : null}
+            {queueQuery.isLoading || sessionsQuery.isLoading ? <ListSkeleton count={6} label="Loading development queue" variant="card" /> : null}
+            {acceptedRows.length === 0 && !queueQuery.isLoading && !sessionsQuery.isLoading ? <div className="state-line">No accepted candidates in this training pool.</div> : null}
             <div className="development-candidate-list">
               {acceptedRows.map((candidate) => {
                 const candidateStage = developmentVisualStage(candidate);
@@ -1783,7 +1796,7 @@ export function ResearchDevelopmentPage() {
               </button>
             </header>
             <div className="terminal-modal__body">
-              {iterationDetailQuery.isLoading ? <div className="state-line">Loading iteration detail...</div> : null}
+              {iterationDetailQuery.isLoading ? <DetailSkeleton fields={["Iteration", "Bundle", "Score", "Audit", "Signals", "Artifact"]} label="Loading iteration detail" /> : null}
               {iterationDetailQuery.error ? <div className="state-line state-line--error">{iterationDetailQuery.error.message}</div> : null}
               {iterationDetailQuery.data?.detail ? <IterationDetailPanel detail={iterationDetailQuery.data.detail} iteration={selectedIteration} /> : null}
             </div>
@@ -1808,7 +1821,7 @@ export function ResearchDevelopmentPage() {
               </button>
             </header>
             <div className="terminal-modal__body">
-              {stage4CandidateDetailQuery.isLoading ? <div className="state-line">Loading candidate detail...</div> : null}
+              {stage4CandidateDetailQuery.isLoading ? <DetailSkeleton fields={["Candidate", "Net PnL", "Ending equity", "Max drawdown", "Trades", "Equity curve"]} label="Loading Stage 4 candidate detail" /> : null}
               {stage4CandidateDetailQuery.error ? <div className="state-line state-line--error">{stage4CandidateDetailQuery.error.message}</div> : null}
               {stage4CandidateDetailQuery.data?.detail ? <Stage4CandidateDetailPanel detail={stage4CandidateDetailQuery.data.detail} /> : null}
             </div>
@@ -2231,7 +2244,6 @@ function Stage1Panel({
           </div>
 
           <TerminalPanel className="iteration-ledger-panel" title="Iteration Ledger">
-            {loadingIterations ? <div className="state-line">Loading iterations...</div> : null}
             <DataTable
               columns={[
                 { key: "id", header: "Iteration", render: (iteration) => <strong>{iteration.iteration_id}</strong> },
@@ -2268,6 +2280,10 @@ function Stage1Panel({
               getRowKey={(iteration) => iteration.iteration_id}
               onRowClick={onOpenIteration}
               rows={iterations.slice().reverse()}
+              loading={loadingIterations}
+              loadingLabel="Loading iterations"
+              loadingRowCount={6}
+              emptyLabel="No Stage 1 iterations yet."
             />
           </TerminalPanel>
         </>
@@ -3302,6 +3318,36 @@ function PortfolioBacktestModal({
                         <em>USDT</em>
                       </div>
                     </label>
+                    <label className="portfolio-capital-field portfolio-capital-field--compact">
+                      <span>Signal Offset</span>
+                      <div className="portfolio-capital-field__input">
+                        <input
+                          min={0}
+                          onChange={(event) => {
+                            const next = Math.max(0, Math.floor(Number(event.target.value)));
+                            onStateChange((current) => (current ? { ...current, signalOffsetCount: Number.isFinite(next) ? next : current.signalOffsetCount } : current));
+                          }}
+                          step={1}
+                          type="number"
+                          value={state.signalOffsetCount}
+                        />
+                        <em>signals</em>
+                      </div>
+                    </label>
+                    <label className="portfolio-capital-field portfolio-capital-field--compact portfolio-fill-model-field">
+                      <span>Entry Fill</span>
+                      <select
+                        className="portfolio-fill-model-select"
+                        onChange={(event) => {
+                          const next = event.target.value === "adverse_candle_extreme" ? "adverse_candle_extreme" : "reference_price";
+                          onStateChange((current) => (current ? { ...current, entryFillModel: next } : current));
+                        }}
+                        value={state.entryFillModel}
+                      >
+                        <option value="reference_price">Normal fill</option>
+                        <option value="adverse_candle_extreme">Worse 5m fill</option>
+                      </select>
+                    </label>
                     <div className="portfolio-account-facts">
                       <div>
                         <span>Eligible</span>
@@ -3371,7 +3417,7 @@ function PortfolioBacktestModal({
                         <button className="portfolio-run-history-main" onClick={() => onLoadRun(run.run_id)} type="button">
                           <strong>{run.run_id === latestRunId ? "Latest" : formatCompactUtcTimestamp(run.created_at)}</strong>
                           <span>{formatUsd(run.account?.ending_equity_usdt)} · {formatUsd(run.account?.net_pnl_usdt)} PnL</span>
-                          <small>{formatNumber(run.summary?.executed_positions)} trades · {formatNumber(run.summary?.skipped_signals)} skipped</small>
+                          <small>{formatNumber(run.summary?.executed_positions)} trades · {formatNumber(run.summary?.skipped_signals)} skipped · offset {formatNumber(run.simulation_inputs?.signal_offset_count ?? 0)} · {formatPortfolioEntryFillModel(run.simulation_inputs?.entry_fill_model)}</small>
                         </button>
                         <div className="portfolio-run-history-actions">
                           <button
@@ -3426,6 +3472,8 @@ function PortfolioBacktestModal({
                     <span>PF {result.account.profit_factor != null ? result.account.profit_factor.toFixed(2) : "-"}</span>
                     <span>Fees {formatUsd(result.account.total_fees_usdt)}</span>
                     <span>Skips {formatNumber((result.summary.skipped_insufficient_margin ?? 0) + (result.summary.skipped_asset_open ?? 0) + (result.summary.skipped_timing_filter ?? 0))}</span>
+                    <span>Offset {formatNumber(result.simulation_inputs.signal_offset_count ?? 0)}</span>
+                    <span>{formatPortfolioEntryFillModel(result.simulation_inputs.entry_fill_model)}</span>
                   </div>
                 </div>
 

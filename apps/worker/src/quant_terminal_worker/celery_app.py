@@ -4,8 +4,9 @@ import os
 from datetime import UTC, datetime
 
 from celery import Celery
-from celery.signals import heartbeat_sent, worker_ready, worker_shutting_down
+from celery.signals import heartbeat_sent, worker_process_shutdown, worker_ready, worker_shutting_down
 
+from quant_terminal_api.db.engine import dispose_cached_engines
 from quant_terminal_api.repositories.runtime import RuntimeRepository
 
 def _broker_url() -> str:
@@ -70,4 +71,12 @@ def _on_worker_heartbeat(sender: object, **_: object) -> None:
 
 @worker_shutting_down.connect
 def _on_worker_shutdown(sender: object, **_: object) -> None:
-    _record_celery_worker_heartbeat(sender, status="offline")
+    try:
+        _record_celery_worker_heartbeat(sender, status="offline")
+    finally:
+        dispose_cached_engines()
+
+
+@worker_process_shutdown.connect
+def _on_worker_process_shutdown(**_: object) -> None:
+    dispose_cached_engines()

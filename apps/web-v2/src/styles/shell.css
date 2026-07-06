@@ -363,6 +363,7 @@
   min-height: 58px;
   padding: var(--space-3);
   text-align: left;
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease, transform 120ms ease;
 }
 
 .entity-row {
@@ -443,6 +444,44 @@
 .route-card.is-selected {
   background: color-mix(in oklch, var(--surface-selected) 70%, transparent);
   border-color: var(--line-strong);
+}
+
+.entity-row:hover,
+.route-card:hover {
+  border-color: var(--line-strong);
+}
+
+.entity-row:focus-visible,
+.entity-row__main:focus-visible,
+.route-card:focus-visible,
+.signal-pool-card:focus-visible,
+.training-pool-card__main:focus-visible,
+.development-candidate-card:focus-visible,
+.ticker-option:focus-visible,
+.filter-chip:focus-visible,
+.stage-tab:focus-visible {
+  outline: 2px solid color-mix(in oklch, var(--status-live) 72%, white);
+  outline-offset: 2px;
+}
+
+.list-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.list-skeleton__item {
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 58px;
+  padding: var(--space-3);
+}
+
+.list-skeleton--card .list-skeleton__item {
+  min-height: 106px;
 }
 
 .route-card {
@@ -1398,6 +1437,7 @@
   min-height: 112px;
   padding: var(--space-3);
   text-align: left;
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease, transform 120ms ease;
 }
 
 .training-pool-card {
@@ -1435,6 +1475,12 @@
 .training-pool-card.is-selected,
 .development-candidate-card.is-selected {
   background: color-mix(in oklch, var(--surface-selected) 70%, transparent);
+  border-color: var(--line-strong);
+}
+
+.signal-pool-card:hover,
+.training-pool-card:hover,
+.development-candidate-card:hover {
   border-color: var(--line-strong);
 }
 
@@ -1548,6 +1594,19 @@
 
 .field-row strong {
   font-weight: 650;
+}
+
+.field-row--loading {
+  gap: var(--space-3);
+}
+
+.field-row--loading .table-loading-cell {
+  flex: 0 0 84px;
+}
+
+.candidate-evidence-loading,
+.detail-skeleton {
+  min-height: 156px;
 }
 
 .required-data-panel {
@@ -1964,6 +2023,12 @@
   gap: var(--space-2);
   min-height: 28px;
   padding: 0 var(--space-3);
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.filter-chip:hover {
+  border-color: var(--line-strong);
+  color: var(--ink-primary);
 }
 
 .filter-chip span {
@@ -1984,6 +2049,7 @@
   color: var(--ink-secondary);
   cursor: pointer;
   padding: 0 var(--space-1);
+  transition: border-color 140ms ease, color 140ms ease;
 }
 
 .stage-tab.is-active {
@@ -2061,6 +2127,12 @@
 .state-line--warn {
   border-color: color-mix(in oklch, var(--status-warn) 55%, var(--line-subtle));
   color: var(--status-warn);
+}
+
+.state-line--subtle {
+  background: color-mix(in oklch, var(--surface-raised) 55%, transparent);
+  color: var(--ink-muted);
+  padding-block: var(--space-2);
 }
 
 .state-card {
@@ -2926,6 +2998,43 @@
 
 .portfolio-capital-field__input input:focus {
   color: var(--status-live);
+}
+
+.portfolio-capital-field--compact {
+  grid-template-columns: minmax(0, 1fr) minmax(80px, 0.6fr);
+  align-items: center;
+}
+
+.portfolio-capital-field--compact > span {
+  line-height: 1.2;
+}
+
+.portfolio-capital-field--compact .portfolio-capital-field__input input {
+  font-size: 18px;
+}
+
+.portfolio-fill-model-field {
+  gap: var(--space-2);
+}
+
+.portfolio-fill-model-select {
+  appearance: none;
+  background: color-mix(in oklch, var(--surface-raised) 80%, transparent);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-xs);
+  color: var(--ink-primary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  min-height: 30px;
+  min-width: 0;
+  outline: none;
+  padding: 0 var(--space-2);
+  width: 100%;
+}
+
+.portfolio-fill-model-select:focus {
+  border-color: color-mix(in oklch, var(--status-live) 72%, var(--line-strong));
 }
 
 .portfolio-capital-field__input em {
@@ -3986,6 +4095,20 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .entity-row,
+  .entity-row__main,
+  .filter-chip,
+  .route-card,
+  .signal-pool-card,
+  .stage-tab,
+  .ticker-option,
+  .training-pool-card,
+  .training-pool-card__main,
+  .development-candidate-card,
+  .nav-item__chevron {
+    transition: none;
+  }
+
   .stage4-equity-curve__area,
   .stage4-equity-curve__brush,
   .stage4-equity-curve__endpoint,
@@ -4233,6 +4356,7 @@
   min-height: 56px;
   padding: var(--space-3);
   text-align: left;
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
 }
 
 .ticker-option:hover:not(:disabled) {

@@ -8,7 +8,7 @@ import re
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -175,6 +175,8 @@ class Stage4RealizedExpectancyRequest(BaseModel):
 class PortfolioBacktestRequest(BaseModel):
     initial_capital_usdt: float = Field(default=10_000.0, gt=0)
     margin_allocations_pct: dict[str, float] = Field(default_factory=dict)
+    signal_offset_count: int = Field(default=0, ge=0)
+    entry_fill_model: Literal["reference_price", "adverse_candle_extreme"] = "reference_price"
 
 
 class LegacySignalImportRequest(BaseModel):
@@ -1260,6 +1262,8 @@ def create_app(
                 "universe_run_id": universe_run_id,
                 "initial_capital_usdt": request.initial_capital_usdt,
                 "margin_allocations_pct": request.margin_allocations_pct,
+                "signal_offset_count": request.signal_offset_count,
+                "entry_fill_model": request.entry_fill_model,
             },
             current_step="queued",
         )
@@ -1273,6 +1277,8 @@ def create_app(
                 sessions=sessions,
                 initial_capital_usdt=request.initial_capital_usdt,
                 margin_allocations_pct=request.margin_allocations_pct,
+                signal_offset_count=request.signal_offset_count,
+                entry_fill_model=request.entry_fill_model,
                 repository=get_runtime_repository(),
             )
         except ValueError as exc:
@@ -1986,9 +1992,16 @@ def create_app(
             for session in repository.list_stage1_research_sessions()
             if session.get("source_universe_run_id") == universe_run_id
         ]
+        linked_candidates = repository.list_stage0_universe_candidates(universe_run_id)
         _ensure_stage0_universe_run_deletable(repository=repository, linked_sessions=linked_sessions)
         linked_session_ids = [session["session_id"] for session in linked_sessions]
         repository.delete_stage0_universe_run(universe_run_id)
+        _delete_stage0_universe_artifacts(
+            workspace_root=Path.cwd(),
+            universe_run_id=universe_run_id,
+            candidates=linked_candidates,
+            linked_sessions=linked_sessions,
+        )
         return {
             "status": "deleted",
             "universe_run_id": universe_run_id,
@@ -3316,6 +3329,61 @@ def _ensure_stage0_universe_run_deletable(*, repository: Any, linked_sessions: l
             ]
         if bundles:
             raise HTTPException(status_code=409, detail="Training pool has linked promoted execution bundles")
+
+
+def _delete_stage0_universe_artifacts(
+    *,
+    workspace_root: Path,
+    universe_run_id: str,
+    candidates: list[dict[str, Any]],
+    linked_sessions: list[dict[str, Any]],
+) -> None:
+    paths: list[Path] = [
+        workspace_root / "dev" / "stage0" / universe_run_id,
+        workspace_root / "dev" / "portfolio_backtests" / universe_run_id,
+    ]
+    for candidate in candidates:
+        artifact_root = (candidate.get("metrics") or {}).get("artifact_root")
+        if artifact_root and universe_run_id in Path(str(artifact_root)).parts:
+            paths.append(Path(str(artifact_root)))
+    for session in linked_sessions:
+        artifact_root = session.get("artifact_root")
+        if artifact_root:
+            paths.append(Path(str(artifact_root)))
+
+    resolved_paths = {
+        resolved
+        for path in paths
+        if (resolved := _resolve_deletable_workspace_artifact(workspace_root=workspace_root, path=path)) is not None
+    }
+    for path in sorted(resolved_paths, key=lambda item: len(item.parts)):
+        if not path.exists():
+            continue
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+
+def _resolve_deletable_workspace_artifact(*, workspace_root: Path, path: Path) -> Path | None:
+    workspace = workspace_root.resolve()
+    candidate = path if path.is_absolute() else workspace / path
+    resolved = candidate.resolve(strict=False)
+    allowed_roots = [
+        workspace / "dev" / "stage0",
+        workspace / "dev" / "training_sessions",
+        workspace / "dev" / "portfolio_backtests",
+    ]
+    for allowed_root in allowed_roots:
+        allowed = allowed_root.resolve(strict=False)
+        if resolved == allowed:
+            return None
+        try:
+            resolved.relative_to(allowed)
+        except ValueError:
+            continue
+        return resolved
+    return None
 
 
 def _delete_filesystem_path(path_value: Any) -> bool:

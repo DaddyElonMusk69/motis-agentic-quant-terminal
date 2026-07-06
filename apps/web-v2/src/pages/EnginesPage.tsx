@@ -24,7 +24,9 @@ import { formatNumber, formatTimestamp } from "../app/format";
 import { queryClient } from "../app/queryClient";
 import { useAppRouter } from "../app/router";
 import { DataTable } from "../components/DataTable";
+import { DetailSkeleton } from "../components/DetailSkeleton";
 import { FieldRow } from "../components/FieldRow";
+import { ListSkeleton } from "../components/ListSkeleton";
 import { SplitPane } from "../components/SplitPane";
 import { StatusBadge } from "../components/StatusBadge";
 import { TerminalPanel } from "../components/TerminalPanel";
@@ -270,8 +272,10 @@ function PacketPreview({ error, loading, signals }: { error: Error | null; loadi
   const sample = signals?.[0];
   return (
     <TerminalPanel eyebrow={sample?.payload_schema ?? "packet"} title="Packet Sample">
-      {loading ? <div className="state-line">Loading packet sample...</div> : null}
       {error ? <div className="state-line state-line--error">{error.message}</div> : null}
+      {loading ? (
+        <DetailSkeleton fields={["Signal ID", "Timestamp", "Asset", "Schema"]} label="Loading packet sample" />
+      ) : null}
       {!loading && !error && !sample ? <div className="state-line">No signal packet available for this pool.</div> : null}
       {sample ? (
         <>
@@ -461,9 +465,9 @@ export function EnginesPage() {
                   <span>Signal Engines</span>
                   <SlidersHorizontal aria-hidden="true" />
                 </div>
-                {enginesQuery.isLoading ? <div className="state-line">Loading signal engine catalog...</div> : null}
+                {enginesQuery.isLoading ? <ListSkeleton count={6} label="Loading signal engine catalog" /> : null}
                 {enginesQuery.error ? <div className="state-line state-line--error">{enginesQuery.error.message}</div> : null}
-                {orderedEngines.length === 0 ? <div className="state-line">No signal engines registered.</div> : null}
+                {!enginesQuery.isLoading && orderedEngines.length === 0 ? <div className="state-line">No signal engines registered.</div> : null}
                 {orderedEngines.map((engine) => (
                   <div className="entity-row entity-row--with-menu" key={engine.signal_engine_id}>
                     <button className="entity-row__main" onClick={() => updateEngineUrl({ engine: engine.signal_engine_id })} type="button">
@@ -501,7 +505,7 @@ export function EnginesPage() {
                   </button>
                   <span>{selectedEngine.signal_engine_id}</span>
                 </div>
-                {signalSetsQuery.isLoading ? <div className="state-line">Loading signal pools...</div> : null}
+                {signalSetsQuery.isLoading ? <ListSkeleton count={7} label="Loading signal pools" variant="card" /> : null}
                 {signalSetsQuery.error ? <div className="state-line state-line--error">{signalSetsQuery.error.message}</div> : null}
                 {!signalSetsQuery.isLoading && signalSets.length === 0 ? <div className="state-line">No signal pools registered for this engine.</div> : null}
                 {signalSets.map((set) => {
@@ -539,7 +543,7 @@ export function EnginesPage() {
                   <h1>Signal Engines</h1>
                 </div>
                 <button className="button button--secondary" disabled={enginesQuery.isFetching} onClick={() => void enginesQuery.refetch()} type="button">
-                  <RefreshCw aria-hidden="true" />
+                  <RefreshCw aria-hidden="true" className={enginesQuery.isFetching ? "spin-icon" : undefined} />
                   {enginesQuery.isFetching ? "Refreshing" : "Refresh"}
                 </button>
               </div>
@@ -591,7 +595,13 @@ export function EnginesPage() {
                   getRowKey={(row) => row.signal_engine_id}
                   onRowClick={(row) => updateEngineUrl({ engine: row.signal_engine_id })}
                   rows={orderedEngines}
+                  loading={enginesQuery.isLoading}
+                  loadingLabel="Loading signal engines"
+                  emptyLabel="No signal engines registered."
                 />
+                {enginesQuery.isFetching && !enginesQuery.isLoading && orderedEngines.length > 0 ? (
+                  <div className="state-line state-line--subtle">Refreshing signal engine catalog...</div>
+                ) : null}
               </TerminalPanel>
             </>
           ) : (
@@ -617,7 +627,7 @@ export function EnginesPage() {
                   onClick={() => selectedSignalSet && signalUpdateMutation.mutate({ signal_engine_id: selectedSignalSet.signal_engine_id, asset: selectedSignalSet.asset })}
                   type="button"
                 >
-                  <RefreshCw aria-hidden="true" />
+                  <RefreshCw aria-hidden="true" className={isUpdatingSelected ? "spin-icon" : undefined} />
                   {isUpdatingSelected ? "Updating Signals" : "Update Selected Pool"}
                 </button>
               </div>
@@ -748,7 +758,7 @@ export function EnginesPage() {
               </div>
             </div>
             <div className="add-ticker-list">
-              {catalogQuery.isLoading ? <div className="state-line">Loading data catalog...</div> : null}
+              {catalogQuery.isLoading ? <ListSkeleton count={8} label="Loading data catalog" /> : null}
               {catalogQuery.error ? <div className="state-line state-line--error">{catalogQuery.error.message}</div> : null}
               {catalogQuery.data?.assets.map((asset) => {
                 const state = assetRequirementState(asset, selectedEngine);
@@ -836,10 +846,9 @@ function LiveObservationsModal({
               <FieldRow label="Ownership" value="Engine + asset" />
               <FieldRow label="Training usage" value="Excluded from canonical pools" />
             </div>
-            {loading ? <div className="state-line">Loading live observations...</div> : null}
             {error ? <div className="state-line state-line--error">{error.message}</div> : null}
             {!loading && observations.length === 0 ? <div className="state-line">No live signals observed for this engine asset pair.</div> : null}
-            {observations.length ? (
+            {loading || observations.length ? (
               <DataTable
                 columns={[
                   { key: "time", header: "Signal Time", render: (row) => formatTimestamp(row.signal_timestamp) },
@@ -850,6 +859,9 @@ function LiveObservationsModal({
                 getRowKey={(row) => row.observation_id}
                 onRowClick={(row) => onSelectObservation(row.observation_id)}
                 rows={observations}
+                loading={loading}
+                loadingLabel="Loading live observations"
+                emptyLabel="No live observations recorded."
               />
             ) : null}
           </TerminalPanel>

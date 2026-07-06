@@ -1213,6 +1213,79 @@ def test_stage0_universe_run_delete_removes_linked_stage1_sessions():
     assert repository.stage1_sessions == []
 
 
+def test_stage0_universe_run_delete_removes_linked_artifact_directories(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    universe_run_id = "universe-march-may-vegas"
+    stage0_pool_root = tmp_path / "dev" / "stage0" / universe_run_id
+    stage1_root = tmp_path / "dev" / "training_sessions" / "aave-vegas-tunnel-v01" / "stage1-aave"
+    portfolio_root = tmp_path / "dev" / "portfolio_backtests" / universe_run_id
+    unrelated_root = tmp_path / "dev" / "stage0" / "other-pool"
+    for root in (stage0_pool_root, stage1_root, portfolio_root, unrelated_root):
+        root.mkdir(parents=True)
+        (root / "artifact.json").write_text("{}")
+    repository = StubRuntimeRepository()
+    repository.universe_run = {
+        "universe_run_id": universe_run_id,
+        "window_start": "2026-03-01T00:00:00Z",
+        "window_end": "2026-05-30T23:59:59Z",
+        "forward_hours": 36,
+        "trigger_rate_threshold_pct": 85,
+        "config_hash": "hash",
+        "engine_filter": ["vegas_ema"],
+        "status": "created",
+        "summary": {},
+    }
+    repository.universe_candidates = [
+        {
+            "candidate_id": "candidate-aave",
+            "universe_run_id": universe_run_id,
+            "signal_set_key": "vegas_ema:AAVE:2026-AAVE-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "AAVE",
+            "signal_set_id": "2026-AAVE-2h-dedupe-vote2",
+            "packet_count": 329,
+            "trigger_rate_pct": None,
+            "branch_path": "pending",
+            "acceptance_status": "accepted",
+            "duplicate_status": "new",
+            "existing_strategy_id": None,
+            "last_error": {},
+            "metrics": {"artifact_root": str(stage0_pool_root / "vegas_ema" / "AAVE")},
+        }
+    ]
+    repository.stage1_sessions = [
+        {
+            "session_id": "stage1-aave",
+            "source_universe_run_id": universe_run_id,
+            "source_candidate_id": "candidate-aave",
+            "signal_set_key": "vegas_ema:AAVE:2026-AAVE-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "AAVE",
+            "signal_set_id": "2026-AAVE-2h-dedupe-vote2",
+            "strategy_id": "aave-vegas-tunnel-v01",
+            "strategy_version": "v0.1",
+            "train_start": "2026-03-01",
+            "train_end": "2026-04-30",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
+            "artifact_root": str(stage1_root),
+            "status": "draft",
+            "manifest": {},
+        }
+    ]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.delete(f"/api/v1/research/stage0-universe-runs/{universe_run_id}")
+
+    assert response.status_code == 200
+    assert not stage0_pool_root.exists()
+    assert not stage1_root.exists()
+    assert not portfolio_root.exists()
+    assert unrelated_root.exists()
+
+
 def test_stage0_universe_run_delete_blocks_when_linked_session_has_execution_bundle():
     repository = StubRuntimeRepository()
     repository.universe_run = {
@@ -4010,7 +4083,12 @@ def test_portfolio_backtest_endpoint_writes_pool_artifacts(tmp_path, monkeypatch
         json.dumps({"run_id": "stage4-run", "candidates": [{"candidate_id": "market", "trades": []}]})
     )
     (promotion_root / "stage1a_canonical_full_cycle_scores.json").write_text(
-        json.dumps({"records": [{"signal_id": "sig-1", "decision_direction": "LONG", "agreement": "MATCH"}]})
+        json.dumps({
+            "records": [
+                {"signal_id": "sig-1", "decision_direction": "LONG", "agreement": "MATCH"},
+                {"signal_id": "sig-2", "decision_direction": "LONG", "agreement": "MATCH"},
+            ]
+        })
     )
 
     # Set up repository signals with proper packet structure
@@ -4030,7 +4108,23 @@ def test_portfolio_backtest_endpoint_writes_pool_artifacts(tmp_path, monkeypatch
                 "active_timeframes": ["5m"],
                 "charts": {"5m": {"latest_forming_candle": {"close": 100.0}}},
             },
-        }
+        },
+        {
+            "signal_id": "sig-2",
+            "signal_set_key": session["signal_set_key"],
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "AAVE",
+            "instrument": "AAVE-USDT-SWAP",
+            "timestamp": "2026-04-20T01:00:00Z",
+            "data_refs": [],
+            "payload_schema": "signal_packet.v2",
+            "payload": {
+                "timestamp": "2026-04-20T01:00:00Z",
+                "active_timeframes": ["5m"],
+                "charts": {"5m": {"latest_forming_candle": {"close": 100.0}}},
+            },
+        },
     ]
 
     # Mock MarketDataReader to return simple candles
@@ -4058,13 +4152,21 @@ def test_portfolio_backtest_endpoint_writes_pool_artifacts(tmp_path, monkeypatch
 
     response = client.post(
         "/api/v1/research/stage0-universe-runs/universe-march-may-vegas/portfolio-backtest",
-        json={"initial_capital_usdt": 1000, "margin_allocations_pct": {"AAVE": 30}},
+        json={
+            "initial_capital_usdt": 1000,
+            "margin_allocations_pct": {"AAVE": 30},
+            "signal_offset_count": 1,
+            "entry_fill_model": "adverse_candle_extreme",
+        },
     )
 
     assert response.status_code == 200
     result = response.json()["portfolio_backtest"]
     assert result["summary"]["eligible_asset_count"] == 1
     assert result["summary"]["executed_positions"] == 1
+    assert result["simulation_inputs"]["signal_offset_count"] == 1
+    assert result["simulation_inputs"]["entry_fill_model"] == "adverse_candle_extreme"
+    assert result["trade_ledger"][0]["signal_id"] == "sig-2"
     assert result["portfolio_backtest_path"].endswith("dev/portfolio_backtests/universe-march-may-vegas/portfolio_backtest.json")
     assert (tmp_path / result["portfolio_backtest_path"]).exists()
 
@@ -4073,6 +4175,8 @@ def test_portfolio_backtest_endpoint_writes_pool_artifacts(tmp_path, monkeypatch
     history = history_response.json()["portfolio_backtest_runs"]
     assert history["latest_run_id"] == result["run_id"]
     assert [item["run_id"] for item in history["runs"]] == [result["run_id"]]
+    assert history["runs"][0]["simulation_inputs"]["signal_offset_count"] == 1
+    assert history["runs"][0]["simulation_inputs"]["entry_fill_model"] == "adverse_candle_extreme"
 
     run_response = client.get(f"/api/v1/research/stage0-universe-runs/universe-march-may-vegas/portfolio-backtest/runs/{result['run_id']}")
     assert run_response.status_code == 200

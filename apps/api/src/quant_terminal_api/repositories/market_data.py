@@ -3,9 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy import create_engine, select, update
+from sqlalchemy import select, update
 from sqlalchemy.sql.dml import Insert
 
+from quant_terminal_api.db.engine import get_database_engine
 from quant_terminal_api.db.models import data_sources, market_data_refs
 
 
@@ -41,7 +42,7 @@ def build_market_data_ref_upsert(registration: dict[str, Any]) -> Insert:
 
 class PostgresMarketDataRepository:
     def __init__(self, database_url: str) -> None:
-        self.engine = create_engine(database_url)
+        self.engine = get_database_engine(database_url)
 
     def list_refs(self) -> list[dict[str, Any]]:
         statement = select(market_data_refs).order_by(

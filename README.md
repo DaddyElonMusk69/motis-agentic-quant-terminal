@@ -279,20 +279,28 @@ parse JSON, record command outputs, and enforce idempotent client order ids.
 Routes must still be promoted, warmed, manually armed, and enabled before live
 execution is allowed by the SDK.
 
-## OKX Candle Ingestion
+## Exchange Connectivity
 
-The worker ingestion path fetches candles through the OKX adapter, normalizes
-OKX candle arrays, writes partitioned Parquet, and returns a registration
-payload matching `market_data_refs`.
+Motis currently connects exchange accounts through local exchange CLIs rather
+than storing live API credentials directly inside the platform.
 
-Core module:
+This boundary is intentional. The local CLI acts as the security boundary for
+account access and order submission, while Motis focuses on orchestrating the
+research, routing, validation, and execution workflow around that connection.
+In practice, that means a local OKX CLI can be used today, and the same adapter
+shape can later be extended to other exchange CLIs that expose machine-readable
+command output.
 
-```text
-apps/worker/src/quant_terminal_worker/ingestion/okx_candles.py
-```
+The platform does not ask strategy code or agents to talk to an exchange
+directly. Worker adapters own that responsibility:
 
-The API repository layer exposes a matching insert builder:
+- invoking the local exchange CLI;
+- parsing structured output;
+- recording command results;
+- applying route and order safety rules;
+- preserving idempotent execution behavior.
 
-```text
-apps/api/src/quant_terminal_api/repositories/market_data.py
-```
+This gives users a safer connection model in V1 while the platform proves the
+research and execution workflow in live conditions. Direct API-based exchange
+connectivity can be added later behind the same adapter boundary once the
+security and operational model is ready.
