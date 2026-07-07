@@ -13,6 +13,8 @@ DEFAULT_FORWARD_HOURS = 36
 DEFAULT_FEES_BPS_PER_SIDE = 5.0
 DEFAULT_LEVERAGE = 5
 DEFAULT_SL_MULTIPLIERS = [0.75, 1.0, 1.25]
+DEFAULT_STAGE3_MIN_FULL_CYCLE_NET_PNL_PCT = 0.0
+DEFAULT_STAGE3_MIN_FULL_CYCLE_PROFIT_FACTOR = 1.0
 
 
 def run_stage3_grid_search(
@@ -184,7 +186,8 @@ def run_stage3_local_variants(
         )
         for config in local_configs
     ]
-    ranked = sorted([row for row in [fixed_result, exact_result, *local_results] if row], key=_ranking_key, reverse=True)
+    rankable = [_with_stage3_ranking_diagnostics(row) for row in [fixed_result, exact_result, *local_results] if row]
+    ranked = sorted(rankable, key=_walk_forward_ranking_key, reverse=True)
     top = ranked[:shortlist_size]
     stage4_candidates = _build_stage4_candidates(
         session=session,
@@ -208,7 +211,7 @@ def run_stage3_local_variants(
             "stage3c_shortlist": top,
             "results": ranked,
             "optimal": {
-                "criterion": "max_net_pnl_then_profit_factor_then_wr_then_fewer_initial_sl",
+                "criterion": "walk_forward_net_pnl_with_full_cycle_guardrails",
                 "best": ranked[0] if ranked else {},
                 "top_5": top,
             },
@@ -344,7 +347,7 @@ def _base_stage3_artifact(context: dict[str, Any]) -> dict[str, Any]:
         "stage3c_value_ranges": {},
         "stage3c_shortlist": [],
         "results": [],
-        "optimal": {"criterion": "max_net_pnl_then_profit_factor_then_wr_then_fewer_initial_sl", "best": {}, "top_5": []},
+        "optimal": {"criterion": "walk_forward_net_pnl_with_full_cycle_guardrails", "best": {}, "top_5": []},
         "stage4_candidates": {"candidates": []},
     }
 
@@ -1060,6 +1063,12 @@ def _build_stage4_candidates(
                     "protected_sl_count": row["protected_sl_count"],
                     "time_exit_count": row["time_exit_count"],
                 },
+                "selection_diagnostics": {
+                    "stage3_ranking": {
+                        "criterion": "walk_forward_net_pnl_with_full_cycle_guardrails",
+                        **(row.get("ranking_diagnostics") or {}),
+                    }
+                },
             }
         )
     return {
@@ -1160,6 +1169,51 @@ def _ranking_key(row: dict[str, Any]) -> tuple[float, float, float, int]:
         float(row.get("profit_factor", 0.0)),
         float(row.get("wr", 0.0)),
         -int(row.get("initial_sl_count", 0)),
+    )
+
+
+def _stage3_ranking_diagnostics(row: dict[str, Any]) -> dict[str, Any]:
+    slices = row.get("slice_split") or {}
+    wf = slices.get("walk_forward_test") or {}
+    full_cycle_net = float(row.get("net_pnl_pct", 0.0))
+    full_cycle_pf = float(row.get("profit_factor", 0.0))
+    wf_total = int(wf.get("total", 0))
+    wf_net = float(wf.get("net_pnl_pct", 0.0))
+    wf_pf = float(wf.get("profit_factor", 0.0))
+    return {
+        "walk_forward_total": wf_total,
+        "walk_forward_net_pnl_pct": wf_net,
+        "walk_forward_profit_factor": wf_pf,
+        "walk_forward_viable": wf_total > 0 and wf_net > 0 and wf_pf >= 1.0,
+        "full_cycle_net_pnl_pct": full_cycle_net,
+        "full_cycle_profit_factor": full_cycle_pf,
+        "full_cycle_viable": (
+            full_cycle_net >= DEFAULT_STAGE3_MIN_FULL_CYCLE_NET_PNL_PCT
+            and full_cycle_pf >= DEFAULT_STAGE3_MIN_FULL_CYCLE_PROFIT_FACTOR
+        ),
+        "protection_enabled": bool(row.get("protection_enabled")),
+    }
+
+
+def _with_stage3_ranking_diagnostics(row: dict[str, Any]) -> dict[str, Any]:
+    return {**row, "ranking_diagnostics": _stage3_ranking_diagnostics(row)}
+
+
+def _walk_forward_ranking_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    diagnostics = row.get("ranking_diagnostics") or _stage3_ranking_diagnostics(row)
+    wf_total = int(diagnostics["walk_forward_total"])
+    if wf_total <= 0:
+        return _ranking_key(row)
+    return (
+        bool(diagnostics["full_cycle_viable"]),
+        bool(diagnostics["walk_forward_viable"]),
+        float(diagnostics["walk_forward_net_pnl_pct"]),
+        float(diagnostics["walk_forward_profit_factor"]),
+        float(diagnostics["full_cycle_net_pnl_pct"]),
+        float(diagnostics["full_cycle_profit_factor"]),
+        bool(row.get("protection_enabled")),
+        float(row.get("wr", 0.0)),
+        -float(row.get("initial_sl_pct", 0.0)),
     )
 
 

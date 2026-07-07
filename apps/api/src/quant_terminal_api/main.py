@@ -1005,6 +1005,9 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         selected = side_policies["LONG"]
+        guardrail_by_tp = ((capture.get("stage3_input") or {}).get("walk_forward_guardrail") or {})
+        selected_tp_key = f"{float(selected['lock_profit_pct']):.1f}"
+        selected_guardrail = guardrail_by_tp.get(selected_tp_key, {})
 
         policy = {
             "schema_version": "0.1",
@@ -1020,6 +1023,7 @@ def create_app(
             "source": {
                 "capture_curve_path": str(capture_path),
                 "selection_source": "stage2_capture_curve_tp_and_sl_bands",
+                "walk_forward_guardrail": selected_guardrail,
             },
         }
         policy_path = promotion_root / "stage2_exit_policy.json"

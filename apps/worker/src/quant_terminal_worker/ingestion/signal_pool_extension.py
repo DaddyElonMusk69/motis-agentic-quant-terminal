@@ -77,21 +77,31 @@ def extend_signal_pool_from_local_candles(
         workspace_root=root,
     )
     parameters = _engine_parameters(signal_set, defaults=_spec_default_parameters(resolved.spec))
+    generation_parameters = dict(parameters)
+    if previous_signal_end is not None:
+        generation_parameters["_dedupe_seed_timestamp"] = _iso_z(previous_signal_end)
+    dedupe_window = timedelta(minutes=int(parameters.get("dedupe_window_minutes", 120)))
     stream_state = {
         "generated_packet_count": 0,
         "appended_packet_count": 0,
         "final_signal_end": previous_signal_end,
+        "last_admitted_signal_ts": previous_signal_end,
     }
 
     def packet_sink(packets: list[dict[str, Any]]) -> None:
         if not packets:
             return
         stream_state["generated_packet_count"] += len(packets)
-        new_packets = [
-            packet
-            for packet in packets
-            if _parse_timestamp(str(packet["timestamp"])) not in existing_timestamps
-        ]
+        new_packets = []
+        for packet in sorted(packets, key=lambda item: _parse_timestamp(str(item["timestamp"]))):
+            timestamp = _parse_timestamp(str(packet["timestamp"]))
+            if timestamp in existing_timestamps:
+                continue
+            last_admitted = stream_state["last_admitted_signal_ts"]
+            if isinstance(last_admitted, datetime) and timestamp - last_admitted < dedupe_window:
+                continue
+            new_packets.append(packet)
+            stream_state["last_admitted_signal_ts"] = timestamp
         if not new_packets:
             return
         _append_packets_to_signal_set(
@@ -115,7 +125,7 @@ def extend_signal_pool_from_local_candles(
             instrument=signal_set.get("instrument") or f"{asset}-USDT-SWAP",
             signal_set=signal_set,
             signal_set_key=signal_set_key,
-            parameters=parameters,
+            parameters=generation_parameters,
             market_data_reader=reader,
             spec=resolved.spec,
             workspace_root=root,

@@ -538,6 +538,7 @@ def _stage2_exit_policy_state(artifact_root: Path) -> dict[str, Any]:
         "policy": policy.get("policy", {}) if policy else {},
         "policy_mode": policy.get("policy_mode", "shared") if policy else None,
         "side_policies": policy.get("side_policies", {}) if policy else {},
+        "source": policy.get("source", {}) if policy else {},
         "created_at": policy.get("created_at") if policy else None,
     }
 
@@ -559,6 +560,12 @@ def _stage3_grid_state(artifact_root: Path) -> dict[str, Any]:
     exact_policy_result = _compact_stage3_result(grid.get("exact_policy_result", {}) if grid else {})
     shortlist = [_compact_stage3_result(item) for item in grid.get("stage3c_shortlist", [])] if grid else []
     top_5 = [_compact_stage3_result(item) for item in (optimal.get("top_5") if optimal else (grid.get("optimal") or {}).get("top_5") if grid else []) or []]
+    optimal_source = optimal or (grid.get("optimal") if grid else {}) or {}
+    compact_optimal = {
+        "criterion": optimal_source.get("criterion"),
+        "best": _compact_stage3_result(optimal_source.get("best", {})),
+        "top_5": [_compact_stage3_result(item) for item in (optimal_source.get("top_5") or [])],
+    } if optimal_source else {}
     fixed_complete = bool(grid and grid.get("fixed_sl_complete")) or bool(grid and grid.get("fixed_sl_baseline_result"))
     exact_complete = bool(grid and grid.get("exact_protection_complete")) or bool(
         grid and (grid.get("exact_protection_result") or grid.get("exact_policy_result"))
@@ -591,6 +598,7 @@ def _stage3_grid_state(artifact_root: Path) -> dict[str, Any]:
         "stage3c_total_combinations_tested": grid.get("stage3c_total_combinations_tested", 0) if grid else 0,
         "stage3c_value_ranges": grid.get("stage3c_value_ranges", {}) if grid else {},
         "stage3c_shortlist": shortlist,
+        "optimal": compact_optimal,
         "best": _compact_stage3_result(best or {}),
         "top_5": top_5,
     }

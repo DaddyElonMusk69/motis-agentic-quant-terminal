@@ -13,6 +13,10 @@ DEFAULT_FORWARD_HOURS = 36
 DEFAULT_STAGE3_MIN_MATCH_CAPTURE_PCT = 40.0
 DEFAULT_STAGE3_MIN_ALL_TRADE_CAPTURE_PCT = 20.0
 DEFAULT_STAGE3_FALLBACK_TP_MAX_PCT = 1.0
+DEFAULT_STAGE2_TRAINING_MIN_MATCH_CAPTURE_PCT = 40.0
+DEFAULT_STAGE2_WF_MIN_CAPTURE_PCT = 40.0
+DEFAULT_STAGE2_WF_MAX_TRAINING_GAP_PCT = 35.0
+DEFAULT_STAGE2_FULL_CYCLE_MIN_CAPTURE_PCT = 20.0
 
 
 def run_stage2_capture_curve(
@@ -226,7 +230,8 @@ def _build_result(
         )
         for cohort in ("MATCH", "MISMATCH", "full_cycle")
     }
-    recommended_tp_max = _recommended_tp_max(tp_levels=tp_levels, cohorts=cohorts)
+    recommended_tp_max = _recommended_tp_max_from_training(tp_levels=tp_levels, results=results)
+    tp_guardrail = _walk_forward_guardrail(tp_levels=tp_levels, results=results)
     stage0_threshold = _load_stage0_meaningful_move_threshold(workspace_root=workspace_root, session=session)
     sl_levels = _sl_levels_from_threshold(stage0_threshold)
     sl_results = _sl_hit_rates(per_signal=per_signal, sl_levels=sl_levels)
@@ -262,14 +267,21 @@ def _build_result(
         "per_signal": per_signal,
         "stage3_input": {
             "role": "tp_range_evidence",
-            "description": "Use this MATCH-only travel profile to narrow Stage 3 TP/SL/management grids on the frozen Stage 1 decision set.",
-            "tp_range_source": "stage2_trade_profile",
+            "description": "Use training MATCH travel to propose TP/SL bands, with walk-forward and full-cycle capture retained as guardrails.",
+            "tp_range_source": "stage2_training_match_profile_with_walk_forward_guardrail",
             "recommended_tp_min_pct": 0.1,
             "recommended_tp_max_pct": recommended_tp_max,
             "sl_range_source": "stage2_matched_adverse_profile",
             "recommended_sl_min_pct": min(sl_levels) if sl_levels else None,
             "recommended_sl_max_pct": max(sl_levels) if sl_levels else None,
             "min_match_capture_pct": DEFAULT_STAGE3_MIN_MATCH_CAPTURE_PCT,
+            "walk_forward_guardrail": tp_guardrail,
+            "selection_notes": {
+                "primary_source": "training",
+                "validation_source": "walk_forward_test",
+                "robustness_source": "full_cycle",
+                "walk_forward_policy": "guardrail_not_primary_optimizer",
+            },
         },
     }
 
@@ -431,6 +443,53 @@ def _recommended_tp_max(*, tp_levels: list[float], cohorts: dict[str, dict[str, 
         ):
             recommended = level
     return round(recommended if recommended is not None else DEFAULT_STAGE3_FALLBACK_TP_MAX_PCT, 1)
+
+
+def _recommended_tp_max_from_training(*, tp_levels: list[float], results: dict[str, dict[str, dict[str, float | int]]]) -> float:
+    recommended: float | None = None
+    for level in tp_levels:
+        key = f"{level:.1f}"
+        training_rate = float(results.get(key, {}).get("training", {}).get("rate", 0.0))
+        if training_rate >= DEFAULT_STAGE2_TRAINING_MIN_MATCH_CAPTURE_PCT:
+            recommended = level
+    return round(recommended if recommended is not None else DEFAULT_STAGE3_FALLBACK_TP_MAX_PCT, 1)
+
+
+def _walk_forward_guardrail(*, tp_levels: list[float], results: dict[str, dict[str, dict[str, float | int]]]) -> dict[str, dict[str, Any]]:
+    guardrail: dict[str, dict[str, Any]] = {}
+    for level in tp_levels:
+        key = f"{level:.1f}"
+        rows = results.get(key, {})
+        training = rows.get("training", {})
+        walk_forward = rows.get("walk_forward_test", {})
+        full_cycle = rows.get("full_cycle", {})
+        training_rate = float(training.get("rate", 0.0))
+        wf_total = int(walk_forward.get("total", 0))
+        wf_rate = float(walk_forward.get("rate", 0.0))
+        full_cycle_rate = float(full_cycle.get("rate", 0.0))
+        status = "pass"
+        reason = "walk_forward_capture_stable"
+        if wf_total == 0:
+            status = "insufficient_sample"
+            reason = "missing_walk_forward_match_sample"
+        elif wf_rate < DEFAULT_STAGE2_WF_MIN_CAPTURE_PCT:
+            status = "fail"
+            reason = "walk_forward_capture_below_guardrail"
+        elif training_rate - wf_rate > DEFAULT_STAGE2_WF_MAX_TRAINING_GAP_PCT:
+            status = "fail"
+            reason = "walk_forward_capture_collapsed_vs_training"
+        elif full_cycle_rate < DEFAULT_STAGE2_FULL_CYCLE_MIN_CAPTURE_PCT:
+            status = "fail"
+            reason = "full_cycle_capture_below_guardrail"
+        guardrail[key] = {
+            "status": status,
+            "reason": reason,
+            "training_rate": training_rate,
+            "walk_forward_rate": wf_rate,
+            "walk_forward_total": wf_total,
+            "full_cycle_rate": full_cycle_rate,
+        }
+    return guardrail
 
 
 def _sl_levels_from_threshold(threshold_pct: float) -> list[float]:

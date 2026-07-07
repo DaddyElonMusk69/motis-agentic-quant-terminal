@@ -143,6 +143,70 @@ def test_run_stage2_capture_curve_scores_match_set_by_slice(tmp_path: Path):
     assert "Stage 2 Travel Capture" in (promotion_root / "stage2_summary.md").read_text()
 
 
+def test_stage2_recommends_tp_from_training_and_reports_walk_forward_guardrails(tmp_path: Path):
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas/stage1-aave"
+    promotion_root = artifact_root / "promotion"
+    promotion_root.mkdir(parents=True)
+    (promotion_root / "stage1a_canonical_full_cycle_scores.json").write_text(
+        json.dumps(
+            {
+                "records": [
+                    {"signal_id": "train-1", "sample_role": "training", "decision_direction": "LONG", "agreement": "MATCH"},
+                    {"signal_id": "train-2", "sample_role": "training", "decision_direction": "LONG", "agreement": "MATCH"},
+                    {"signal_id": "wf-1", "sample_role": "walk_forward_test", "decision_direction": "LONG", "agreement": "MATCH"},
+                ]
+            }
+        )
+    )
+    session = {
+        "session_id": "stage1-aave",
+        "artifact_root": str(artifact_root),
+        "asset": "AAVE",
+        "strategy_id": "aave-vegas",
+        "strategy_version": "v0.1",
+        "signal_engine_id": "vegas_ema",
+        "signal_set_id": "AAVE-vegas_ema-canonical",
+    }
+    signal_rows = [
+        {
+            "signal_id": "train-1",
+            "timestamp": "2026-05-01T00:00:00Z",
+            "payload": {"active_timeframes": ["5m"], "interactions": {"5m": [{"market_price": 100}]}},
+        },
+        {
+            "signal_id": "train-2",
+            "timestamp": "2026-05-01T01:00:00Z",
+            "payload": {"active_timeframes": ["5m"], "interactions": {"5m": [{"market_price": 100}]}},
+        },
+        {
+            "signal_id": "wf-1",
+            "timestamp": "2026-05-02T00:00:00Z",
+            "payload": {"active_timeframes": ["5m"], "interactions": {"5m": [{"market_price": 100}]}},
+        },
+    ]
+    candles = [
+        {"timestamp": "2026-05-01T00:05:00Z", "open": 100, "high": 101.1, "low": 99.8, "close": 100.8},
+        {"timestamp": "2026-05-01T01:05:00Z", "open": 100, "high": 101.2, "low": 99.7, "close": 101.0},
+        {"timestamp": "2026-05-02T00:05:00Z", "open": 100, "high": 100.6, "low": 99.6, "close": 100.4},
+    ]
+
+    result = run_stage2_capture_curve(
+        workspace_root=tmp_path,
+        session=session,
+        signal_rows=signal_rows,
+        candles=candles,
+        tp_levels=[0.5, 1.0],
+        forward_hours=1,
+    )
+
+    assert result["stage3_input"]["tp_range_source"] == "stage2_training_match_profile_with_walk_forward_guardrail"
+    assert result["stage3_input"]["recommended_tp_max_pct"] == 1.0
+    assert result["stage3_input"]["walk_forward_guardrail"]["0.5"]["status"] == "pass"
+    assert result["stage3_input"]["walk_forward_guardrail"]["1.0"]["status"] == "fail"
+    assert result["stage3_input"]["walk_forward_guardrail"]["1.0"]["reason"] == "walk_forward_capture_below_guardrail"
+    assert result["stage3_input"]["selection_notes"]["primary_source"] == "training"
+
+
 def test_run_stage2_capture_curve_profiles_match_decisions_and_writes_stage3_all_trade_inputs(tmp_path: Path):
     artifact_root = tmp_path / "dev/training_sessions/aave-vegas/stage1-aave"
     promotion_root = artifact_root / "promotion"

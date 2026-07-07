@@ -152,6 +152,10 @@ def test_run_stage3_policy_test_scores_fixed_baseline_exact_policy_and_shortlist
     assert result["stage4_candidates"]["candidates"][0]["setup"]["tp_pct"] == result["optimal"]["best"]["tp"]
     assert isinstance(result["stage4_candidates"]["candidates"][0]["setup"]["protection_enabled"], bool)
     assert result["stage4_candidates"]["candidates"][0]["setup"]["exit_policy_type"] == "numerical_stage2_policy"
+    candidate = result["stage4_candidates"]["candidates"][0]
+    assert candidate["selection_diagnostics"]["stage3_ranking"]["criterion"] == "walk_forward_net_pnl_with_full_cycle_guardrails"
+    assert "walk_forward_net_pnl_pct" in candidate["selection_diagnostics"]["stage3_ranking"]
+    assert "full_cycle_net_pnl_pct" in candidate["selection_diagnostics"]["stage3_ranking"]
     assert (promotion_root / "stage3_grid_results.json").exists()
     assert (promotion_root / "stage3_optimal.json").exists()
     assert (promotion_root / "stage4_candidates.json").exists()
@@ -209,10 +213,62 @@ def test_stage3_local_variants_use_only_adjacent_stage2_levels_and_sl_multiplier
     assert {row["trail_sl_pct"] for row in protected_variants} <= {0.5, 1.0, 1.5}
     assert {row["initial_sl_multiplier"] for row in variants} == {0.75, 1.0, 1.25}
     assert {round(row["initial_sl_pct"], 4) for row in variants} == {0.6, 0.8, 1.0}
-    assert result["optimal"]["criterion"] == "max_net_pnl_then_profit_factor_then_wr_then_fewer_initial_sl"
+    assert result["optimal"]["criterion"] == "walk_forward_net_pnl_with_full_cycle_guardrails"
     assert result["optimal"]["best"]["agreement_split"]["MISMATCH"]["total"] == 1
     assert result["stage3c_total_combinations_tested"] == len(variants)
     assert result["stage3c_value_ranges"]["initial_sl_multipliers"] == [0.75, 1.0, 1.25]
+
+
+def test_stage3_ranking_prefers_walk_forward_when_full_cycle_is_viable(tmp_path: Path):
+    artifact_root, stage0_root = _stage3_workspace(tmp_path)
+    promotion_root = artifact_root / "promotion"
+    _write_stage0_summary(stage0_root, significance_threshold_pct=1.0, forward_hours=1)
+    _write_stage2_capture(promotion_root, tp_levels=[1.0, 3.0])
+    _write_stage2_policy(promotion_root, lock_profit_pct=3.0, initial_sl_pct=1.0, protect_trigger_pct=1.0, trail_sl_pct=0.5)
+    _write_trade_inputs(
+        promotion_root,
+        [
+            {
+                "signal_id": "train-a",
+                "sample_role": "training",
+                "decision_direction": "LONG",
+                "direction": "LONG",
+                "agreement": "MATCH",
+                "signal_ts": "2026-05-01T00:00:00Z",
+                "reference_price": 100,
+            },
+            {
+                "signal_id": "wf-a",
+                "sample_role": "walk_forward_test",
+                "decision_direction": "LONG",
+                "direction": "LONG",
+                "agreement": "MATCH",
+                "signal_ts": "2026-05-02T00:00:00Z",
+                "reference_price": 100,
+            },
+        ],
+    )
+    session = _session(artifact_root, stage0_root)
+    candles = [
+        {"timestamp": "2026-05-01T00:05:00Z", "open": 100, "high": 103.1, "low": 99.8, "close": 102.5},
+        {"timestamp": "2026-05-02T00:05:00Z", "open": 100, "high": 101.1, "low": 99.8, "close": 100.8},
+    ]
+
+    result = run_stage3_grid_search(
+        workspace_root=tmp_path,
+        session=session,
+        candles=candles,
+        shortlist_size=5,
+        leverage=1,
+        fees_bps_per_side=0,
+    )
+
+    best = result["optimal"]["best"]
+    assert result["optimal"]["criterion"] == "walk_forward_net_pnl_with_full_cycle_guardrails"
+    assert best["ranking_diagnostics"]["walk_forward_viable"] is True
+    assert best["ranking_diagnostics"]["full_cycle_viable"] is True
+    assert best["slice_split"]["walk_forward_test"]["net_pnl_pct"] >= 1.0
+    assert best["final_tp_pct"] == 1.0
 
 
 def test_stage3_uses_side_specific_stage2_policy_by_trade_direction(tmp_path: Path):

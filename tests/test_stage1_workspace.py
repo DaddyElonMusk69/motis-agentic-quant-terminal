@@ -583,6 +583,95 @@ def test_build_stage1_gate_summary_reports_stage3_grid_complete(tmp_path: Path):
     assert gate["stage3_pyramid"]["exists"] is False
 
 
+def test_build_stage1_gate_summary_reports_stage2_stage3_walk_forward_selection_context(tmp_path: Path):
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
+    promotion_root = artifact_root / "promotion"
+    frozen_root = promotion_root / "frozen_stage1a_strategy_module"
+    frozen_root.mkdir(parents=True)
+    (promotion_root / "stage1a_canonical_full_cycle_decisions.json").write_text("{}")
+    (promotion_root / "stage1a_canonical_full_cycle_scores.json").write_text(
+        json.dumps({"metrics": {"matches": 1}, "slice_metrics": {}, "match_set": [{"signal_id": "sig"}]})
+    )
+    (frozen_root / "strategy.py").write_text("def decide(context): return {}")
+    (promotion_root / "stage2_capture_curve.json").write_text(
+        json.dumps(
+            {
+                "metrics": {"total_match_signals": 1},
+                "stage3_input": {
+                    "tp_range_source": "stage2_training_match_profile_with_walk_forward_guardrail",
+                    "walk_forward_guardrail": {
+                        "1.0": {
+                            "status": "pass",
+                            "reason": "walk_forward_capture_stable",
+                            "training_rate": 80.0,
+                            "walk_forward_rate": 70.0,
+                            "walk_forward_total": 5,
+                            "full_cycle_rate": 75.0,
+                        }
+                    },
+                    "selection_notes": {
+                        "primary_source": "training",
+                        "validation_source": "walk_forward_test",
+                        "robustness_source": "full_cycle",
+                        "walk_forward_policy": "guardrail_not_primary_optimizer",
+                    },
+                },
+            }
+        )
+    )
+    (promotion_root / "stage2_capture_per_signal.json").write_text("[]")
+    (promotion_root / "stage3_trade_inputs.json").write_text("[]")
+    (promotion_root / "stage2_summary.md").write_text("# Stage 2 Travel Capture\n")
+    (promotion_root / "stage3_grid_results.json").write_text(
+        json.dumps(
+            {
+                "total_signals": 1,
+                "local_variants_complete": True,
+                "optimal": {
+                    "criterion": "walk_forward_net_pnl_with_full_cycle_guardrails",
+                    "best": {
+                        "tp": 2.5,
+                        "sl": 1.0,
+                        "ranking_diagnostics": {
+                            "walk_forward_net_pnl_pct": 12.0,
+                            "full_cycle_net_pnl_pct": 8.0,
+                            "full_cycle_viable": True,
+                        },
+                    },
+                    "top_5": [],
+                },
+            }
+        )
+    )
+    (promotion_root / "stage3_optimal.json").write_text(
+        json.dumps(
+            {
+                "criterion": "walk_forward_net_pnl_with_full_cycle_guardrails",
+                "best": {
+                    "tp": 2.5,
+                    "sl": 1.0,
+                    "ranking_diagnostics": {
+                        "walk_forward_net_pnl_pct": 12.0,
+                        "full_cycle_net_pnl_pct": 8.0,
+                        "full_cycle_viable": True,
+                    },
+                },
+                "top_5": [],
+            }
+        )
+    )
+    (promotion_root / "stage4_candidates.json").write_text(json.dumps({"candidates": [{"candidate_id": "market"}]}))
+    (promotion_root / "stage3_summary.md").write_text("# Stage 3 Grid Search\n")
+    session = {"session_id": "stage1-aave", "artifact_root": str(artifact_root), "status": "stage1a_frozen"}
+
+    gate = build_stage1_gate_summary(workspace_root=tmp_path, session=session)
+
+    assert gate["stage2_capture"]["stage3_input"]["tp_range_source"] == "stage2_training_match_profile_with_walk_forward_guardrail"
+    assert gate["stage2_capture"]["stage3_input"]["walk_forward_guardrail"]["1.0"]["status"] == "pass"
+    assert gate["stage3_grid"]["optimal"]["criterion"] == "walk_forward_net_pnl_with_full_cycle_guardrails"
+    assert gate["stage3_grid"]["optimal"]["best"]["ranking_diagnostics"]["walk_forward_net_pnl_pct"] == 12.0
+
+
 def test_build_stage1_gate_summary_omits_heavy_stage3_and_stage4_ledgers(tmp_path: Path):
     artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
     promotion_root = artifact_root / "promotion"

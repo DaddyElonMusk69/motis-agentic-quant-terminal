@@ -99,7 +99,7 @@ def generate_liquidity_sweep_packets(
     packets: list[dict[str, Any]] = []
     buffered_packets: list[dict[str, Any]] = []
     generated_packet_count = 0
-    last_emitted_at: datetime | None = None
+    last_emitted_at = _optional_seed_timestamp(parameters)
     cooldown = timedelta(hours=int(parameters.get("cooldown_hours", DEFAULT_COOLDOWN_HOURS)))
     reference_window_hours = int(parameters.get("reference_window_hours", DEFAULT_REFERENCE_WINDOW_HOURS))
 
@@ -141,6 +141,15 @@ def generate_liquidity_sweep_packets(
         packet_sink(buffered_packets)
 
     return packets, generated_packet_count
+
+
+def _optional_seed_timestamp(parameters: dict[str, Any]) -> datetime | None:
+    value = parameters.get("_dedupe_seed_timestamp")
+    if isinstance(value, datetime):
+        return value.astimezone(UTC)
+    if isinstance(value, str) and value:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    return None
 
 
 def scan_liquidity_sweep_latest(

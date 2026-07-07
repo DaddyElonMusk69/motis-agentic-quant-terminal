@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pyarrow as pa
@@ -107,9 +107,9 @@ def test_extend_signal_pool_reports_packet_progress_for_streamed_chunks(tmp_path
         asset="AAVE",
         timestamps=[
             "2026-05-10T00:00:00Z",
-            "2026-05-10T00:05:00Z",
-            "2026-05-10T00:10:00Z",
-            "2026-05-10T00:15:00Z",
+            "2026-05-10T02:00:00Z",
+            "2026-05-10T04:00:00Z",
+            "2026-05-10T06:00:00Z",
         ],
     )
     progress_steps = []
@@ -127,17 +127,17 @@ def test_extend_signal_pool_reports_packet_progress_for_streamed_chunks(tmp_path
                     {
                         "schema_version": "signal_packet.v2",
                         "asset": "AAVE",
-                        "timestamp": "2026-05-10T00:05:00Z",
+                        "timestamp": "2026-05-10T02:00:00Z",
                     },
                     {
                         "schema_version": "signal_packet.v2",
                         "asset": "AAVE",
-                        "timestamp": "2026-05-10T00:10:00Z",
+                        "timestamp": "2026-05-10T04:00:00Z",
                     },
                     {
                         "schema_version": "signal_packet.v2",
                         "asset": "AAVE",
-                        "timestamp": "2026-05-10T00:15:00Z",
+                        "timestamp": "2026-05-10T06:00:00Z",
                     },
                 ]
                 context.packet_sink(packets[:2])
@@ -160,7 +160,7 @@ def test_extend_signal_pool_reports_packet_progress_for_streamed_chunks(tmp_path
         repository=repository,
         signal_engine_id="vegas_ema",
         asset="AAVE",
-        target_end="2026-05-10T00:15:00Z",
+        target_end="2026-05-10T06:00:00Z",
         progress_callback=progress_steps.append,
     )
 
@@ -168,6 +168,157 @@ def test_extend_signal_pool_reports_packet_progress_for_streamed_chunks(tmp_path
     assert progress_steps == [
         "packets 2 appended",
         "packets 3 appended",
+    ]
+
+
+def test_extend_signal_pool_enforces_dedupe_against_existing_canonical_pool(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = _make_workspace(tmp_path)
+    repository = _repository_with_signal_pool(root)
+    _register_default_refs(
+        repository,
+        root=root,
+        asset="AAVE",
+        timestamps=[
+            "2026-05-10T00:00:00Z",
+            "2026-05-10T00:10:00Z",
+            "2026-05-10T02:00:00Z",
+        ],
+    )
+
+    def fake_resolve_signal_engine(*args, **kwargs):
+        class FakeSpec:
+            configuration_schema = {}
+
+        class FakeResolved:
+            spec = FakeSpec()
+
+            @staticmethod
+            def generate_training_signals(context):
+                context.packet_sink(
+                    [
+                        {
+                            "schema_version": "signal_packet.v2",
+                            "asset": "AAVE",
+                            "timestamp": "2026-05-10T00:10:00Z",
+                        },
+                        {
+                            "schema_version": "signal_packet.v2",
+                            "asset": "AAVE",
+                            "timestamp": "2026-05-10T02:00:00Z",
+                        },
+                    ]
+                )
+
+                class FakeOutput:
+                    packets = []
+
+                return FakeOutput()
+
+        return FakeResolved()
+
+    monkeypatch.setattr(
+        "quant_terminal_worker.ingestion.signal_pool_extension.resolve_signal_engine",
+        fake_resolve_signal_engine,
+    )
+
+    result = extend_signal_pool_from_local_candles(
+        workspace_root=root,
+        repository=repository,
+        signal_engine_id="vegas_ema",
+        asset="AAVE",
+        target_end="2026-05-10T02:00:00Z",
+    )
+
+    assert result["generated_packet_count"] == 2
+    assert result["appended_packet_count"] == 1
+    assert [_iso_z(signal["timestamp"]) for signal in repository.list_signals(signal_set_key=result["signal_set_key"])] == [
+        "2026-05-10T00:00:00+00:00",
+        "2026-05-10T02:00:00+00:00",
+    ]
+
+
+def test_extend_signal_pool_seeds_engine_dedupe_from_existing_canonical_signal(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = _make_workspace(tmp_path)
+    repository = _repository_with_signal_pool(
+        root,
+        scan_coverage={
+            "start_ts": "2026-05-10T00:00:00Z",
+            "end_ts": "2026-05-10T01:00:00Z",
+            "source": "parquet_market_data",
+        },
+    )
+    _register_default_refs(
+        repository,
+        root=root,
+        asset="AAVE",
+        timestamps=[
+            "2026-05-10T00:00:00Z",
+            "2026-05-10T01:05:00Z",
+            "2026-05-10T02:00:00Z",
+        ],
+    )
+
+    def fake_resolve_signal_engine(*args, **kwargs):
+        class FakeSpec:
+            configuration_schema = {}
+
+        class FakeResolved:
+            spec = FakeSpec()
+
+            @staticmethod
+            def generate_training_signals(context):
+                seed = context.parameters.get("_dedupe_seed_timestamp")
+                last_emitted_at = datetime.fromisoformat(seed.replace("Z", "+00:00")) if seed else None
+                window = timedelta(minutes=120)
+                packets = []
+                for timestamp in (
+                    datetime.fromisoformat("2026-05-10T01:05:00+00:00"),
+                    datetime.fromisoformat("2026-05-10T02:00:00+00:00"),
+                ):
+                    if timestamp < context.start or timestamp > context.end:
+                        continue
+                    if last_emitted_at is not None and timestamp - last_emitted_at < window:
+                        continue
+                    last_emitted_at = timestamp
+                    packets.append(
+                        {
+                            "schema_version": "signal_packet.v2",
+                            "asset": "AAVE",
+                            "timestamp": timestamp.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        }
+                    )
+                context.packet_sink(packets)
+
+                class FakeOutput:
+                    packets = []
+
+                return FakeOutput()
+
+        return FakeResolved()
+
+    monkeypatch.setattr(
+        "quant_terminal_worker.ingestion.signal_pool_extension.resolve_signal_engine",
+        fake_resolve_signal_engine,
+    )
+
+    result = extend_signal_pool_from_local_candles(
+        workspace_root=root,
+        repository=repository,
+        signal_engine_id="vegas_ema",
+        asset="AAVE",
+        target_end="2026-05-10T02:00:00Z",
+    )
+
+    assert result["appended_packet_count"] == 1
+    assert [_iso_z(signal["timestamp"]) for signal in repository.list_signals(signal_set_key=result["signal_set_key"])] == [
+        "2026-05-10T00:00:00+00:00",
+        "2026-05-10T02:00:00+00:00",
     ]
 
 

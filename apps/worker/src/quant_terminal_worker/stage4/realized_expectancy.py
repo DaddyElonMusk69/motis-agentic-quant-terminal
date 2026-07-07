@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import statistics
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -655,12 +656,54 @@ def _skipped_decision(
 
 
 def _summarize_account(*, initial_capital_usdt: float, ending_equity_usdt: float, trades: list[dict[str, Any]]) -> dict[str, Any]:
+    filled_trades = [trade for trade in trades if trade.get("entry_status") == "FILLED"]
     gross_pnl = sum(trade.get("gross_pnl_usdt", 0.0) for trade in trades)
     total_entry_fees = sum(trade.get("total_entry_fees_usdt", 0.0) for trade in trades)
     total_exit_fees = sum(trade.get("total_exit_fees_usdt", 0.0) for trade in trades)
     total_slippage = sum(trade.get("total_slippage_usdt", 0.0) for trade in trades)
     total_fees = total_entry_fees + total_exit_fees
     net_pnl = ending_equity_usdt - initial_capital_usdt
+    max_dd_pct = 0.0
+    max_dd_usdt = 0.0
+    peak = float(initial_capital_usdt)
+    for trade in filled_trades:
+        equity_after = float(trade.get("equity_after") or peak)
+        if equity_after > peak:
+            peak = equity_after
+        drawdown = peak - equity_after
+        drawdown_pct = drawdown / peak * 100 if peak > 0 else 0.0
+        if drawdown_pct > max_dd_pct:
+            max_dd_pct = drawdown_pct
+            max_dd_usdt = drawdown
+
+    per_trade_returns = [
+        float(trade.get("net_pnl_usdt") or 0.0) / float(trade.get("equity_before") or initial_capital_usdt)
+        for trade in filled_trades
+        if float(trade.get("equity_before") or initial_capital_usdt) > 0
+    ]
+    trades_per_year = float(len(per_trade_returns))
+    if len(filled_trades) > 1:
+        first_ts = filled_trades[0].get("exit_ts") or filled_trades[0].get("entry_ts") or filled_trades[0].get("signal_ts")
+        last_ts = filled_trades[-1].get("exit_ts") or filled_trades[-1].get("entry_ts") or filled_trades[-1].get("signal_ts")
+        try:
+            start_dt = _coerce_datetime(first_ts)
+            end_dt = _coerce_datetime(last_ts)
+            span_days = max((end_dt - start_dt).total_seconds() / 86400, 1.0)
+            trades_per_year = len(per_trade_returns) / span_days * 365
+        except (TypeError, ValueError):
+            trades_per_year = float(len(per_trade_returns))
+    sharpe_ratio = 0.0
+    sortino_ratio = 0.0
+    if len(per_trade_returns) > 1:
+        mean_return = statistics.mean(per_trade_returns)
+        stdev_return = statistics.stdev(per_trade_returns)
+        if stdev_return > 0:
+            sharpe_ratio = (mean_return / stdev_return) * (trades_per_year ** 0.5)
+        downside_returns = [value for value in per_trade_returns if value < 0]
+        if len(downside_returns) > 1:
+            downside_stdev = statistics.stdev(downside_returns)
+            if downside_stdev > 0:
+                sortino_ratio = (mean_return / downside_stdev) * (trades_per_year ** 0.5)
     return {
         "initial_capital_usdt": _round_money(initial_capital_usdt),
         "ending_equity_usdt": _round_money(ending_equity_usdt),
@@ -672,6 +715,10 @@ def _summarize_account(*, initial_capital_usdt: float, ending_equity_usdt: float
         "total_slippage_usdt": _round_money(total_slippage),
         "return_pct": round(net_pnl / initial_capital_usdt * 100, 8) if initial_capital_usdt else 0.0,
         "gross_return_pct": round(gross_pnl / initial_capital_usdt * 100, 8) if initial_capital_usdt else 0.0,
+        "max_drawdown_pct": round(max_dd_pct, 4),
+        "max_drawdown_usdt": _round_money(max_dd_usdt),
+        "sharpe_ratio": round(sharpe_ratio, 4),
+        "sortino_ratio": round(sortino_ratio, 4),
     }
 
 

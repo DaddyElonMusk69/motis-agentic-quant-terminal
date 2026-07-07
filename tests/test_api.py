@@ -3048,6 +3048,75 @@ def test_stage2_exit_policy_endpoint_writes_policy_and_updates_gate(tmp_path, mo
     assert response.json()["gate"]["stage2_exit_policy"]["exists"] is True
 
 
+def test_stage2_exit_policy_endpoint_reports_walk_forward_guardrail_warning(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repository = StubRuntimeRepository()
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
+    promotion_root = artifact_root / "promotion"
+    frozen_root = promotion_root / "frozen_stage1a_strategy_module"
+    frozen_root.mkdir(parents=True)
+    (frozen_root / "strategy.py").write_text("def decide(context):\n    return {}\n")
+    (promotion_root / "stage1a_canonical_full_cycle_decisions.json").write_text("{}")
+    (promotion_root / "stage1a_canonical_full_cycle_scores.json").write_text(
+        json.dumps({"metrics": {"matches": 1}, "match_set": [{"signal_id": "sig-1"}]})
+    )
+    (promotion_root / "stage2_capture_curve.json").write_text(
+        json.dumps(
+            {
+                "tp_levels": [0.5, 1.0],
+                "sl_levels": [0.5, 1.0],
+                "metrics": {"total_match_signals": 1},
+                "results": {"0.5": {}, "1.0": {}},
+                "sl_results": {"0.5": {}, "1.0": {}},
+                "stage3_input": {
+                    "walk_forward_guardrail": {
+                        "1.0": {
+                            "status": "fail",
+                            "reason": "walk_forward_capture_below_guardrail",
+                            "training_rate": 100.0,
+                            "walk_forward_rate": 0.0,
+                            "walk_forward_total": 2,
+                            "full_cycle_rate": 66.7,
+                        }
+                    }
+                },
+            }
+        )
+    )
+    (promotion_root / "stage2_capture_per_signal.json").write_text("[]")
+    (promotion_root / "stage3_trade_inputs.json").write_text("[]")
+    (promotion_root / "stage2_summary.md").write_text("# Stage 2 Travel Capture\n")
+    repository.stage1_sessions = [
+        {
+            "session_id": "stage1-aave",
+            "artifact_root": str(artifact_root),
+            "source_candidate_id": "candidate-aave",
+            "signal_set_key": "vegas_ema:AAVE:2026-AAVE-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "AAVE",
+            "signal_set_id": "2026-AAVE-2h-dedupe-vote2",
+            "strategy_id": "aave-vegas-tunnel-v01",
+            "strategy_version": "v0.1",
+            "status": "stage1a_frozen",
+            "manifest": {"session_id": "stage1-aave"},
+        }
+    ]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post(
+        "/api/v1/research/stage1-sessions/stage1-aave/stage2/exit-policy",
+        json={"lock_profit_pct": 1.0, "initial_sl_pct": 0.5, "protect_trigger_pct": 0.5, "trail_sl_pct": 0.5},
+    )
+
+    assert response.status_code == 200
+    warning = response.json()["gate"]["stage2_exit_policy"]["source"]["walk_forward_guardrail"]
+    assert warning["status"] == "fail"
+    assert warning["reason"] == "walk_forward_capture_below_guardrail"
+    persisted = json.loads((promotion_root / "stage2_exit_policy.json").read_text())
+    assert persisted["source"]["walk_forward_guardrail"] == warning
+
+
 def test_stage2_exit_policy_endpoint_writes_side_specific_handoff(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     repository = StubRuntimeRepository()

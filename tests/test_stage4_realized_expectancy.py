@@ -191,6 +191,43 @@ def test_stage4_backtest_accounts_for_okx_taker_fees_and_equity(tmp_path: Path):
     assert account["ending_equity_usdt"] == 1013.4925
 
 
+def test_stage4_backtest_reports_account_risk_quality_metrics(tmp_path: Path):
+    artifact_root = _write_stage4_fixture(
+        tmp_path,
+        records=[_record("sig-1", "LONG"), _record("sig-2", "LONG"), _record("sig-3", "LONG")],
+        setup={"tp_pct": 1.0, "sl_pct": 1.0, "max_hold_hours": 1},
+    )
+    session = _session(artifact_root)
+    signals = [
+        _signal("sig-1", "2026-05-01T00:00:00Z", 100),
+        _signal("sig-2", "2026-05-01T02:00:00Z", 100),
+        _signal("sig-3", "2026-05-01T04:00:00Z", 100),
+    ]
+    candles = [
+        {"timestamp": "2026-05-01T00:05:00Z", "open": 100, "high": 101.2, "low": 99.8, "close": 101},
+        {"timestamp": "2026-05-01T02:05:00Z", "open": 100, "high": 100.2, "low": 98.8, "close": 99},
+        {"timestamp": "2026-05-01T04:05:00Z", "open": 100, "high": 101.2, "low": 99.8, "close": 101},
+    ]
+
+    result = run_stage4_realized_expectancy(
+        workspace_root=tmp_path,
+        session=session,
+        signal_rows=signals,
+        candles=candles,
+        initial_capital_usdt=1000,
+        margin_allocation_pct=30,
+        leverage=5,
+        fees_bps_per_side=0,
+        slippage_bps_per_side=0,
+    )
+
+    account = result["best_candidate"]["account"]
+    assert isinstance(account["sharpe_ratio"], float)
+    assert isinstance(account["sortino_ratio"], float)
+    assert account["max_drawdown_pct"] > 0
+    assert account["max_drawdown_usdt"] > 0
+
+
 def test_stage4_backtest_sizes_pyramid_legs_from_full_position_margin(tmp_path: Path):
     artifact_root = _write_stage4_fixture(
         tmp_path,

@@ -2803,8 +2803,8 @@
 .terminal-modal.portfolio-backtest-modal {
   height: min(860px, calc(100vh - 48px));
   max-height: min(860px, calc(100vh - 48px));
-  max-width: 1540px;
-  width: min(1540px, calc(100vw - 32px));
+  max-width: 1720px;
+  width: min(1720px, calc(100vw - 20px));
 }
 
 .portfolio-backtest-modal .terminal-modal__header,
@@ -2830,7 +2830,7 @@
   display: grid;
   flex: 1 1 auto;
   gap: var(--space-3);
-  grid-template-columns: 300px minmax(560px, 1fr) 360px;
+  grid-template-columns: 300px minmax(480px, 1fr) 520px;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
@@ -3373,6 +3373,217 @@
 .portfolio-inspector-section .data-table td {
   padding-left: var(--space-2);
   padding-right: var(--space-2);
+}
+
+.portfolio-calendar-section {
+  flex: 0 0 auto;
+}
+
+.portfolio-calendar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-height: 420px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.portfolio-calendar-month {
+  background: color-mix(in oklch, var(--surface-raised) 48%, transparent);
+  border: 1px solid color-mix(in oklch, var(--line-subtle) 70%, transparent);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-2);
+}
+
+.portfolio-calendar-month__header {
+  align-items: baseline;
+  display: flex;
+  gap: var(--space-2);
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.portfolio-calendar-month__header strong {
+  color: var(--ink-primary);
+  font-size: 12px;
+  font-weight: 740;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.portfolio-calendar-month__header span {
+  color: var(--ink-muted);
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 680;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.portfolio-calendar-month__summary {
+  align-items: center;
+  background: color-mix(in oklch, var(--surface-base) 70%, transparent);
+  border: 1px solid color-mix(in oklch, var(--line-subtle) 58%, transparent);
+  border-radius: 6px;
+  display: grid;
+  gap: var(--space-2);
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+  padding: 7px var(--space-2);
+}
+
+.portfolio-calendar-month__summary span {
+  color: var(--ink-secondary);
+  font-size: 11px;
+  font-weight: 720;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.portfolio-calendar-month__summary strong {
+  font-size: 13px;
+  font-weight: 780;
+  letter-spacing: 0;
+  line-height: 1;
+}
+
+.portfolio-calendar-weekdays,
+.portfolio-calendar-grid {
+  display: grid;
+  gap: 4px;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  min-width: 0;
+}
+
+.portfolio-calendar-weekdays span {
+  color: var(--ink-muted);
+  font-size: 9px;
+  font-weight: 760;
+  line-height: 1;
+  text-align: center;
+}
+
+.portfolio-calendar-day {
+  background: color-mix(in oklch, var(--surface-base) 76%, transparent);
+  border: 1px solid color-mix(in oklch, var(--line-subtle) 60%, transparent);
+  border-radius: 6px;
+  display: grid;
+  gap: 5px;
+  min-height: 68px;
+  min-width: 0;
+  padding: 6px;
+}
+
+.portfolio-calendar-day--spacer {
+  background: transparent;
+  border-color: transparent;
+  padding: 0;
+}
+
+.portfolio-calendar-day--empty {
+  align-content: start;
+  background: color-mix(in oklch, var(--surface-raised) 34%, var(--surface-base));
+  border-color: color-mix(in oklch, var(--line-subtle) 40%, transparent);
+  opacity: 0.58;
+}
+
+.portfolio-calendar-day--win {
+  background: color-mix(in oklch, var(--status-live) 24%, var(--surface-base));
+  border-color: color-mix(in oklch, var(--status-live) 58%, var(--line-subtle));
+}
+
+.portfolio-calendar-day--loss {
+  background: color-mix(in oklch, var(--status-risk) 24%, var(--surface-base));
+  border-color: color-mix(in oklch, var(--status-risk) 58%, var(--line-subtle));
+}
+
+.portfolio-calendar-day--flat {
+  background: color-mix(in oklch, var(--surface-selected) 20%, var(--surface-base));
+}
+
+.portfolio-calendar-day__date {
+  color: var(--ink-muted);
+  font-size: 10px;
+  font-weight: 720;
+  line-height: 1;
+}
+
+.portfolio-calendar-day__top {
+  align-items: center;
+  display: grid;
+  gap: 2px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+}
+
+.portfolio-calendar-day strong,
+.portfolio-calendar-day em,
+.portfolio-calendar-day b {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.portfolio-calendar-day strong {
+  color: var(--ink-primary);
+  background: color-mix(in oklch, var(--surface-base) 58%, transparent);
+  border: 1px solid color-mix(in oklch, var(--line-subtle) 42%, transparent);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 780;
+  line-height: 1.1;
+  min-width: 20px;
+  padding: 2px 5px;
+  text-align: center;
+}
+
+.portfolio-calendar-day em {
+  color: var(--ink-muted);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.portfolio-calendar-day b {
+  color: var(--ink-secondary);
+  font-size: 12px;
+  font-weight: 760;
+  letter-spacing: 0;
+  line-height: 1;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.portfolio-calendar-day--win .portfolio-calendar-day__date,
+.portfolio-calendar-day--win strong,
+.portfolio-calendar-day--win em {
+  color: color-mix(in oklch, var(--status-live) 78%, var(--ink-primary));
+}
+
+.portfolio-calendar-day--loss .portfolio-calendar-day__date,
+.portfolio-calendar-day--loss strong,
+.portfolio-calendar-day--loss em {
+  color: color-mix(in oklch, var(--status-risk) 86%, var(--ink-primary));
+}
+
+.portfolio-calendar-day--win b {
+  color: color-mix(in oklch, var(--status-live) 90%, var(--ink-primary));
+}
+
+.portfolio-calendar-day--loss b {
+  color: color-mix(in oklch, var(--status-risk) 94%, var(--ink-primary));
 }
 
 .portfolio-inspector-empty {

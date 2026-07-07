@@ -424,6 +424,15 @@ export type Stage2CaptureRate = {
   rate: number;
 };
 
+export type Stage2WalkForwardGuardrail = {
+  status?: "pass" | "fail" | "insufficient_sample" | string;
+  reason?: string;
+  training_rate?: number;
+  walk_forward_rate?: number;
+  walk_forward_total?: number;
+  full_cycle_rate?: number;
+};
+
 export type Stage2CaptureState = {
   exists: boolean;
   capture_curve_path?: string | null;
@@ -448,6 +457,13 @@ export type Stage2CaptureState = {
   }>;
   stage3_input?: {
     tp_range_source?: string;
+    walk_forward_guardrail?: Record<string, Stage2WalkForwardGuardrail>;
+    selection_notes?: {
+      primary_source?: string;
+      validation_source?: string;
+      robustness_source?: string;
+      walk_forward_policy?: string;
+    };
     recommended_tp_min_pct?: number;
     recommended_tp_max_pct?: number;
     sl_range_source?: string;
@@ -479,6 +495,7 @@ export type Stage2ExitPolicyState = {
   policy_mode?: "shared" | "side_specific" | string | null;
   policy: Stage2PolicyValues;
   side_policies?: Record<"LONG" | "SHORT", Stage2PolicyValues>;
+  source?: Record<string, unknown>;
 };
 
 export type Stage3GridSetup = {
@@ -517,8 +534,25 @@ export type Stage3GridSetup = {
     protection_enabled?: boolean;
     hard_exit_hours?: number;
   }>;
+  ranking_diagnostics?: {
+    walk_forward_sample_exists?: boolean;
+    walk_forward_total?: number;
+    walk_forward_viable?: boolean;
+    walk_forward_net_pnl_pct?: number;
+    walk_forward_profit_factor?: number;
+    full_cycle_net_pnl_pct?: number;
+    full_cycle_profit_factor?: number;
+    full_cycle_viable?: boolean;
+    protection_enabled?: boolean;
+  };
   agreement_split?: Record<string, { tp_count: number; sl_count: number; neither: number; total: number }>;
   mismatch_split?: Record<string, { tp_count: number; sl_count: number; neither: number; total: number }>;
+};
+
+export type Stage3OptimalSummary = {
+  criterion?: string | null;
+  best?: Partial<Stage3GridSetup>;
+  top_5?: Array<Partial<Stage3GridSetup>>;
 };
 
 export type Stage3GridState = {
@@ -557,6 +591,7 @@ export type Stage3GridState = {
     initial_sl_multipliers?: number[];
   };
   stage3c_shortlist?: Stage3GridSetup[];
+  optimal?: Stage3OptimalSummary;
   best: Partial<Stage3GridSetup>;
   top_5: Stage3GridSetup[];
 };
@@ -675,6 +710,10 @@ export type Stage4CandidateResult = {
     total_slippage_usdt?: number;
     return_pct?: number;
     gross_return_pct?: number;
+    max_drawdown_pct?: number;
+    max_drawdown_usdt?: number;
+    sharpe_ratio?: number;
+    sortino_ratio?: number;
   };
 };
 

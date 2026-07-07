@@ -103,6 +103,21 @@ type PortfolioBacktestModalState = {
   result: PortfolioBacktestResult | null;
 };
 
+type PortfolioTradeRow = Stage4TradeLedgerRow & {
+  asset?: string;
+  row_key: string;
+};
+
+type PortfolioDailyTradeStat = {
+  dateKey: string;
+  dayOfMonth: number;
+  weekday: number;
+  trade_count: number;
+  wins: number;
+  losses: number;
+  net_pnl_usdt: number;
+};
+
 type Stage4CandidateSelection = {
   candidate: Stage4CandidateResult;
   source: "stage4_realized_expectancy" | "stage4b_timing";
@@ -374,6 +389,48 @@ function formatCompactUtcTimestamp(value: string | number | null | undefined): s
   }).replace(",", "") + " UTC";
 }
 
+function formatChartUtcTimestamp(value: string | number | null | undefined): string {
+  if (value === null || value === undefined) {
+    return "-";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+  return date.toLocaleString("en-US", {
+    timeZone: "UTC",
+    year: "2-digit",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).replace(",", "");
+}
+
+function utcDateKey(value: string | number | null | undefined): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  return date.toISOString().slice(0, 10);
+}
+
+function formatPortfolioMonthLabel(dateKey: string): string {
+  const date = new Date(`${dateKey}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) {
+    return dateKey;
+  }
+  return date.toLocaleString("en-US", {
+    timeZone: "UTC",
+    month: "short",
+    year: "numeric",
+  });
+}
+
 function formatPortfolioEntryFillModel(value: string | undefined | null): string {
   if (value === "adverse_candle_extreme") {
     return "Worse 5m fill";
@@ -458,11 +515,29 @@ function formatCaptureRate(value: Stage2CaptureRate | undefined): string {
   return `${value.rate.toFixed(1)}% (${formatNumber(count)}/${formatNumber(value.total)})`;
 }
 
+function formatSideCaptureBreakdown(rows: Record<string, Stage2CaptureRate> | undefined): string {
+  if (!rows) {
+    return "-";
+  }
+  return [
+    `T ${formatCaptureRate(rows.training)}`,
+    `WF ${formatCaptureRate(rows.walk_forward_test)}`,
+    `F ${formatCaptureRate(rows.full_cycle)}`
+  ].join(" · ");
+}
+
 function formatPct(value: number | undefined | null): string {
   if (typeof value !== "number" || Number.isNaN(value)) {
     return "-";
   }
   return `${value.toFixed(1)}%`;
+}
+
+function formatRatio(value: number | undefined | null, digits = 2): string {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return "-";
+  }
+  return value.toFixed(digits);
 }
 
 function formatRate(value: number | undefined | null, digits = 1): string {
@@ -618,6 +693,19 @@ function formatRangeList(values: number[] | undefined): string {
     return values.map((value) => formatPct(value)).join(", ");
   }
   return `${formatPct(values[0])} - ${formatPct(values[values.length - 1])} (${formatNumber(values.length)})`;
+}
+
+function formatSelectionSource(value: string | undefined | null): string {
+  if (!value) {
+    return "-";
+  }
+  if (value === "stage2_training_match_profile_with_walk_forward_guardrail") {
+    return "Training proposal + WF guardrail";
+  }
+  if (value === "walk_forward_net_pnl_with_full_cycle_guardrails") {
+    return "WF net PnL + full-cycle guardrails";
+  }
+  return value.replace(/_/g, " ");
 }
 
 function formatStage3Policy(item: DisplayExecutionSetup | undefined): string {
@@ -2489,6 +2577,9 @@ function Stage2Panel({
   const shortSplit = stage2?.side_splits?.SHORT;
   const tpOptions = useMemo(() => stage2TpOptions(stage2), [stage2?.results, stage2?.tp_levels]);
   const slOptions = useMemo(() => stage2SlOptions(stage2), [stage2?.sl_levels, stage2?.sl_results]);
+  const recommendedTpGuardrail = stage2?.recommended_tp_max_pct != null
+    ? stage2.stage3_input?.walk_forward_guardrail?.[stage2.recommended_tp_max_pct.toFixed(1)]
+    : undefined;
   const [policyDraft, setPolicyDraft] = useState<Stage2SidePolicyDraft>({
     LONG: { lock_profit_pct: 0, initial_sl_pct: 0, protect_trigger_pct: 0, trail_sl_pct: 0 },
     SHORT: { lock_profit_pct: 0, initial_sl_pct: 0, protect_trigger_pct: 0, trail_sl_pct: 0 }
@@ -2564,6 +2655,13 @@ function Stage2Panel({
           <FieldRow label="Side split" value={`${formatNumber(longSplit?.count)} LONG / ${formatNumber(shortSplit?.count)} SHORT`} />
           <FieldRow label="TP band" value={`${formatPct(stage2?.recommended_tp_min_pct)} - ${formatPct(stage2?.recommended_tp_max_pct)}`} />
           <FieldRow label="SL band" value={`${formatPct(stage2?.recommended_sl_min_pct)} - ${formatPct(stage2?.recommended_sl_max_pct)}`} />
+          <FieldRow label="TP source" value={formatSelectionSource(stage2?.stage3_input?.tp_range_source)} />
+          <FieldRow
+            label="WF guardrail"
+            value={recommendedTpGuardrail
+              ? `${recommendedTpGuardrail.status ?? "-"} · WF ${formatPct(recommendedTpGuardrail.walk_forward_rate)} / train ${formatPct(recommendedTpGuardrail.training_rate)}`
+              : "-"}
+          />
           <FieldRow label="Artifact" value="MATCH travel curve + all-trade setup input" />
         </div>
         {policyReady ? (
@@ -2638,8 +2736,8 @@ function Stage2Panel({
               { key: "training", header: "Training", render: (entry) => formatCaptureRate(entry.rows.training) },
               { key: "walk", header: "Walk-forward", render: (entry) => formatCaptureRate(entry.rows.walk_forward_test) },
               { key: "full", header: "Full", render: (entry) => formatCaptureRate(entry.rows.full_cycle) },
-              { key: "long", header: "LONG", render: (entry) => formatCaptureRate(longSplit?.results?.[entry.level]?.full_cycle) },
-              { key: "short", header: "SHORT", render: (entry) => formatCaptureRate(shortSplit?.results?.[entry.level]?.full_cycle) }
+              { key: "long", header: "LONG T / WF / F", render: (entry) => formatSideCaptureBreakdown(longSplit?.results?.[entry.level]) },
+              { key: "short", header: "SHORT T / WF / F", render: (entry) => formatSideCaptureBreakdown(shortSplit?.results?.[entry.level]) }
             ]}
             getRowKey={(entry) => entry.level}
             rows={Object.entries(stage2.results).map(([level, rows]) => ({ level, rows }))}
@@ -2654,8 +2752,8 @@ function Stage2Panel({
               { key: "training", header: "Training hit", render: (entry) => formatCaptureRate(entry.rows.training) },
               { key: "walk", header: "Walk-forward hit", render: (entry) => formatCaptureRate(entry.rows.walk_forward_test) },
               { key: "full", header: "Full hit", render: (entry) => formatCaptureRate(entry.rows.full_cycle) },
-              { key: "long", header: "LONG hit", render: (entry) => formatCaptureRate(longSplit?.sl_results?.[entry.level]?.full_cycle) },
-              { key: "short", header: "SHORT hit", render: (entry) => formatCaptureRate(shortSplit?.sl_results?.[entry.level]?.full_cycle) }
+              { key: "long", header: "LONG T / WF / F", render: (entry) => formatSideCaptureBreakdown(longSplit?.sl_results?.[entry.level]) },
+              { key: "short", header: "SHORT T / WF / F", render: (entry) => formatSideCaptureBreakdown(shortSplit?.sl_results?.[entry.level]) }
             ]}
             getRowKey={(entry) => entry.level}
             rows={Object.entries(stage2.sl_results).map(([level, rows]) => ({ level, rows }))}
@@ -2694,6 +2792,7 @@ function Stage3Panel({
   const fixed = grid?.fixed_sl_baseline_result;
   const exact = grid?.exact_protection_result ?? grid?.exact_policy_result;
   const ranges = grid?.stage3c_value_ranges;
+  const rankingDiagnostics = grid?.best?.ranking_diagnostics;
   const fixedComplete = Boolean(grid?.fixed_sl_complete || fixed?.config_id);
   const exactComplete = Boolean(grid?.exact_protection_complete || exact?.config_id);
   const localComplete = Boolean(grid?.local_variants_complete || grid?.exists);
@@ -2797,6 +2896,13 @@ function Stage3Panel({
             <FieldRow label="TP values" value={formatRangeList(ranges?.final_tp_pct)} />
             <FieldRow label="Protect values" value={formatRangeList(ranges?.protect_trigger_pct)} />
             <FieldRow label="Trail SL values" value={formatRangeList(ranges?.trail_sl_pct)} />
+            <FieldRow label="Ranking" value={formatSelectionSource(grid?.optimal?.criterion)} />
+            <FieldRow
+              label="Best WF / Full"
+              value={rankingDiagnostics
+                ? `${formatPct(rankingDiagnostics.walk_forward_net_pnl_pct)} / ${formatPct(rankingDiagnostics.full_cycle_net_pnl_pct)}`
+                : "-"}
+            />
           </div>
           {localComplete ? (
             <DataTable
@@ -3013,6 +3119,10 @@ function Stage4Panel({
             <strong>{formatUsd(account.net_pnl_usdt)}</strong>
           </div>
           <div>
+            <span>Sharpe</span>
+            <strong>{formatRatio(account.sharpe_ratio)}</strong>
+          </div>
+          <div>
             <span>Fees</span>
             <strong>{formatUsd(account.total_fees_usdt)}</strong>
           </div>
@@ -3072,6 +3182,7 @@ function Stage4Panel({
               { key: "pyramid", header: "Pyramid", render: (item) => formatPyramidPolicy(item.setup) },
               { key: "net", header: "Net Exp", align: "right", render: (item) => formatPct(item.net_expectancy_pct) },
               { key: "wf_net", header: "WF Net", align: "right", render: (item) => formatPct(stage4WfNetPnlPct(item)) },
+              { key: "sharpe", header: "Sharpe", align: "right", render: (item) => formatRatio(item.account?.sharpe_ratio) },
               { key: "oos_exp", header: "OOS Exp", align: "right", render: (item) => {
                 const wf = item.slices?.walk_forward_test;
                 return wf ? formatPct(wf.net_expectancy_pct) : "-";
@@ -3181,6 +3292,10 @@ function Stage4Panel({
             <strong>{formatUsd((stage4bAccount.net_pnl_usdt ?? 0) - (account.net_pnl_usdt ?? 0))}</strong>
           </div>
           <div>
+            <span>Sharpe</span>
+            <strong>{formatRatio(stage4bAccount.sharpe_ratio)}</strong>
+          </div>
+          <div>
             <span>Latest Run</span>
             <strong>{stage4b?.latest_run_id ?? "n/a"}</strong>
           </div>
@@ -3208,6 +3323,7 @@ function Stage4Panel({
               { key: "pyramid", header: "Pyramid", render: (item) => formatPyramidPolicy(item.setup) },
               { key: "net", header: "Net Exp", align: "right", render: (item) => formatPct(item.net_expectancy_pct) },
               { key: "wf_net", header: "WF Net", align: "right", render: (item) => formatPct(stage4WfNetPnlPct(item)) },
+              { key: "sharpe", header: "Sharpe", align: "right", render: (item) => formatRatio(item.account?.sharpe_ratio) },
               { key: "oos_exp", header: "OOS Exp", align: "right", render: (item) => {
                 const wf = item.slices?.walk_forward_test;
                 return wf ? formatPct(wf.net_expectancy_pct) : "-";
@@ -3272,11 +3388,14 @@ function PortfolioBacktestModal({
   const result = state.result;
   const [ledgerTab, setLedgerTab] = useState<"trades" | "skipped">("trades");
   const allocationTotal = Object.values(state.allocations).reduce((sum, value) => sum + Number(value || 0), 0);
-  const tradeRows = stage4FilledTrades(result?.trade_ledger ?? []).map((trade, index) => {
+  const tradeRows = useMemo<PortfolioTradeRow[]>(() => stage4FilledTrades(result?.trade_ledger ?? []).map((trade, index) => {
     const asset = (trade as Stage4TradeLedgerRow & { asset?: string }).asset;
     return { ...trade, asset, row_key: `${asset ?? "asset"}-${trade.position_id ?? trade.signal_id}-${index}` };
-  });
-  const skippedRows = (result?.skipped_signals ?? []).map((item, index) => ({ ...item, row_key: `${item.asset}-${item.signal_id ?? item.signal_ts ?? "skip"}-${index}` }));
+  }), [result?.trade_ledger]);
+  const skippedRows = useMemo(
+    () => (result?.skipped_signals ?? []).map((item, index) => ({ ...item, row_key: `${item.asset}-${item.signal_id ?? item.signal_ts ?? "skip"}-${index}` })),
+    [result?.skipped_signals]
+  );
   const assetBreakdownRows = result?.asset_breakdown ?? [];
   const latestPoint = result?.equity_curve[result.equity_curve.length - 1];
 
@@ -3553,6 +3672,14 @@ function PortfolioBacktestModal({
             <aside className="portfolio-backtest-inspector" aria-label="Portfolio backtest diagnostics">
               {result ? (
                 <>
+                  <section className="portfolio-inspector-section portfolio-calendar-section">
+                    <div className="portfolio-section-header">
+                      <span>daily tape</span>
+                      <strong>Trade Calendar</strong>
+                    </div>
+                    <PortfolioTradeCalendar trades={tradeRows} />
+                  </section>
+
                   <section className="portfolio-inspector-section">
                     <div className="portfolio-section-header">
                       <span>strategy source</span>
@@ -3612,6 +3739,109 @@ function PortfolioBacktestModal({
   );
 }
 
+function PortfolioTradeCalendar({ trades }: { trades: PortfolioTradeRow[] }) {
+  const months = useMemo(() => {
+    const daily = new Map<string, PortfolioDailyTradeStat>();
+    for (const trade of trades) {
+      const dateKey = utcDateKey(trade.exit_ts ?? trade.entry_ts ?? trade.signal_ts);
+      if (!dateKey) {
+        continue;
+      }
+      const date = new Date(`${dateKey}T00:00:00Z`);
+      const existing = daily.get(dateKey) ?? {
+        dateKey,
+        dayOfMonth: date.getUTCDate(),
+        weekday: date.getUTCDay(),
+        trade_count: 0,
+        wins: 0,
+        losses: 0,
+        net_pnl_usdt: 0,
+      };
+      const pnl = Number(trade.net_pnl_usdt ?? 0);
+      existing.trade_count += 1;
+      existing.net_pnl_usdt += Number.isFinite(pnl) ? pnl : 0;
+      if (pnl > 0) {
+        existing.wins += 1;
+      } else if (pnl < 0) {
+        existing.losses += 1;
+      }
+      daily.set(dateKey, existing);
+    }
+
+    const grouped = new Map<string, PortfolioDailyTradeStat[]>();
+    for (const stat of Array.from(daily.values()).sort((left, right) => left.dateKey.localeCompare(right.dateKey))) {
+      const monthKey = stat.dateKey.slice(0, 7);
+      grouped.set(monthKey, [...(grouped.get(monthKey) ?? []), stat]);
+    }
+    return Array.from(grouped.entries()).map(([monthKey, days]) => ({
+        monthKey,
+        label: formatPortfolioMonthLabel(`${monthKey}-01`),
+        firstWeekday: new Date(`${monthKey}-01T00:00:00Z`).getUTCDay(),
+        daysInMonth: new Date(Date.UTC(Number(monthKey.slice(0, 4)), Number(monthKey.slice(5, 7)), 0)).getUTCDate(),
+        daysByNumber: new Map(days.map((day) => [day.dayOfMonth, day])),
+        days,
+        trade_count: days.reduce((sum, day) => sum + day.trade_count, 0),
+        wins: days.reduce((sum, day) => sum + day.wins, 0),
+        losses: days.reduce((sum, day) => sum + day.losses, 0),
+        net_pnl_usdt: days.reduce((sum, day) => sum + day.net_pnl_usdt, 0),
+      }));
+  }, [trades]);
+
+  if (!months.length) {
+    return <div className="state-line">No filled trades to place on the calendar.</div>;
+  }
+
+  return (
+    <div className="portfolio-calendar" aria-label="Daily portfolio trade calendar">
+      {months.map((month) => (
+        <div className="portfolio-calendar-month" key={month.monthKey}>
+          <div className="portfolio-calendar-month__header">
+            <strong>{month.label}</strong>
+            <span>{formatNumber(month.trade_count)} trades</span>
+          </div>
+          <div className="portfolio-calendar-month__summary">
+            <span>{formatNumber(month.wins)}W / {formatNumber(month.losses)}L</span>
+            <strong className={month.net_pnl_usdt >= 0 ? "tone-pass" : "tone-risk"}>{formatCompactUsd(month.net_pnl_usdt)}</strong>
+          </div>
+          <div className="portfolio-calendar-weekdays" aria-hidden="true">
+            {["S", "M", "T", "W", "T", "F", "S"].map((day, index) => <span key={`${month.monthKey}-${day}-${index}`}>{day}</span>)}
+          </div>
+          <div className="portfolio-calendar-grid">
+            {Array.from({ length: month.firstWeekday }).map((_, index) => (
+              <span className="portfolio-calendar-day portfolio-calendar-day--spacer" key={`${month.monthKey}-empty-${index}`} />
+            ))}
+            {Array.from({ length: month.daysInMonth }).map((_, index) => {
+              const day = month.daysByNumber.get(index + 1);
+              if (!day) {
+                return (
+                  <span className="portfolio-calendar-day portfolio-calendar-day--empty" key={`${month.monthKey}-day-${index + 1}`}>
+                    <span className="portfolio-calendar-day__date">{index + 1}</span>
+                  </span>
+                );
+              }
+              const tone = day.net_pnl_usdt > 0 ? "win" : day.net_pnl_usdt < 0 ? "loss" : "flat";
+              return (
+                <div
+                  className={`portfolio-calendar-day portfolio-calendar-day--${tone}`}
+                  key={day.dateKey}
+                  title={`${day.dateKey} UTC · ${day.trade_count} trades · ${day.wins}W/${day.losses}L · ${formatUsd(day.net_pnl_usdt)}`}
+                >
+                  <span className="portfolio-calendar-day__top">
+                    <span className="portfolio-calendar-day__date">{day.dayOfMonth}</span>
+                    <strong>{formatNumber(day.trade_count)}</strong>
+                  </span>
+                  <em>{day.wins}W/{day.losses}L</em>
+                  <b>{formatCompactUsd(day.net_pnl_usdt)}</b>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function PortfolioEquityCurve({ points }: { points: PortfolioBacktestResult["equity_curve"] }) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [zoomRange, setZoomRange] = useState<{ start: number; end: number } | null>(null);
@@ -3657,7 +3887,7 @@ function PortfolioEquityCurve({ points }: { points: PortfolioBacktestResult["equ
   const xTicks = buildIndexAxisTicks(visibleCurve, 5)
     .map((tick) => {
       const x = left + (tick.index / Math.max(visibleCurve.length - 1, 1)) * plotWidth;
-      const label = formatCompactUtcTimestamp(tick.item.timestamp);
+      const label = formatChartUtcTimestamp(tick.item.timestamp);
       return { ...tick, x, label };
     })
     .filter((tick) => {
@@ -3804,8 +4034,8 @@ function Stage4CandidateDetailPanel({ detail }: { detail: Stage4CandidateDetail 
   const totalFees = filledTrades.reduce((sum, trade) => sum + (trade.total_fees_usdt ?? 0), 0);
   const totalSkipped = (candidate.skipped_decisions ?? 0) + (candidate.skipped_position_open ?? 0);
   const expectancyPerTrade = filledTrades.length ? totalNetPnl / filledTrades.length : null;
-  const maxDrawdownPct = stage4MaxDrawdownPct(filledTrades);
   const account = candidate.account ?? {};
+  const maxDrawdownPct = account.max_drawdown_pct ?? stage4MaxDrawdownPct(filledTrades);
   const trainingSlice = candidate.slices?.training;
   const walkForwardSlice = candidate.slices?.walk_forward_test;
   const oosTrainRatio = (() => {
@@ -3822,6 +4052,7 @@ function Stage4CandidateDetailPanel({ detail }: { detail: Stage4CandidateDetail 
     { label: "Trades", value: formatNumber(filledTrades.length) },
     { label: "Win Rate", value: formatPct(candidate.win_rate_pct) },
     { label: "Expectancy / Trade", value: formatUsd(expectancyPerTrade) },
+    { label: "Sharpe", value: formatRatio(account.sharpe_ratio) },
     { label: "Max Drawdown", value: formatPct(maxDrawdownPct) },
     { label: "Skipped", value: formatNumber(totalSkipped) },
   ];
