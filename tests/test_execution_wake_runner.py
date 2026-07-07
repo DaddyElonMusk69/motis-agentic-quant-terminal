@@ -45,11 +45,18 @@ class FakeAdapter:
 
 
 class FakeRepository:
-    def __init__(self, *, route, bundle, signals=None, owner_state=None):
+    def __init__(self, *, route, bundle, signals=None, owner_state=None, latest_confirmed_candle_ts=None):
         self.route = route
         self.bundle = bundle
         self.signals = signals or []
         self.owner_state = owner_state
+        self.latest_confirmed_candle_ts = latest_confirmed_candle_ts or datetime(2026, 6, 5, 0, 0, tzinfo=UTC)
+        self.stage1_sessions = {
+            "stage1-aave": {
+                "session_id": "stage1-aave",
+                "signal_set_key": "vegas_ema:AAVE:AAVE-vegas_ema-canonical",
+            }
+        }
         self.closed_all_owner_states = []
         self.wakes = []
         self.closed_owner_states = []
@@ -91,8 +98,23 @@ class FakeRepository:
         self.closed_all_owner_states.append({"route_id": route_id, "instrument": instrument, "reason": reason})
         return [closed]
 
+    def get_stage1_research_session(self, session_id):
+        return self.stage1_sessions.get(session_id)
+
+    def get_signal_set(self, signal_set_key):
+        if signal_set_key == "vegas_ema:AAVE:AAVE-vegas_ema-canonical":
+            return {"signal_set_key": signal_set_key}
+        return None
+
     def list_signals(self, **kwargs):
-        return self.signals
+        rows = list(self.signals)
+        if kwargs.get("signal_set_key"):
+            rows = [row for row in rows if row.get("signal_set_key") == kwargs["signal_set_key"]]
+        rows = sorted(rows, key=lambda row: row["timestamp"], reverse=bool(kwargs.get("descending")))
+        return rows[: kwargs.get("limit", len(rows))]
+
+    def get_latest_confirmed_candle_timestamp(self, *, asset, timeframe, origin):
+        return self.latest_confirmed_candle_ts
 
     def record_wake_run(self, wake):
         self.wakes.append(wake)
@@ -1056,14 +1078,13 @@ def test_wake_order_intent_uses_explicit_execution_sizing(tmp_path):
             }
         },
     )
-    repository = FakeRepository(route=_route(bundle), bundle=bundle)
+    repository = FakeRepository(route=_route(bundle), bundle=bundle, signals=[_signal("sig-1")])
     adapter = FakeAdapter()
 
     wake = run_route_wake(
         route_id="aave-live",
         repository=repository,
         adapter=adapter,
-        live_signal_scanner=lambda **kwargs: _signal("sig-1"),
     )
 
     assert wake["order_intents"][0]["quantity"] == "1.25"
@@ -1073,18 +1094,17 @@ def test_wake_order_intent_uses_explicit_execution_sizing(tmp_path):
 
 def test_wake_records_live_observation_without_canonical_signal_insert(tmp_path):
     bundle = _bundle(tmp_path)
-    repository = FakeRepository(route=_route(bundle), bundle=bundle)
     signal = _signal("sig-1")
+    repository = FakeRepository(route=_route(bundle), bundle=bundle, signals=[signal])
 
     wake = run_route_wake(
         route_id="aave-live",
         repository=repository,
         adapter=FakeAdapter(),
-        live_signal_scanner=lambda **kwargs: signal,
     )
 
     assert wake["signal_scan_result"]["status"] == "fresh_signal"
-    assert repository.signals == []
+    assert repository.signals == [signal]
     assert len(repository.live_signal_observations) == 1
     observation = repository.live_signal_observations[0]
     assert observation["signal_engine_id"] == signal["signal_engine_id"]
@@ -1136,21 +1156,21 @@ def test_wake_executes_stage4b_timing_strategy_wrapper(tmp_path):
         "def manage_position(context):\n"
         "    return _load_base_module().manage_position(context)\n"
     )
-    repository = FakeRepository(route=_route(bundle), bundle=bundle)
     tradable_signal = {**_signal("sig-enter"), "timestamp": "2026-06-05T00:00:00Z", "payload": {"timestamp": "2026-06-05T00:00:00Z"}}
     skipped_signal = {**_signal("sig-skip"), "timestamp": "2026-06-05T01:00:00Z", "payload": {"timestamp": "2026-06-05T01:00:00Z"}}
+    repository = FakeRepository(route=_route(bundle), bundle=bundle, signals=[tradable_signal])
 
     enter_wake = run_route_wake(
         route_id="aave-live",
         repository=repository,
         adapter=FakeAdapter(),
-        live_signal_scanner=lambda **kwargs: tradable_signal,
     )
+    repository.signals = [skipped_signal]
+    repository.latest_confirmed_candle_ts = datetime(2026, 6, 5, 1, 0, tzinfo=UTC)
     skip_wake = run_route_wake(
         route_id="aave-live",
         repository=repository,
         adapter=FakeAdapter(),
-        live_signal_scanner=lambda **kwargs: skipped_signal,
     )
 
     assert enter_wake["strategy_decision"]["trade_action"] == "ENTER"
@@ -1193,14 +1213,13 @@ def test_wake_entry_intent_uses_short_side_split_policy(tmp_path):
             }
         },
     )
-    repository = FakeRepository(route=_route(bundle), bundle=bundle)
+    repository = FakeRepository(route=_route(bundle), bundle=bundle, signals=[_signal("sig-1")])
     adapter = FakeAdapter()
 
     wake = run_route_wake(
         route_id="aave-live",
         repository=repository,
         adapter=adapter,
-        live_signal_scanner=lambda **kwargs: _signal("sig-1"),
     )
 
     intent = wake["order_intents"][0]
@@ -1230,7 +1249,7 @@ def test_wake_entry_intent_uses_route_margin_percent_and_leverage_per_pyramid_le
         "leverage": 2.0,
         "manual_sizing_enabled": False,
     }
-    repository = FakeRepository(route=route, bundle=bundle)
+    repository = FakeRepository(route=route, bundle=bundle, signals=[_signal("sig-1")])
     adapter = FakeAdapter()
     adapter.snapshot = lambda instrument: {
         "instrument": instrument,
@@ -1245,7 +1264,6 @@ def test_wake_entry_intent_uses_route_margin_percent_and_leverage_per_pyramid_le
         route_id="aave-live",
         repository=repository,
         adapter=adapter,
-        live_signal_scanner=lambda **kwargs: _signal("sig-1"),
     )
 
     intent = wake["order_intents"][0]
@@ -1258,6 +1276,94 @@ def test_wake_entry_intent_uses_route_margin_percent_and_leverage_per_pyramid_le
     assert intent["margin_allocation_pct"] == 30.0
     assert intent["pyramid_max_legs"] == 3
     assert intent["margin_usd"] == 100
+
+
+def test_wake_trades_canonical_signal_at_latest_confirmed_candle(tmp_path):
+    bundle = _bundle(tmp_path)
+    signal = _signal("canon-sig-1")
+    repository = FakeRepository(route=_route(bundle), bundle=bundle, signals=[signal])
+
+    wake = run_route_wake(route_id="aave-live", repository=repository, adapter=FakeAdapter())
+
+    scan = wake["signal_scan_result"]
+    assert wake["branch"] == "entry_scan"
+    assert scan["status"] == "fresh_signal"
+    assert scan["source"] == "canonical_signal_pool"
+    assert scan["signal_id"] == "canon-sig-1"
+    assert scan["signal_set_key"] == "vegas_ema:AAVE:AAVE-vegas_ema-canonical"
+    assert scan["signal_timestamp"] == "2026-06-05T00:00:00Z"
+    assert scan["latest_confirmed_candle_ts"] == "2026-06-05T00:00:00Z"
+    assert scan["freshness_seconds"] == 0
+    assert scan["freshness_class"] == "fresh"
+    assert wake["order_intents"]
+
+
+def test_wake_trades_canonical_signal_up_to_ten_minutes_old_as_late(tmp_path):
+    bundle = _bundle(tmp_path)
+    signal = _signal("canon-sig-1")
+    repository = FakeRepository(
+        route=_route(bundle),
+        bundle=bundle,
+        signals=[signal],
+        latest_confirmed_candle_ts=datetime(2026, 6, 5, 0, 10, tzinfo=UTC),
+    )
+
+    wake = run_route_wake(route_id="aave-live", repository=repository, adapter=FakeAdapter())
+
+    scan = wake["signal_scan_result"]
+    assert scan["status"] == "fresh_signal"
+    assert scan["freshness_seconds"] == 600
+    assert scan["freshness_class"] == "late"
+    assert wake["order_intents"]
+
+
+def test_wake_rejects_stale_canonical_signal_older_than_ten_minutes(tmp_path):
+    bundle = _bundle(tmp_path)
+    signal = _signal("canon-sig-1")
+    repository = FakeRepository(
+        route=_route(bundle),
+        bundle=bundle,
+        signals=[signal],
+        latest_confirmed_candle_ts=datetime(2026, 6, 5, 0, 10, 1, tzinfo=UTC),
+    )
+
+    wake = run_route_wake(route_id="aave-live", repository=repository, adapter=FakeAdapter())
+
+    assert wake["branch"] == "idle"
+    assert wake["signal_scan_result"]["status"] == "late_stale_canonical_signal"
+    assert wake["signal_scan_result"]["freshness_seconds"] == 601
+    assert wake["order_intents"] == []
+
+
+def test_wake_rejects_future_canonical_signal(tmp_path):
+    bundle = _bundle(tmp_path)
+    signal = {**_signal("future-sig"), "timestamp": "2026-06-05T00:05:00Z"}
+    repository = FakeRepository(route=_route(bundle), bundle=bundle, signals=[signal])
+
+    wake = run_route_wake(route_id="aave-live", repository=repository, adapter=FakeAdapter())
+
+    assert wake["branch"] == "idle"
+    assert wake["signal_scan_result"]["status"] == "future_canonical_signal"
+    assert wake["order_intents"] == []
+
+
+def test_wake_rejects_duplicate_canonical_entry_signal_id(tmp_path):
+    bundle = _bundle(tmp_path)
+    signal = _signal("canon-sig-1")
+    repository = FakeRepository(route=_route(bundle), bundle=bundle, signals=[signal])
+    repository.wakes.append(
+        {
+            "route_id": "aave-live",
+            "signal_scan_result": {"signal_id": "canon-sig-1", "signal_timestamp": "2026-06-05T00:00:00Z"},
+            "order_intents": [{"action": "ENTER"}],
+        }
+    )
+
+    wake = run_route_wake(route_id="aave-live", repository=repository, adapter=FakeAdapter())
+
+    assert wake["branch"] == "idle"
+    assert wake["signal_scan_result"]["status"] == "duplicate_canonical_signal"
+    assert wake["order_intents"] == []
 
 
 def test_wake_entry_intent_manual_sizing_override_takes_route_values(tmp_path):
@@ -1279,7 +1385,7 @@ def test_wake_entry_intent_manual_sizing_override_takes_route_values(tmp_path):
         "leverage": 3.0,
         "manual_sizing_enabled": True,
     }
-    repository = FakeRepository(route=route, bundle=bundle)
+    repository = FakeRepository(route=route, bundle=bundle, signals=[_signal("sig-1")])
     adapter = FakeAdapter()
     adapter.snapshot = lambda instrument: {
         "instrument": instrument,
@@ -1294,7 +1400,6 @@ def test_wake_entry_intent_manual_sizing_override_takes_route_values(tmp_path):
         route_id="aave-live",
         repository=repository,
         adapter=adapter,
-        live_signal_scanner=lambda **kwargs: _signal("sig-1"),
     )
 
     intent = wake["order_intents"][0]
@@ -1311,7 +1416,7 @@ def test_wake_entry_sizing_reads_actual_okx_balance_list_shape(tmp_path):
         **_route(bundle),
         "manual_sizing_enabled": False,
     }
-    repository = FakeRepository(route=route, bundle=bundle)
+    repository = FakeRepository(route=route, bundle=bundle, signals=[_signal("sig-1")])
     adapter = FakeAdapter()
     adapter.snapshot = lambda instrument: {
         "instrument": instrument,
@@ -1339,7 +1444,6 @@ def test_wake_entry_sizing_reads_actual_okx_balance_list_shape(tmp_path):
         route_id="aave-live",
         repository=repository,
         adapter=adapter,
-        live_signal_scanner=lambda **kwargs: _signal("sig-1"),
     )
 
     intent = wake["order_intents"][0]
@@ -1348,33 +1452,37 @@ def test_wake_entry_sizing_reads_actual_okx_balance_list_shape(tmp_path):
     assert intent["notional_usd"] == 148.4007818
 
 
-def test_wake_idles_when_live_scan_has_no_fresh_signal_even_if_historical_db_signals_exist(tmp_path):
+def test_wake_idles_when_canonical_signal_is_stale(tmp_path):
     bundle = _bundle(tmp_path)
-    repository = FakeRepository(route=_route(bundle), bundle=bundle, signals=[_signal("old-historical-sig")])
+    repository = FakeRepository(
+        route=_route(bundle),
+        bundle=bundle,
+        signals=[_signal("old-historical-sig")],
+        latest_confirmed_candle_ts=datetime(2026, 6, 5, 0, 11, tzinfo=UTC),
+    )
     adapter = FakeAdapter()
 
     wake = run_route_wake(
         route_id="aave-live",
         repository=repository,
         adapter=adapter,
-        live_signal_scanner=lambda **kwargs: None,
     )
 
     assert wake["status"] == "completed"
     assert wake["branch"] == "idle"
-    assert wake["signal_scan_result"]["status"] == "no_fresh_signal"
+    assert wake["signal_scan_result"]["status"] == "late_stale_canonical_signal"
     assert wake["strategy_decision"] == {}
     assert wake["order_intents"] == []
 
 
-def test_wake_skips_duplicate_live_signal_without_backlog_consumption(tmp_path):
+def test_wake_skips_duplicate_canonical_signal_without_backlog_consumption(tmp_path):
     bundle = _bundle(tmp_path)
     signal = _signal("fresh-sig-1")
-    repository = FakeRepository(route=_route(bundle), bundle=bundle)
+    repository = FakeRepository(route=_route(bundle), bundle=bundle, signals=[signal])
     repository.wakes.append(
         {
             "route_id": "aave-live",
-            "signal_scan_result": {"signal_id": "fresh-sig-1"},
+            "signal_scan_result": {"signal_id": "fresh-sig-1", "signal_timestamp": "2026-06-05T00:00:00Z"},
             "order_intents": [{"action": "ENTER"}],
         }
     )
@@ -1384,12 +1492,11 @@ def test_wake_skips_duplicate_live_signal_without_backlog_consumption(tmp_path):
         route_id="aave-live",
         repository=repository,
         adapter=adapter,
-        live_signal_scanner=lambda **kwargs: signal,
     )
 
     assert wake["status"] == "completed"
     assert wake["branch"] == "idle"
-    assert wake["signal_scan_result"]["status"] == "duplicate_live_signal"
+    assert wake["signal_scan_result"]["status"] == "duplicate_canonical_signal"
     assert wake["signal_scan_result"]["signal_id"] == "fresh-sig-1"
     assert wake["order_intents"] == []
 
@@ -1443,6 +1550,7 @@ def _bundle(tmp_path: Path, strategy_source: str | None = None, setup: dict | No
         "signal_engine_version": "0.1",
         "asset": "AAVE",
         "instrument": "AAVE-USDT-SWAP",
+        "source_stage1_session_id": "stage1-aave",
         "execution_setup": setup,
         "risk_limits": {"max_notional_usd": 1000, "max_daily_loss_usd": 250},
         "evidence_refs": {},
@@ -1454,6 +1562,7 @@ def _bundle(tmp_path: Path, strategy_source: str | None = None, setup: dict | No
 def _signal(signal_id):
     return {
         "signal_id": signal_id,
+        "signal_set_key": "vegas_ema:AAVE:AAVE-vegas_ema-canonical",
         "signal_engine_id": "vegas_ema",
         "signal_engine_version": "0.1",
         "asset": "AAVE",

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from quant_terminal_worker.execution.bundle_loader import load_execution_bundle
+from quant_terminal_worker.execution.canonical_signal_admission import load_latest_canonical_entry_signal
 from quant_terminal_worker.execution.live_signal_scan import scan_latest_live_signal
 
 
@@ -257,10 +258,22 @@ def run_route_wake(
             },
         )
 
-    scanner = live_signal_scanner or scan_latest_live_signal
     try:
-        signal = scanner(route=route, repository=repository, workspace_root=workspace)
+        if route.get("account_mode") == "live":
+            admission = load_latest_canonical_entry_signal(
+                route=route,
+                bundle=bundle,
+                repository=repository,
+                workspace_root=workspace,
+            )
+            signal = admission["signal"]
+            signal_scan_result = admission["scan_result"]
+        else:
+            scanner = live_signal_scanner or scan_latest_live_signal
+            signal = scanner(route=route, repository=repository, workspace_root=workspace)
+            signal_scan_result = _fresh_signal_scan_result(signal) if signal is not None else {"status": "no_fresh_signal"}
     except ValueError as exc:
+        failure_reason = "canonical_signal_admission_failed" if route.get("account_mode") == "live" else "live_signal_scan_failed"
         return _record_wake(
             repository,
             {
@@ -269,9 +282,9 @@ def run_route_wake(
                 "bundle_id": bundle["bundle_id"],
                 "status": "blocked",
                 "branch": "entry_scan",
-                "blockers": ["live_signal_scan_failed"],
+                "blockers": [failure_reason],
                 "exchange_snapshot": snapshot,
-                "signal_scan_result": {"status": "blocked", "reason": "live_signal_scan_failed"},
+                "signal_scan_result": {"status": "blocked", "reason": failure_reason},
                 "strategy_decision": {},
                 "order_intents": [],
                 "adapter_results": adapter_results,
@@ -290,7 +303,7 @@ def run_route_wake(
                 "branch": "idle",
                 "blockers": [],
                 "exchange_snapshot": snapshot,
-                "signal_scan_result": {"status": "no_fresh_signal"},
+                "signal_scan_result": signal_scan_result,
                 "strategy_decision": {},
                 "order_intents": [],
                 "adapter_results": adapter_results,
@@ -298,8 +311,10 @@ def run_route_wake(
                 "completed_at": datetime.now(UTC),
             },
         )
-    signal_scan_result = _fresh_signal_scan_result(signal)
-    if _has_live_entry_for_signal(repository=repository, route_id=route_id, signal_id=signal["signal_id"]):
+    if _has_live_entry_for_signal(repository=repository, route_id=route_id, signal_id=signal["signal_id"]) or (
+        route.get("account_mode") == "live"
+        and _processed_entry_signal_timestamp(repository=repository, route_id=route_id) >= _signal_timestamp(signal)
+    ):
         return _record_wake(
             repository,
             {
@@ -310,7 +325,10 @@ def run_route_wake(
                 "branch": "idle",
                 "blockers": [],
                 "exchange_snapshot": snapshot,
-                "signal_scan_result": {**signal_scan_result, "status": "duplicate_live_signal"},
+                "signal_scan_result": {
+                    **signal_scan_result,
+                    "status": "duplicate_canonical_signal" if route.get("account_mode") == "live" else "duplicate_live_signal",
+                },
                 "strategy_decision": {},
                 "order_intents": [],
                 "adapter_results": adapter_results,
@@ -488,6 +506,31 @@ def _has_live_entry_for_signal(*, repository: Any, route_id: str, signal_id: str
             if _canonical_action(intent.get("action")) in {"ENTER", "ENTER_LONG", "ENTER_SHORT"}:
                 return True
     return False
+
+
+def _processed_entry_signal_timestamp(*, repository: Any, route_id: str) -> datetime:
+    latest = datetime.min.replace(tzinfo=UTC)
+    wakes = repository.list_wake_runs(route_id, limit=100) if hasattr(repository, "list_wake_runs") else []
+    for wake in wakes:
+        if not any(_canonical_action(intent.get("action")) in {"ENTER", "ENTER_LONG", "ENTER_SHORT"} for intent in wake.get("order_intents") or []):
+            continue
+        scan = wake.get("signal_scan_result") if isinstance(wake.get("signal_scan_result"), dict) else {}
+        timestamp = scan.get("signal_timestamp")
+        if timestamp is None:
+            continue
+        latest = max(latest, _parse_timestamp(timestamp))
+    return latest
+
+
+def _signal_timestamp(signal: dict[str, Any]) -> datetime:
+    return _parse_timestamp(signal.get("timestamp"))
+
+
+def _parse_timestamp(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def _run_entry_decision(

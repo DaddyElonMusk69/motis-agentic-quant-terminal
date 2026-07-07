@@ -64,7 +64,7 @@ def run_route_lifecycle_cycle(
         repository=runtime_repository,
         adapter=adapter,
         workspace_root=workspace_root,
-        allow_entry_scan=True,
+        allow_entry_scan=signal_update.get("status") != "blocked",
         live_signal_scanner=live_signal_scanner,
     )
     submission = _submit_if_enabled(
@@ -143,11 +143,6 @@ def _extend_signals(
     signal_pool_extender: Any | None,
     workspace_root: Path,
 ) -> dict[str, Any]:
-    if route.get("account_mode") == "live":
-        return {
-            "status": "skipped",
-            "reason": "live_execution_uses_observation_log",
-        }
     if route.get("blockers"):
         return {
             "status": "skipped",
@@ -163,7 +158,7 @@ def _extend_signals(
             asset=route["asset"],
             target_end=None,
         )
-    except ValueError as exc:
+    except Exception as exc:
         return {
             "status": "blocked",
             "reason": "signal_update_failed",

@@ -906,6 +906,35 @@ def test_non_vegas_live_wake_uses_generic_scanner_and_strategy_decide(tmp_path: 
         ],
     )
     bundle = _bundle(root)
+    signal_set_key = build_signal_set_key("threshold_reversal", "SOL", "SOL-threshold_reversal-canonical")
+    repository.create_stage1_research_session(
+        {
+            "session_id": "session-1",
+            "source_universe_run_id": "universe-sol",
+            "source_candidate_id": "candidate-sol",
+            "signal_set_key": signal_set_key,
+            "signal_engine_id": "threshold_reversal",
+            "signal_engine_version": "0.1.0",
+            "asset": "SOL",
+            "signal_set_id": "SOL-threshold_reversal-canonical",
+            "strategy_id": "threshold-strategy",
+            "strategy_version": "v0.1",
+            "train_start": "2026-06-01",
+            "train_end": "2026-06-01",
+            "walk_forward_start": "2026-06-01",
+            "walk_forward_end": "2026-06-01",
+            "artifact_root": "dev/training_sessions/threshold/stage1-sol",
+            "status": "accepted",
+            "manifest": {"signal_set_key": signal_set_key},
+        }
+    )
+    extend_signal_pool_from_local_candles(
+        workspace_root=root,
+        repository=repository,
+        signal_engine_id="threshold_reversal",
+        asset="SOL",
+        target_end=None,
+    )
     route = {
         **_route(root),
         "active_bundle_id": bundle["bundle_id"],
@@ -925,7 +954,8 @@ def test_non_vegas_live_wake_uses_generic_scanner_and_strategy_decide(tmp_path: 
     )
 
     assert wake["branch"] == "entry_scan"
-    assert wake["signal_scan_result"]["source"] == "live_parquet_snapshot"
+    assert wake["signal_scan_result"]["source"] == "canonical_signal_pool"
+    assert wake["signal_scan_result"]["signal_set_key"] == signal_set_key
     assert wake["signal_scan_result"]["signal_engine_id"] == "threshold_reversal"
     assert wake["strategy_decision"]["direction"] == "LONG"
     assert wake["order_intents"][0]["action"] == "ENTER"

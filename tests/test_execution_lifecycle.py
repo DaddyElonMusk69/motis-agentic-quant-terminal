@@ -37,6 +37,14 @@ class FakeRuntimeRepository:
             }
         ]
         self.wakes = []
+        self.stage1_sessions = {
+            "stage1-aave": {
+                "session_id": "stage1-aave",
+                "signal_set_key": "vegas_ema:AAVE:AAVE-vegas_ema-canonical",
+            }
+        }
+        self.signals = []
+        self.latest_confirmed_candle_ts = datetime(2026, 6, 5, 0, 0, tzinfo=UTC)
 
     def get_deployment_route(self, route_id):
         if route_id != self.route["route_id"]:
@@ -61,6 +69,24 @@ class FakeRuntimeRepository:
     def list_wake_runs(self, route_id, limit=25):
         return list(reversed(self.wakes))[:limit]
 
+    def get_stage1_research_session(self, session_id):
+        return self.stage1_sessions.get(session_id)
+
+    def get_signal_set(self, signal_set_key):
+        if signal_set_key == "vegas_ema:AAVE:AAVE-vegas_ema-canonical":
+            return {"signal_set_key": signal_set_key}
+        return None
+
+    def list_signals(self, **kwargs):
+        rows = list(self.signals)
+        if kwargs.get("signal_set_key"):
+            rows = [row for row in rows if row.get("signal_set_key") == kwargs["signal_set_key"]]
+        rows = sorted(rows, key=lambda row: row["timestamp"], reverse=bool(kwargs.get("descending")))
+        return rows[: kwargs.get("limit", len(rows))]
+
+    def get_latest_confirmed_candle_timestamp(self, *, asset, timeframe, origin):
+        return self.latest_confirmed_candle_ts
+
 
 class FakeMarketDataRepository:
     def get_raw_candle_ref(self, asset, timeframe="5m"):
@@ -74,13 +100,16 @@ class FakeMarketDataRepository:
 
 
 class FakeAdapter:
+    def __init__(self, *, positions=None):
+        self.positions = positions or []
+
     def readiness_blockers(self):
         return []
 
     def snapshot(self, instrument):
         return {
             "instrument": instrument,
-            "positions": [],
+            "positions": self.positions,
             "open_orders": [],
             "protection_orders": [],
             "balance": {},
@@ -105,6 +134,7 @@ def test_lifecycle_does_not_block_live_wake_when_research_signal_extension_fails
         "signal_engine_version": "0.1",
         "asset": "AAVE",
         "instrument": "AAVE-USDT-SWAP",
+        "source_stage1_session_id": "stage1-aave",
         "execution_setup": execution_setup,
         "risk_limits": {},
         "evidence_refs": {},
@@ -114,7 +144,7 @@ def test_lifecycle_does_not_block_live_wake_when_research_signal_extension_fails
     runtime_repository = FakeRuntimeRepository(bundle)
 
     def signal_pool_extender(**kwargs):
-        raise ValueError("research signal pool unavailable")
+        raise RuntimeError("research signal pool unavailable")
 
     result = run_route_lifecycle_cycle(
         route_id="aave-live",
@@ -127,9 +157,91 @@ def test_lifecycle_does_not_block_live_wake_when_research_signal_extension_fails
         workspace_root=tmp_path,
     )
 
-    assert result["signal_update"]["status"] == "skipped"
-    assert result["signal_update"]["reason"] == "live_execution_uses_observation_log"
-    assert result["wake"]["status"] == "completed"
-    assert result["wake"]["branch"] == "idle"
-    assert result["wake"]["signal_scan_result"]["status"] == "no_fresh_signal"
+    assert result["signal_update"]["status"] == "blocked"
+    assert result["signal_update"]["reason"] == "signal_update_failed"
+    assert result["wake"]["status"] == "blocked"
+    assert result["wake"]["branch"] == "entry_scan"
+    assert result["wake"]["signal_scan_result"]["reason"] == "signal_update_failed"
     assert runtime_repository.route["last_wake_at"] is not None
+
+
+def test_lifecycle_extends_live_canonical_signal_pool_after_warmup(tmp_path):
+    bundle = _bundle(tmp_path)
+    runtime_repository = FakeRuntimeRepository(bundle)
+    calls = []
+
+    def signal_pool_extender(**kwargs):
+        calls.append(kwargs)
+        return {"status": "completed", "appended": 0}
+
+    result = run_route_lifecycle_cycle(
+        route_id="aave-live",
+        runtime_repository=runtime_repository,
+        market_data_repository=FakeMarketDataRepository(),
+        fill_service=lambda **kwargs: {"status": "filled"},
+        signal_pool_extender=signal_pool_extender,
+        live_signal_scanner=lambda **kwargs: (_ for _ in ()).throw(AssertionError("raw scanner must not run")),
+        adapter=FakeAdapter(),
+        workspace_root=tmp_path,
+    )
+
+    assert result["signal_update"]["status"] == "completed"
+    assert calls
+    assert calls[0]["repository"] is runtime_repository
+    assert calls[0]["signal_engine_id"] == "vegas_ema"
+    assert calls[0]["asset"] == "AAVE"
+    assert calls[0]["target_end"] is None
+    assert result["wake"]["signal_scan_result"]["status"] == "no_fresh_canonical_signal"
+
+
+def test_lifecycle_signal_extension_failure_still_runs_position_management(tmp_path):
+    bundle = _bundle(
+        tmp_path,
+        strategy_source="def manage_position(context):\n    return {'action': 'HOLD', 'reason_code': 'managed'}\n",
+    )
+    runtime_repository = FakeRuntimeRepository(bundle)
+
+    def signal_pool_extender(**kwargs):
+        raise ValueError("research signal pool unavailable")
+
+    result = run_route_lifecycle_cycle(
+        route_id="aave-live",
+        runtime_repository=runtime_repository,
+        market_data_repository=FakeMarketDataRepository(),
+        fill_service=lambda **kwargs: {"status": "filled"},
+        signal_pool_extender=signal_pool_extender,
+        live_signal_scanner=lambda **kwargs: (_ for _ in ()).throw(AssertionError("raw scanner must not run")),
+        adapter=FakeAdapter(positions=[{"instId": "AAVE-USDT-SWAP", "pos": "1", "posSide": "long"}]),
+        workspace_root=tmp_path,
+    )
+
+    assert result["signal_update"]["reason"] == "signal_update_failed"
+    assert result["wake"]["status"] == "completed"
+    assert result["wake"]["branch"] == "position_management"
+    assert result["wake"]["strategy_decision"]["reason_code"] == "managed"
+
+
+def _bundle(tmp_path, strategy_source=None):
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    strategy_path = bundle_root / "strategy.py"
+    strategy_path.write_text(strategy_source or "def decide(context):\n    return {'action': 'SKIP', 'reason_code': 'test'}\n")
+    execution_setup = {"setup": {"entry_model": "market"}}
+    (bundle_root / "execution_setup.json").write_text(json.dumps(execution_setup))
+    return {
+        "bundle_id": "bundle-1",
+        "bundle_uri": str(bundle_root),
+        "strategy_module_ref": str(strategy_path),
+        "strategy_id": "aave-strategy",
+        "strategy_version": "v0.1",
+        "signal_engine_id": "vegas_ema",
+        "signal_engine_version": "0.1",
+        "asset": "AAVE",
+        "instrument": "AAVE-USDT-SWAP",
+        "source_stage1_session_id": "stage1-aave",
+        "execution_setup": execution_setup,
+        "risk_limits": {},
+        "evidence_refs": {},
+        "content_hash": "hash",
+        "status": "promoted",
+    }
