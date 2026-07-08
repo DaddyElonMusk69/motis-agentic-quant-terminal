@@ -26,6 +26,7 @@ from quant_terminal_worker.stage4.realized_expectancy import (
 PROMOTION_SOURCE_STAGE4A = "stage4_realized_expectancy"
 PROMOTION_SOURCE_STAGE4B = "stage4b_timing"
 PORTFOLIO_ENTRY_FILL_MODELS = {"reference_price", "adverse_candle_extreme"}
+PORTFOLIO_EXIT_FILL_MODELS = {"level_price", "adverse_stop_extreme"}
 
 
 def run_portfolio_backtest(
@@ -38,6 +39,7 @@ def run_portfolio_backtest(
     margin_allocations_pct: dict[str, float] | None = None,
     signal_offset_count: int = 0,
     entry_fill_model: str = "reference_price",
+    exit_fill_model: str = "level_price",
     repository: Any = None,
 ) -> dict[str, Any]:
     if initial_capital_usdt <= 0:
@@ -49,6 +51,10 @@ def run_portfolio_backtest(
     if entry_fill_model not in PORTFOLIO_ENTRY_FILL_MODELS:
         allowed = ", ".join(sorted(PORTFOLIO_ENTRY_FILL_MODELS))
         raise ValueError(f"entry_fill_model must be one of: {allowed}")
+    exit_fill_model = str(exit_fill_model or "level_price")
+    if exit_fill_model not in PORTFOLIO_EXIT_FILL_MODELS:
+        allowed = ", ".join(sorted(PORTFOLIO_EXIT_FILL_MODELS))
+        raise ValueError(f"exit_fill_model must be one of: {allowed}")
     if repository is None:
         raise ValueError("Portfolio backtest requires a market data repository")
     universe_run_id = str(universe_run["universe_run_id"])
@@ -62,6 +68,7 @@ def run_portfolio_backtest(
         margin_allocations_pct=margin_allocations_pct,
         signal_offset_count=signal_offset_count,
         entry_fill_model=entry_fill_model,
+        exit_fill_model=exit_fill_model,
         repository=repository,
     )
     if not asset_contexts:
@@ -107,6 +114,7 @@ def run_portfolio_backtest(
             "margin_allocations_pct": margin_allocations_pct,
             "signal_offset_count": signal_offset_count,
             "entry_fill_model": entry_fill_model,
+            "exit_fill_model": exit_fill_model,
             "margin_basis": "current_equity",
             "simulation_mode": "candle_by_candle",
         },
@@ -134,6 +142,7 @@ def _load_asset_contexts(
     margin_allocations_pct: dict[str, float],
     signal_offset_count: int,
     entry_fill_model: str,
+    exit_fill_model: str,
     repository: Any,
 ) -> list[dict[str, Any]]:
     accepted_candidate_ids = {
@@ -224,6 +233,7 @@ def _load_asset_contexts(
             "raw_signal_count": raw_signal_count,
             "signal_offset_count": signal_offset_count,
             "entry_fill_model": entry_fill_model,
+            "exit_fill_model": exit_fill_model,
             "max_position_notional_usdt": max_notional,
             "fees_bps_per_side": fees_bps,
             "slippage_bps_per_side": slippage_bps,
@@ -556,6 +566,8 @@ def _simulate(
             signal = inputs[cursor]
             if signal["signal_ts"] > ts:
                 continue
+            if ctx["entry_fill_model"] == "adverse_candle_extreme" and ts <= signal["signal_ts"]:
+                continue
             # Advance cursor past this signal
             signal_cursors[asset] = cursor + 1
 
@@ -589,6 +601,7 @@ def _simulate(
                 signal=signal,
                 candle=candle,
                 ctx=ctx,
+                entry_ts=ts,
                 equity=account_equity,
                 margin_budget=margin_needed,
             )
@@ -732,9 +745,9 @@ def _manage_position(
     step_pct = float(pyramid.get("step_pct", 999))
     sl_breakeven = bool(pyramid.get("sl_breakeven", False))
 
-    if len(position["legs"]) < max_legs:
-        last_entry = position["legs"][-1]["entry_price"]
-        next_entry = _next_entry(last_entry, step_pct=step_pct, direction=direction)
+    active_legs = _active_legs(position)
+    if len(active_legs) < max_legs:
+        next_entry = _next_pyramid_trigger_price(position=position, step_pct=step_pct, direction=direction)
         if _entry_hit(candle, next_entry, direction=direction):
             per_leg_margin = position["margin_budget"] / max_legs
             remaining_cash = available_cash - result["margin_consumed"]
@@ -770,8 +783,8 @@ def _manage_position(
                 position["legs"].append(leg)
                 result["margin_consumed"] += per_leg_margin
                 if sl_breakeven:
-                    position["sl_price"] = sum(leg["entry_price"] for leg in position["legs"]) / len(position["legs"])
                     position["active_sl_kind"] = "breakeven"
+                _recalculate_position_exit_levels(position=position, policy=policy, direction=direction)
 
     # Check protection trigger
     protection_enabled = bool(policy.get("protection_enabled", False))
@@ -779,22 +792,21 @@ def _manage_position(
     trail_sl_pct = policy.get("trail_sl_pct")
     if (protection_enabled and not position["protection_activated"]
             and protect_trigger_pct is not None and trail_sl_pct is not None):
-        protect_trigger_price = _target_price(position["entry_price"], tp_pct=float(protect_trigger_pct), direction=direction)
+        protect_trigger_price = _target_price(position["avg_entry_price"], tp_pct=float(protect_trigger_pct), direction=direction)
         if _entry_hit(candle, protect_trigger_price, direction=direction):
             position["protection_activated"] = True
-            position["sl_price"] = _protected_stop_price(position["entry_price"], pct=float(trail_sl_pct), direction=direction)
             position["active_sl_kind"] = "protected"
+            _recalculate_position_exit_levels(position=position, policy=policy, direction=direction)
 
-    # Check TP/SL for each active leg
+    # Check shared TP/SL for the whole isolated position.
     sl_price = position["sl_price"]
-    tp_pct = policy["tp_pct"]
     closed_legs: list[tuple[dict[str, Any], str, float, datetime]] = []
-    for leg in position["legs"]:
-        if leg.get("exit_status"):
-            continue
-        tp_hit, sl_hit = _tp_sl_hit(candle, tp=leg["tp_price"], sl=sl_price, direction=direction)
-        if not tp_hit and not sl_hit:
-            continue
+    active_legs = _active_legs(position)
+    if active_legs:
+        tp_hit, sl_hit = _tp_sl_hit(candle, tp=position["tp_price"], sl=sl_price, direction=direction)
+    else:
+        tp_hit, sl_hit = False, False
+    if tp_hit or sl_hit:
         if tp_hit and sl_hit:
             exit_status = _resolve_dual_hit(candle, direction=direction)
         elif tp_hit:
@@ -803,18 +815,34 @@ def _manage_position(
             exit_status = "SL"
         if exit_status == "SL":
             exit_status = "PROTECTED_SL" if position["active_sl_kind"] == "protected" else "INITIAL_SL"
-        exit_price = leg["tp_price"] if exit_status == "TP" else sl_price
-        closed_legs.append((leg, exit_status, exit_price, ts))
+        level_exit_price = position["tp_price"] if exit_status == "TP" else sl_price
+        exit_price = _exit_fill_price(
+            direction=direction,
+            candle=candle,
+            level_exit_price=level_exit_price,
+            exit_status=exit_status,
+            exit_fill_model=ctx["exit_fill_model"],
+        )
+        closed_legs.extend((leg, exit_status, exit_price, level_exit_price, ts) for leg in active_legs)
 
-    for leg, exit_status, exit_price, exit_ts in closed_legs:
-        _close_leg(leg, exit_status=exit_status, exit_price=exit_price, exit_ts=exit_ts, direction=direction, fee_rate=fee_rate, slippage_rate=slippage_rate)
+    for leg, exit_status, exit_price, raw_exit_price, exit_ts in closed_legs:
+        _close_leg(
+            leg,
+            exit_status=exit_status,
+            exit_price=exit_price,
+            raw_exit_price=raw_exit_price,
+            exit_ts=exit_ts,
+            direction=direction,
+            fee_rate=fee_rate,
+            slippage_rate=slippage_rate,
+        )
 
     active_legs = [leg for leg in position["legs"] if not leg.get("exit_status")]
     if not active_legs:
         # All legs closed — close the position
         result["closed"] = _close_position(position=position, exit_price=closed_legs[-1][2], exit_ts=ts, exit_status=_resolve_exit_status(position["legs"]))
         return result
-    for leg, _, _, _ in closed_legs:
+    for leg, _, _, _, _ in closed_legs:
         if not leg.get("cash_released"):
             result["cash_released"] += float(leg.get("margin_usdt") or 0) + float(leg.get("net_pnl_usdt") or 0)
             leg["cash_released"] = True
@@ -834,12 +862,62 @@ def _entry_fill_price(
     return float(reference_price)
 
 
+def _active_legs(position: dict[str, Any]) -> list[dict[str, Any]]:
+    return [leg for leg in position["legs"] if not leg.get("exit_status")]
+
+
+def _position_average_entry_price(position: dict[str, Any]) -> float:
+    active_legs = _active_legs(position)
+    total_quantity = sum(float(leg.get("quantity") or 0) for leg in active_legs)
+    total_notional = sum(float(leg.get("entry_notional_usdt") or 0) for leg in active_legs)
+    if total_quantity <= 0:
+        return float(position.get("avg_entry_price") or position.get("entry_price") or 0)
+    return total_notional / total_quantity
+
+
+def _next_pyramid_trigger_price(*, position: dict[str, Any], step_pct: float, direction: str) -> float:
+    avg_entry = _position_average_entry_price(position)
+    filled_legs = max(1, len(_active_legs(position)))
+    if direction == "SHORT":
+        return avg_entry * (1 - filled_legs * step_pct / 100)
+    return avg_entry * (1 + filled_legs * step_pct / 100)
+
+
+def _recalculate_position_exit_levels(*, position: dict[str, Any], policy: dict[str, Any], direction: str) -> None:
+    avg_entry = _position_average_entry_price(position)
+    position["avg_entry_price"] = avg_entry
+    position["tp_price"] = _target_price(avg_entry, tp_pct=policy["tp_pct"], direction=direction)
+    if position["active_sl_kind"] == "breakeven":
+        position["sl_price"] = avg_entry
+    elif position["active_sl_kind"] == "protected" and position.get("trail_sl_pct") is not None:
+        position["sl_price"] = _protected_stop_price(avg_entry, pct=float(position["trail_sl_pct"]), direction=direction)
+    else:
+        sl_pct = policy["sl_pct"]
+        position["sl_price"] = avg_entry * (1 - sl_pct / 100) if direction == "LONG" else avg_entry * (1 + sl_pct / 100)
+    for leg in _active_legs(position):
+        leg["tp_price"] = position["tp_price"]
+
+
+def _exit_fill_price(
+    *,
+    direction: str,
+    candle: dict[str, Any],
+    level_exit_price: float,
+    exit_status: str,
+    exit_fill_model: str,
+) -> float:
+    if exit_fill_model == "adverse_stop_extreme" and exit_status in {"INITIAL_SL", "PROTECTED_SL", "SL"}:
+        return float(candle["low"] if direction == "LONG" else candle["high"])
+    return float(level_exit_price)
+
+
 def _open_position(
     *,
     asset: str,
     signal: dict[str, Any],
     candle: dict[str, Any],
     ctx: dict[str, Any],
+    entry_ts: datetime,
     equity: float,
     margin_budget: float,
 ) -> dict[str, Any]:
@@ -870,7 +948,7 @@ def _open_position(
         leg_number=1,
         entry_price=entry_price,
         raw_entry_price=reference_price,
-        entry_ts=signal["signal_ts"],
+        entry_ts=entry_ts,
         tp_pct=policy["tp_pct"],
         direction=direction,
         margin_usdt=per_leg_margin,
@@ -880,14 +958,17 @@ def _open_position(
     )
 
     position_id = f"{asset}:{signal['signal_id']}"
-    return {
+    position = {
         "asset": asset,
         "ctx": ctx,
         "signal": signal,
         "direction": direction,
         "reference_price": reference_price,
         "entry_fill_model": ctx["entry_fill_model"],
+        "exit_fill_model": ctx["exit_fill_model"],
         "entry_price": entry_price,
+        "avg_entry_price": entry_price,
+        "tp_price": leg["tp_price"],
         "signal_ts": signal["signal_ts"],
         "position_id": position_id,
         "margin_budget": margin_budget,
@@ -903,6 +984,8 @@ def _open_position(
         "protected_sl_price": protected_sl_price,
         "policy": policy,
     }
+    _recalculate_position_exit_levels(position=position, policy=policy, direction=direction)
+    return position
 
 
 def _close_position(
@@ -956,11 +1039,15 @@ def _close_position(
         "decision_direction": direction,
         "reference_price": round(position["reference_price"], 8),
         "entry_fill_model": position["entry_fill_model"],
+        "exit_fill_model": position["exit_fill_model"],
         "position_id": position["position_id"],
         "entry_status": "FILLED",
         "exit_status": _resolve_exit_status(legs) if exit_status == "HARD_EXIT" else exit_status,
         "entry_price": round(position["entry_price"], 8),
         "exit_price": round(float(legs[-1]["exit_price"]), 8),
+        "position_avg_entry_price": round(float(position.get("avg_entry_price") or position["entry_price"]), 8),
+        "position_tp_price": round(float(position.get("tp_price") or 0), 8),
+        "position_sl_price": round(float(position.get("sl_price") or 0), 8),
         "filled_legs": len(legs),
         "leverage": ctx["leverage"],
         "position_margin_usdt": _round_money(position_margin),
@@ -1041,6 +1128,7 @@ def _close_leg(
     *,
     exit_status: str,
     exit_price: float,
+    raw_exit_price: float | None = None,
     exit_ts: datetime,
     direction: str,
     fee_rate: float,
@@ -1051,7 +1139,7 @@ def _close_leg(
     leg.update({
         "exit_status": exit_status,
         "exit_price": exit_price,
-        "raw_exit_price": exit_price,
+        "raw_exit_price": exit_price if raw_exit_price is None else raw_exit_price,
         "exit_ts": _to_iso(exit_ts),
         "exit_notional_usdt": exit_notional,
         "exit_fee_usdt": exit_notional * fee_rate,
@@ -1459,6 +1547,7 @@ def _render_summary(payload: dict[str, Any]) -> str:
             f"Mode: `candle_by_candle`",
             f"Signal offset: `{simulation_inputs.get('signal_offset_count', 0)}`",
             f"Entry fill model: `{simulation_inputs.get('entry_fill_model', 'reference_price')}`",
+            f"Exit fill model: `{simulation_inputs.get('exit_fill_model', 'level_price')}`",
             f"Ending equity: `${account['ending_equity_usdt']:.4f}`",
             f"Net PnL: `${account['net_pnl_usdt']:.4f}`",
             f"Available cash: `${summary.get('available_cash_usdt', 0):.4f}`",

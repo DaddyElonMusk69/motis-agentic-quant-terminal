@@ -94,6 +94,7 @@ def run_stage1a_score(*, iteration_root: Path, sample_role: str) -> dict[str, An
     decisions_path.write_text(json.dumps(decisions_artifact, indent=2) + "\n")
     scores_path.write_text(json.dumps(score_artifact, indent=2) + "\n")
     summary_path.write_text(_render_summary(metrics, title=artifacts["title"]))
+    _preserve_scored_strategy_snapshot(iteration_root=iteration_root, strategy_path=_strategy_path_for_iteration(iteration_root))
     return {
         "decisions_path": str(decisions_path),
         "scores_path": str(scores_path),
@@ -465,6 +466,15 @@ def _strategy_path_for_iteration(iteration_root: Path) -> Path:
     if iteration_strategy.exists():
         return iteration_strategy
     return iteration_root.parents[1] / "strategy_module" / "strategy.py"
+
+
+def _preserve_scored_strategy_snapshot(*, iteration_root: Path, strategy_path: Path) -> None:
+    target_root = iteration_root / "strategy_module"
+    if strategy_path.resolve() == (target_root / "strategy.py").resolve():
+        return
+    if target_root.exists():
+        shutil.rmtree(target_root)
+    shutil.copytree(strategy_path.parent, target_root)
 
 
 def _training_labels(training_sample: dict[str, Any]) -> dict[str, str]:

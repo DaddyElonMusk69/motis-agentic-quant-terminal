@@ -24,6 +24,7 @@ import {
   generateStage1FailureAudit,
   isJobResponse,
   promoteExecutionBundle,
+  promoteStage1Iteration,
   promoteStage2ExitPolicy,
   runPortfolioBacktest,
   runStage1CanonicalReadout,
@@ -99,6 +100,7 @@ type PortfolioBacktestModalState = {
   initialCapital: number;
   signalOffsetCount: number;
   entryFillModel: "reference_price" | "adverse_candle_extreme";
+  exitFillModel: "level_price" | "adverse_stop_extreme";
   allocations: Record<string, number>;
   result: PortfolioBacktestResult | null;
 };
@@ -436,6 +438,13 @@ function formatPortfolioEntryFillModel(value: string | undefined | null): string
     return "Worse 5m fill";
   }
   return "Normal fill";
+}
+
+function formatPortfolioExitFillModel(value: string | undefined | null): string {
+  if (value === "adverse_stop_extreme") {
+    return "Worst stop";
+  }
+  return "Level exits";
 }
 
 function roleIterations(iterations: Stage1IterationSummary[]): Record<Stage1SampleRole, Stage1IterationSummary[]> {
@@ -1123,6 +1132,10 @@ export function ResearchDevelopmentPage() {
       }
     }
   });
+  const stage1PromoteMutation = useMutation({
+    mutationFn: promoteStage1Iteration,
+    onSuccess: (_result, variables) => invalidateDevelopment(variables.session_id, pool?.universe_run_id)
+  });
   const stage2Mutation = useMutation({
     mutationFn: runStage2CaptureCurve,
     onSuccess: (result, sessionId) => {
@@ -1397,7 +1410,7 @@ export function ResearchDevelopmentPage() {
     }
     const baseAllocation = completedStage4Assets.length ? Math.min(30, Math.floor(100 / completedStage4Assets.length)) : 0;
     const allocations = Object.fromEntries(completedStage4Assets.map((candidate) => [candidate.asset, baseAllocation]));
-    setPortfolioBacktestModal({ initialCapital: 10000, signalOffsetCount: 0, entryFillModel: "reference_price", allocations, result: null });
+    setPortfolioBacktestModal({ initialCapital: 10000, signalOffsetCount: 0, entryFillModel: "reference_price", exitFillModel: "level_price", allocations, result: null });
   };
 
   const closeIterationDetail = () => {
@@ -1439,7 +1452,8 @@ export function ResearchDevelopmentPage() {
       initial_capital_usdt: portfolioBacktestModal.initialCapital,
       margin_allocations_pct: portfolioBacktestModal.allocations,
       signal_offset_count: portfolioBacktestModal.signalOffsetCount,
-      entry_fill_model: portfolioBacktestModal.entryFillModel
+      entry_fill_model: portfolioBacktestModal.entryFillModel,
+      exit_fill_model: portfolioBacktestModal.exitFillModel
     });
   };
 
@@ -1567,6 +1581,7 @@ export function ResearchDevelopmentPage() {
     scoreMutation.error,
     auditMutation.error,
     canonicalMutation.error,
+    stage1PromoteMutation.error,
     stage2Mutation.error,
     stage2ExitPolicyMutation.error,
     stage3FixedSlMutation.error,
@@ -1736,11 +1751,18 @@ export function ResearchDevelopmentPage() {
                 onDelete={(iteration) => deleteIterationMutation.mutate({ session_id: session!.session_id, iteration_id: iteration.iteration_id })}
                 onOpenIteration={setSelectedIteration}
                 onOpenPrompt={(iteration) => promptMutation.mutate({ session_id: session!.session_id, iteration_id: iteration.iteration_id })}
+                onPromote={(iteration) => {
+                  if (window.confirm(`Promote ${iteration.iteration_id} as the active Stage 1 strategy? Downstream stages should be rerun manually after this change.`)) {
+                    stage1PromoteMutation.mutate({ session_id: session!.session_id, iteration_id: iteration.iteration_id });
+                  }
+                }}
                 onRunCanonical={() => requestCanonicalFreeze()}
                 onScore={(iteration) => scoreMutation.mutate({ session_id: session!.session_id, iteration_id: iteration.iteration_id, sample_role: stage1RoleForIteration(iteration) })}
                 onStartStage1={requestStartStage1}
                 row={row}
                 runningCanonical={canonicalMutation.isPending || isJobRunning("canonical")}
+                promotingIterationId={stage1PromoteMutation.variables?.iteration_id ?? null}
+                promotingStage1={stage1PromoteMutation.isPending}
                 session={session}
                 startingSession={createSessionMutation.isPending}
               />
@@ -2233,9 +2255,12 @@ function Stage1Panel({
   onDelete,
   onOpenIteration,
   onOpenPrompt,
+  onPromote,
   onRunCanonical,
   onScore,
   onStartStage1,
+  promotingIterationId,
+  promotingStage1,
   row,
   runningCanonical,
   session,
@@ -2252,9 +2277,12 @@ function Stage1Panel({
   onDelete: (iteration: Stage1IterationSummary) => void;
   onOpenIteration: (iteration: Stage1IterationSummary) => void;
   onOpenPrompt: (iteration: Stage1IterationSummary) => void;
+  onPromote: (iteration: Stage1IterationSummary) => void;
   onRunCanonical: () => void;
   onScore: (iteration: Stage1IterationSummary) => void;
   onStartStage1: () => void;
+  promotingIterationId: string | null;
+  promotingStage1: boolean;
   row: DevelopmentQueueRow | undefined;
   runningCanonical: boolean;
   session: Stage1ResearchSession | null;
@@ -2345,6 +2373,17 @@ function Stage1Panel({
                 { key: "audit", header: "Audit", render: (iteration) => iteration.has_failure_audit ? "ready" : "none" },
                 { key: "actions", header: "Actions", align: "right", render: (iteration) => (
                   <div className="table-action-row">
+                    {stage1RoleForIteration(iteration) === "training" ? (
+                      <button
+                        className={promotingStage1 && promotingIterationId === iteration.iteration_id ? "button button--secondary button--loading" : "button button--secondary"}
+                        disabled={promotingStage1 || !stage1ScoreForRole(iteration, "training")}
+                        onClick={(event) => { event.stopPropagation(); onPromote(iteration); }}
+                        title="Promote this training strategy as the active Stage 1 strategy. Downstream stages are not reset automatically."
+                        type="button"
+                      >
+                        {promotingStage1 && promotingIterationId === iteration.iteration_id ? "Promoting" : "Promote"}
+                      </button>
+                    ) : null}
                     <button className="button button--secondary" onClick={(event) => { event.stopPropagation(); onOpenPrompt(iteration); }} type="button">Prompt</button>
                     <button className="button button--secondary" disabled={frozen} onClick={(event) => { event.stopPropagation(); onScore(iteration); }} type="button">Score</button>
                     <button className="button button--secondary" disabled={frozen || !stage1ScoreForRole(iteration, stage1RoleForIteration(iteration))} onClick={(event) => { event.stopPropagation(); onAudit(iteration); }} type="button">Audit</button>
@@ -3467,6 +3506,20 @@ function PortfolioBacktestModal({
                         <option value="adverse_candle_extreme">Worse 5m fill</option>
                       </select>
                     </label>
+                    <label className="portfolio-capital-field portfolio-capital-field--compact portfolio-fill-model-field">
+                      <span>Exit Fill</span>
+                      <select
+                        className="portfolio-fill-model-select"
+                        onChange={(event) => {
+                          const next = event.target.value === "adverse_stop_extreme" ? "adverse_stop_extreme" : "level_price";
+                          onStateChange((current) => (current ? { ...current, exitFillModel: next } : current));
+                        }}
+                        value={state.exitFillModel}
+                      >
+                        <option value="level_price">Level exits</option>
+                        <option value="adverse_stop_extreme">Worst stop</option>
+                      </select>
+                    </label>
                     <div className="portfolio-account-facts">
                       <div>
                         <span>Eligible</span>
@@ -3536,7 +3589,7 @@ function PortfolioBacktestModal({
                         <button className="portfolio-run-history-main" onClick={() => onLoadRun(run.run_id)} type="button">
                           <strong>{run.run_id === latestRunId ? "Latest" : formatCompactUtcTimestamp(run.created_at)}</strong>
                           <span>{formatUsd(run.account?.ending_equity_usdt)} · {formatUsd(run.account?.net_pnl_usdt)} PnL</span>
-                          <small>{formatNumber(run.summary?.executed_positions)} trades · {formatNumber(run.summary?.skipped_signals)} skipped · offset {formatNumber(run.simulation_inputs?.signal_offset_count ?? 0)} · {formatPortfolioEntryFillModel(run.simulation_inputs?.entry_fill_model)}</small>
+                          <small>{formatNumber(run.summary?.executed_positions)} trades · {formatNumber(run.summary?.skipped_signals)} skipped · offset {formatNumber(run.simulation_inputs?.signal_offset_count ?? 0)} · {formatPortfolioEntryFillModel(run.simulation_inputs?.entry_fill_model)} · {formatPortfolioExitFillModel(run.simulation_inputs?.exit_fill_model)}</small>
                         </button>
                         <div className="portfolio-run-history-actions">
                           <button
@@ -3593,6 +3646,7 @@ function PortfolioBacktestModal({
                     <span>Skips {formatNumber((result.summary.skipped_insufficient_margin ?? 0) + (result.summary.skipped_asset_open ?? 0) + (result.summary.skipped_timing_filter ?? 0))}</span>
                     <span>Offset {formatNumber(result.simulation_inputs.signal_offset_count ?? 0)}</span>
                     <span>{formatPortfolioEntryFillModel(result.simulation_inputs.entry_fill_model)}</span>
+                    <span>{formatPortfolioExitFillModel(result.simulation_inputs.exit_fill_model)}</span>
                   </div>
                 </div>
 

@@ -798,6 +798,7 @@ export type PortfolioBacktestResult = {
     margin_allocations_pct: Record<string, number>;
     signal_offset_count?: number;
     entry_fill_model?: "reference_price" | "adverse_candle_extreme" | string;
+    exit_fill_model?: "level_price" | "adverse_stop_extreme" | string;
     margin_basis?: string;
     pyramid_margin_mode?: string;
   };
@@ -1368,6 +1369,7 @@ export function runPortfolioBacktest(request: {
   margin_allocations_pct: Record<string, number>;
   signal_offset_count?: number;
   entry_fill_model?: "reference_price" | "adverse_candle_extreme";
+  exit_fill_model?: "level_price" | "adverse_stop_extreme";
 }): Promise<{ portfolio_backtest: PortfolioBacktestResult } | AsyncJobResponse> {
   return requestJson(`/api/v1/research/stage0-universe-runs/${request.universe_run_id}/portfolio-backtest`, {
     method: "POST",
@@ -1376,7 +1378,8 @@ export function runPortfolioBacktest(request: {
       initial_capital_usdt: request.initial_capital_usdt,
       margin_allocations_pct: request.margin_allocations_pct,
       signal_offset_count: request.signal_offset_count ?? 0,
-      entry_fill_model: request.entry_fill_model ?? "reference_price"
+      entry_fill_model: request.entry_fill_model ?? "reference_price",
+      exit_fill_model: request.exit_fill_model ?? "level_price"
     })
   });
 }
@@ -1569,6 +1572,19 @@ export function runStage1CanonicalReadout(request: {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ force: Boolean(request.force) })
+  });
+}
+
+export function promoteStage1Iteration(request: {
+  session_id: string;
+  iteration_id: string;
+}): Promise<{ promoted_iteration_id: string; canonical_readout: Stage1TrainingScore & {
+  frozen_strategy_path: string;
+  slice_metrics: Record<string, Stage1TrainingScore["metrics"]>;
+  match_count: number;
+}; gate: Stage1GateSummary }> {
+  return requestJson(`/api/v1/research/stage1-sessions/${request.session_id}/iterations/${request.iteration_id}/promote`, {
+    method: "POST"
   });
 }
 

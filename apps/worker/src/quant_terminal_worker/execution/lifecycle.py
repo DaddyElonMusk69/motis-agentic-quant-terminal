@@ -10,6 +10,9 @@ from quant_terminal_worker.execution.wake_runner import run_route_wake
 from quant_terminal_worker.ingestion.signal_pool_extension import extend_signal_pool_from_local_candles
 
 
+DEFAULT_LIVE_CANDLE_CLOSE_GRACE_SECONDS = 15
+
+
 def run_route_lifecycle_cycle(
     *,
     route_id: str,
@@ -95,12 +98,50 @@ def run_route_lifecycle_cycle(
 
 
 def next_wake_at(route: dict[str, Any], *, from_time: datetime | None = None) -> datetime:
-    base = from_time or datetime.now(UTC)
+    base = _utc(from_time or datetime.now(UTC))
     try:
         minutes = int(route.get("cron_interval_minutes") or 5)
     except (TypeError, ValueError):
         minutes = 5
-    return base + timedelta(minutes=max(1, minutes))
+    minutes = max(1, minutes)
+    if route.get("account_mode") == "live":
+        return _next_aligned_candle_close_wake(
+            base,
+            interval_minutes=minutes,
+            grace_seconds=_live_candle_close_grace_seconds(route),
+        )
+    return base + timedelta(minutes=minutes)
+
+
+def _next_aligned_candle_close_wake(
+    base: datetime,
+    *,
+    interval_minutes: int,
+    grace_seconds: int,
+) -> datetime:
+    interval_seconds = max(1, interval_minutes) * 60
+    day_start = base.replace(hour=0, minute=0, second=0, microsecond=0)
+    elapsed_seconds = int((base - day_start).total_seconds())
+    next_boundary_offset = ((elapsed_seconds // interval_seconds) + 1) * interval_seconds
+    current_boundary_offset = (elapsed_seconds // interval_seconds) * interval_seconds
+    current_boundary_wake = day_start + timedelta(seconds=current_boundary_offset + grace_seconds)
+    if base <= current_boundary_wake:
+        return current_boundary_wake
+    return day_start + timedelta(seconds=next_boundary_offset + grace_seconds)
+
+
+def _live_candle_close_grace_seconds(route: dict[str, Any]) -> int:
+    value = route.get("candle_close_grace_seconds")
+    if value is None:
+        value = route.get("live_candle_close_grace_seconds")
+    try:
+        return max(0, int(value if value is not None else DEFAULT_LIVE_CANDLE_CLOSE_GRACE_SECONDS))
+    except (TypeError, ValueError):
+        return DEFAULT_LIVE_CANDLE_CLOSE_GRACE_SECONDS
+
+
+def _utc(value: datetime) -> datetime:
+    return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
 
 
 def _warm_market_data(

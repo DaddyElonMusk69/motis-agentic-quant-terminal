@@ -399,7 +399,7 @@ def test_portfolio_backtest_applies_per_asset_signal_offset(tmp_path: Path, monk
     assert result["eligible_assets"][0]["signal_count"] == 1
 
 
-def test_portfolio_backtest_adverse_candle_extreme_fill_uses_high_for_long_and_low_for_short(tmp_path: Path, monkeypatch):
+def test_portfolio_backtest_adverse_candle_extreme_fill_uses_next_candle_high_for_long_and_low_for_short(tmp_path: Path, monkeypatch):
     pool_id = "pool-adverse-fill"
     aave_root = _write_stage4_artifacts(
         tmp_path,
@@ -425,11 +425,13 @@ def test_portfolio_backtest_adverse_candle_extreme_fill_uses_high_for_long_and_l
     )
     aave_candles = [
         {"timestamp": datetime(2026, 5, 1, 0, 0, tzinfo=UTC), "open": 100.0, "high": 106.0, "low": 94.0, "close": 100.0},
-        *_make_candles("2026-05-01T00:05:00Z", 20, base_price=100.0, trend=0.0),
+        {"timestamp": datetime(2026, 5, 1, 0, 5, tzinfo=UTC), "open": 101.0, "high": 109.0, "low": 100.5, "close": 102.0},
+        *_make_candles("2026-05-01T00:10:00Z", 20, base_price=102.0, trend=0.0),
     ]
     sol_candles = [
         {"timestamp": datetime(2026, 5, 1, 0, 0, tzinfo=UTC), "open": 100.0, "high": 106.0, "low": 94.0, "close": 100.0},
-        *_make_candles("2026-05-01T00:05:00Z", 20, base_price=100.0, trend=0.0),
+        {"timestamp": datetime(2026, 5, 1, 0, 5, tzinfo=UTC), "open": 99.0, "high": 99.5, "low": 91.0, "close": 98.0},
+        *_make_candles("2026-05-01T00:10:00Z", 20, base_price=98.0, trend=0.0),
     ]
     signals = {
         "sigset-aave": [_make_signal("sig-aave-1", "2026-05-01T00:00:00Z", "LONG", 100.0)],
@@ -453,11 +455,15 @@ def test_portfolio_backtest_adverse_candle_extreme_fill_uses_high_for_long_and_l
     )
 
     trades = {trade["asset"]: trade for trade in result["trade_ledger"]}
-    assert trades["AAVE"]["entry_price"] == 106.0
+    assert trades["AAVE"]["entry_price"] == 109.0
     assert trades["AAVE"]["reference_price"] == 100.0
+    assert trades["AAVE"]["entry_ts"] == "2026-05-01T00:05:00Z"
+    assert trades["AAVE"]["signal_ts"] == "2026-05-01T00:00:00Z"
     assert trades["AAVE"]["entry_fill_model"] == "adverse_candle_extreme"
-    assert trades["SOL"]["entry_price"] == 94.0
+    assert trades["SOL"]["entry_price"] == 91.0
     assert trades["SOL"]["reference_price"] == 100.0
+    assert trades["SOL"]["entry_ts"] == "2026-05-01T00:05:00Z"
+    assert trades["SOL"]["signal_ts"] == "2026-05-01T00:00:00Z"
     assert trades["SOL"]["entry_fill_model"] == "adverse_candle_extreme"
     assert result["simulation_inputs"]["entry_fill_model"] == "adverse_candle_extreme"
 
@@ -480,7 +486,8 @@ def test_portfolio_backtest_adverse_candle_extreme_fill_applies_to_pyramid_adds(
     candles = [
         {"timestamp": datetime(2026, 5, 1, 0, 0, tzinfo=UTC), "open": 100.0, "high": 100.0, "low": 99.8, "close": 100.0},
         {"timestamp": datetime(2026, 5, 1, 0, 5, tzinfo=UTC), "open": 100.0, "high": 103.0, "low": 99.9, "close": 101.2},
-        *_make_candles("2026-05-01T00:10:00Z", 160, base_price=101.2, trend=0.0),
+        {"timestamp": datetime(2026, 5, 1, 0, 10, tzinfo=UTC), "open": 101.2, "high": 106.0, "low": 101.0, "close": 104.2},
+        *_make_candles("2026-05-01T00:15:00Z", 160, base_price=104.2, trend=0.0),
     ]
     signals = {"sigset-aave": [_make_signal("sig-aave-1", "2026-05-01T00:00:00Z", "LONG", 100.0)]}
 
@@ -502,8 +509,75 @@ def test_portfolio_backtest_adverse_candle_extreme_fill_applies_to_pyramid_adds(
 
     trade = result["trade_ledger"][0]
     assert trade["filled_legs"] == 2
-    assert [leg["entry_price"] for leg in trade["leg_details"]] == [100.0, 103.0]
-    assert [leg["raw_entry_price"] for leg in trade["leg_details"]] == [100.0, 101.0]
+    assert [leg["entry_price"] for leg in trade["leg_details"]] == [103.0, 106.0]
+    assert trade["leg_details"][0]["raw_entry_price"] == 100.0
+    assert trade["leg_details"][1]["raw_entry_price"] == pytest.approx(104.03)
+
+
+def test_portfolio_backtest_adverse_stop_extreme_uses_candle_extreme_for_stop_exits(tmp_path: Path, monkeypatch):
+    pool_id = "pool-adverse-stop"
+    aave_root = _write_stage4_artifacts(
+        tmp_path,
+        asset="AAVE",
+        session_id="stage1-aave",
+        candidate_id="candidate-aave",
+        tp_pct=10.0,
+        sl_pct=1.0,
+        leverage=1.0,
+        max_hold_hours=12.0,
+        signal_records=[{"signal_id": "sig-aave-1", "decision_direction": "LONG", "agreement": "MATCH"}],
+    )
+    sol_root = _write_stage4_artifacts(
+        tmp_path,
+        asset="SOL",
+        session_id="stage1-sol",
+        candidate_id="candidate-sol",
+        tp_pct=10.0,
+        sl_pct=1.0,
+        leverage=1.0,
+        max_hold_hours=12.0,
+        signal_records=[{"signal_id": "sig-sol-1", "decision_direction": "SHORT", "agreement": "MATCH"}],
+    )
+    signals = {
+        "sigset-aave": [_make_signal("sig-aave-1", "2026-05-01T00:00:00Z", "LONG", 100.0)],
+        "sigset-sol": [_make_signal("sig-sol-1", "2026-05-01T00:00:00Z", "SHORT", 100.0)],
+    }
+    candles = {
+        "AAVE": [
+            {"timestamp": datetime(2026, 5, 1, 0, 0, tzinfo=UTC), "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0},
+            {"timestamp": datetime(2026, 5, 1, 0, 5, tzinfo=UTC), "open": 100.0, "high": 100.1, "low": 95.0, "close": 96.0},
+        ],
+        "SOL": [
+            {"timestamp": datetime(2026, 5, 1, 0, 0, tzinfo=UTC), "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0},
+            {"timestamp": datetime(2026, 5, 1, 0, 5, tzinfo=UTC), "open": 100.0, "high": 105.0, "low": 99.9, "close": 104.0},
+        ],
+    }
+    monkeypatch.setattr(
+        "quant_terminal_worker.stage4.portfolio_backtest.MarketDataReader",
+        lambda **kw: MockMarketDataReader(candles),
+    )
+
+    result = run_portfolio_backtest(
+        workspace_root=tmp_path,
+        universe_run={"universe_run_id": pool_id},
+        candidates=[_candidate(pool_id, "candidate-aave", "AAVE"), _candidate(pool_id, "candidate-sol", "SOL")],
+        sessions=[_session(pool_id, "candidate-aave", "AAVE", aave_root), _session(pool_id, "candidate-sol", "SOL", sol_root)],
+        initial_capital_usdt=1000,
+        margin_allocations_pct={"AAVE": 30, "SOL": 30},
+        exit_fill_model="adverse_stop_extreme",
+        repository=MockRepository(signals),
+    )
+
+    trades = {trade["asset"]: trade for trade in result["trade_ledger"]}
+    assert trades["AAVE"]["exit_status"] == "INITIAL_SL"
+    assert trades["AAVE"]["exit_price"] == 95.0
+    assert trades["AAVE"]["exit_fill_model"] == "adverse_stop_extreme"
+    assert trades["AAVE"]["leg_details"][0]["raw_exit_price"] == 99.0
+    assert trades["SOL"]["exit_status"] == "INITIAL_SL"
+    assert trades["SOL"]["exit_price"] == 105.0
+    assert trades["SOL"]["exit_fill_model"] == "adverse_stop_extreme"
+    assert trades["SOL"]["leg_details"][0]["raw_exit_price"] == 101.0
+    assert result["simulation_inputs"]["exit_fill_model"] == "adverse_stop_extreme"
 
 
 def test_portfolio_backtest_reports_asset_contribution_breakdown(tmp_path: Path, monkeypatch):
@@ -797,7 +871,103 @@ def test_portfolio_backtest_fills_pyramid_leg_when_cash_is_available(tmp_path: P
     assert result["summary"]["skipped_pyramid_margin"] == 0
 
 
-def test_portfolio_backtest_releases_closed_pyramid_leg_cash_before_other_asset_entries(tmp_path: Path, monkeypatch):
+def test_portfolio_backtest_recalculates_shared_tp_sl_from_average_entry_after_pyramid(tmp_path: Path, monkeypatch):
+    pool_id = "pool-pyramid-average-exit"
+    aave_root = _write_stage4_artifacts(
+        tmp_path,
+        asset="AAVE",
+        session_id="stage1-aave",
+        candidate_id="candidate-aave",
+        tp_pct=2.0,
+        sl_pct=50.0,
+        leverage=1.0,
+        max_hold_hours=12.0,
+        pyramid_step_pct=1.0,
+        max_legs=2,
+        signal_records=[{"signal_id": "sig-aave-1", "decision_direction": "LONG", "agreement": "MATCH"}],
+    )
+    candles = [
+        {"timestamp": datetime(2026, 5, 1, 0, 0, tzinfo=UTC), "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0},
+        {"timestamp": datetime(2026, 5, 1, 0, 5, tzinfo=UTC), "open": 100.0, "high": 101.2, "low": 99.9, "close": 101.0},
+        {"timestamp": datetime(2026, 5, 1, 0, 10, tzinfo=UTC), "open": 101.0, "high": 102.3, "low": 100.8, "close": 102.0},
+        {"timestamp": datetime(2026, 5, 1, 0, 15, tzinfo=UTC), "open": 102.0, "high": 102.6, "low": 101.8, "close": 102.5},
+    ]
+    signals = {"sigset-aave": [_make_signal("sig-aave-1", "2026-05-01T00:00:00Z", "LONG", 100.0)]}
+    monkeypatch.setattr(
+        "quant_terminal_worker.stage4.portfolio_backtest.MarketDataReader",
+        lambda **kw: MockMarketDataReader({"AAVE": candles}),
+    )
+
+    result = run_portfolio_backtest(
+        workspace_root=tmp_path,
+        universe_run={"universe_run_id": pool_id},
+        candidates=[_candidate(pool_id, "candidate-aave", "AAVE")],
+        sessions=[_session(pool_id, "candidate-aave", "AAVE", aave_root)],
+        initial_capital_usdt=1000,
+        margin_allocations_pct={"AAVE": 60},
+        repository=MockRepository(signals),
+    )
+
+    trade = result["trade_ledger"][0]
+    expected_avg = 600 / ((300 / 100) + (300 / 101))
+    expected_tp = expected_avg * 1.02
+    assert trade["filled_legs"] == 2
+    assert trade["exit_ts"] == "2026-05-01T00:15:00Z"
+    assert trade["position_avg_entry_price"] == pytest.approx(expected_avg)
+    assert trade["position_tp_price"] == pytest.approx(expected_tp)
+    assert trade["exit_price"] == pytest.approx(expected_tp)
+    assert [leg["exit_price"] for leg in trade["leg_details"]] == pytest.approx([expected_tp, expected_tp])
+    assert [leg["tp_price"] for leg in trade["leg_details"]] == pytest.approx([expected_tp, expected_tp])
+
+
+def test_portfolio_backtest_uses_average_entry_for_next_pyramid_trigger(tmp_path: Path, monkeypatch):
+    pool_id = "pool-pyramid-average-trigger"
+    aave_root = _write_stage4_artifacts(
+        tmp_path,
+        asset="AAVE",
+        session_id="stage1-aave",
+        candidate_id="candidate-aave",
+        tp_pct=50.0,
+        sl_pct=50.0,
+        leverage=1.0,
+        max_hold_hours=12.0,
+        pyramid_step_pct=1.0,
+        max_legs=3,
+        signal_records=[{"signal_id": "sig-aave-1", "decision_direction": "LONG", "agreement": "MATCH"}],
+    )
+    candles = [
+        {"timestamp": datetime(2026, 5, 1, 0, 0, tzinfo=UTC), "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0},
+        {"timestamp": datetime(2026, 5, 1, 0, 5, tzinfo=UTC), "open": 100.0, "high": 101.2, "low": 99.9, "close": 101.0},
+        {"timestamp": datetime(2026, 5, 1, 0, 10, tzinfo=UTC), "open": 101.0, "high": 102.2, "low": 100.8, "close": 102.0},
+        {"timestamp": datetime(2026, 5, 1, 0, 15, tzinfo=UTC), "open": 102.0, "high": 102.6, "low": 101.8, "close": 102.5},
+        *_make_candles("2026-05-01T00:20:00Z", 160, base_price=102.5, trend=0.0),
+    ]
+    signals = {"sigset-aave": [_make_signal("sig-aave-1", "2026-05-01T00:00:00Z", "LONG", 100.0)]}
+    monkeypatch.setattr(
+        "quant_terminal_worker.stage4.portfolio_backtest.MarketDataReader",
+        lambda **kw: MockMarketDataReader({"AAVE": candles}),
+    )
+
+    result = run_portfolio_backtest(
+        workspace_root=tmp_path,
+        universe_run={"universe_run_id": pool_id},
+        candidates=[_candidate(pool_id, "candidate-aave", "AAVE")],
+        sessions=[_session(pool_id, "candidate-aave", "AAVE", aave_root)],
+        initial_capital_usdt=900,
+        margin_allocations_pct={"AAVE": 90},
+        repository=MockRepository(signals),
+    )
+
+    trade = result["trade_ledger"][0]
+    second_avg = 540 / ((270 / 100) + (270 / 101))
+    expected_third_trigger = second_avg * 1.02
+    assert trade["filled_legs"] == 3
+    assert trade["leg_details"][2]["entry_ts"] == "2026-05-01T00:15:00Z"
+    assert trade["leg_details"][2]["raw_entry_price"] == pytest.approx(expected_third_trigger)
+    assert trade["leg_details"][2]["entry_price"] == pytest.approx(expected_third_trigger)
+
+
+def test_portfolio_backtest_releases_closed_pyramid_position_cash_before_other_asset_entries(tmp_path: Path, monkeypatch):
     pool_id = "pool-pyramid-partial-release"
     aave_root = _write_stage4_artifacts(
         tmp_path,
@@ -831,7 +1001,7 @@ def test_portfolio_backtest_releases_closed_pyramid_leg_cash_before_other_asset_
     sol_candles = _make_candles("2026-05-01T00:00:00Z", 200, base_price=100.0, trend=0.0)
     signals = {
         "sigset-aave": [_make_signal("sig-aave-1", "2026-05-01T00:00:00Z", "LONG", 100.0)],
-        "sigset-sol": [_make_signal("sig-sol-1", "2026-05-01T00:05:00Z", "LONG", 100.0)],
+        "sigset-sol": [_make_signal("sig-sol-1", "2026-05-01T00:10:00Z", "LONG", 100.0)],
     }
 
     monkeypatch.setattr(

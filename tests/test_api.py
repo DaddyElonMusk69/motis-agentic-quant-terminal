@@ -2756,6 +2756,121 @@ def decide(context):
     assert len(repository.window_requests) == 2
 
 
+def test_stage1_training_iteration_promote_reuses_frozen_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repository = StubRuntimeRepository()
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
+    stage0_root = tmp_path / "dev/stage0/aave"
+    packet_root = tmp_path / "dev/signals/vegas_ema/AAVE/2026-AAVE-2h-dedupe-vote2/packets"
+    session_strategy_root = artifact_root / "strategy_module"
+    (stage0_root / "scores/ground_truth").mkdir(parents=True)
+    packet_root.mkdir(parents=True)
+    session_strategy_root.mkdir(parents=True)
+    (stage0_root / "scores/ground_truth/sig-1.json").write_text(
+        json.dumps({"signal_id": "sig-1", "natural_direction": "SHORT"})
+    )
+    (packet_root / "sig-1.json").write_text(json.dumps({"signal_id": "sig-1", "payload": {}}))
+    (session_strategy_root / "__init__.py").write_text("")
+    (session_strategy_root / "strategy.py").write_text(
+        _stage1_test_strategy_source(strategy_id="old-session", direction="LONG", reason_code="old_session")
+    )
+    for iteration_id, direction, reason_code in (
+        ("iter_001_v0.1", "LONG", "first_training"),
+        ("iter_002_v0.1", "SHORT", "promoted_training"),
+    ):
+        iteration_root = artifact_root / "iterations" / iteration_id
+        strategy_root = iteration_root / "source_artifacts" / "strategy_module_snapshot"
+        (strategy_root).mkdir(parents=True)
+        (iteration_root / "scores").mkdir()
+        (iteration_root / "decisions").mkdir()
+        (iteration_root / "summaries").mkdir()
+        (iteration_root / "manifest.json").write_text(
+            json.dumps({"iteration_id": iteration_id, "sample_method": "training", "signal_count": 1})
+        )
+        (iteration_root / "signal_sample.json").write_text("{}")
+        (iteration_root / "agent_prompt.md").write_text("prompt")
+        (iteration_root / "scores/stage1a_directional_scores.json").write_text(
+            json.dumps({"metrics": {"directional_agreement": 1, "matches": 1, "passes_threshold": True}})
+        )
+        (strategy_root / "__init__.py").write_text("")
+        (strategy_root / "strategy.py").write_text(
+            _stage1_test_strategy_source(strategy_id=iteration_id, direction=direction, reason_code=reason_code)
+        )
+    repository.stage1_sessions = [
+        {
+            "session_id": "stage1-aave",
+            "artifact_root": str(artifact_root),
+            "stage0_artifact_root": str(stage0_root),
+            "source_candidate_id": "candidate-aave",
+            "signal_set_key": "vegas_ema:AAVE:2026-AAVE-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "AAVE",
+            "signal_set_id": "2026-AAVE-2h-dedupe-vote2",
+            "strategy_id": "aave-vegas-tunnel-v01",
+            "strategy_version": "v0.1",
+            "train_start": "2026-03-01",
+            "train_end": "2026-04-30",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
+            "status": "stage1a_frozen",
+            "manifest": {"session_id": "stage1-aave", "stage0_artifact_root": str(stage0_root)},
+        }
+    ]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post("/api/v1/research/stage1-sessions/stage1-aave/iterations/iter_002_v0.1/promote")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["promoted_iteration_id"] == "iter_002_v0.1"
+    assert payload["canonical_readout"]["metrics"]["matches"] == 2
+    assert payload["canonical_readout"]["metrics"]["mismatches"] == 0
+    frozen_strategy = artifact_root / "promotion/frozen_stage1a_strategy_module/strategy.py"
+    assert "promoted_training" in frozen_strategy.read_text()
+    assert "promoted_training" in (artifact_root / "strategy_module/strategy.py").read_text()
+    assert repository.updated_stage1_session["status"] == "stage1a_frozen"
+    assert repository.updated_stage1_session["manifest"]["stage1a_promoted_iteration"]["iteration_id"] == "iter_002_v0.1"
+    assert len(repository.window_requests) == 2
+
+
+def test_stage1_walk_forward_iteration_promote_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repository = StubRuntimeRepository()
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
+    iteration_root = artifact_root / "iterations" / "iter_001_v0.1"
+    (iteration_root / "strategy_module").mkdir(parents=True)
+    (iteration_root / "manifest.json").write_text(
+        json.dumps({"iteration_id": "iter_001_v0.1", "sample_method": "walk_forward_test", "signal_count": 1})
+    )
+    repository.stage1_sessions = [
+        {
+            "session_id": "stage1-aave",
+            "artifact_root": str(artifact_root),
+            "source_candidate_id": "candidate-aave",
+            "signal_set_key": "vegas_ema:AAVE:2026-AAVE-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "AAVE",
+            "signal_set_id": "2026-AAVE-2h-dedupe-vote2",
+            "strategy_id": "aave-vegas-tunnel-v01",
+            "strategy_version": "v0.1",
+            "train_start": "2026-03-01",
+            "train_end": "2026-04-30",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
+            "status": "stage1a_frozen",
+            "manifest": {"session_id": "stage1-aave"},
+        }
+    ]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post("/api/v1/research/stage1-sessions/stage1-aave/iterations/iter_001_v0.1/promote")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Only training Stage 1 iterations can be promoted"
+
+
 def test_stage1_iteration_detail_endpoint_returns_records_and_monthly_clusters(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     repository = StubRuntimeRepository()
@@ -4226,6 +4341,7 @@ def test_portfolio_backtest_endpoint_writes_pool_artifacts(tmp_path, monkeypatch
             "margin_allocations_pct": {"AAVE": 30},
             "signal_offset_count": 1,
             "entry_fill_model": "adverse_candle_extreme",
+            "exit_fill_model": "adverse_stop_extreme",
         },
     )
 
@@ -4235,6 +4351,7 @@ def test_portfolio_backtest_endpoint_writes_pool_artifacts(tmp_path, monkeypatch
     assert result["summary"]["executed_positions"] == 1
     assert result["simulation_inputs"]["signal_offset_count"] == 1
     assert result["simulation_inputs"]["entry_fill_model"] == "adverse_candle_extreme"
+    assert result["simulation_inputs"]["exit_fill_model"] == "adverse_stop_extreme"
     assert result["trade_ledger"][0]["signal_id"] == "sig-2"
     assert result["portfolio_backtest_path"].endswith("dev/portfolio_backtests/universe-march-may-vegas/portfolio_backtest.json")
     assert (tmp_path / result["portfolio_backtest_path"]).exists()
@@ -4246,6 +4363,7 @@ def test_portfolio_backtest_endpoint_writes_pool_artifacts(tmp_path, monkeypatch
     assert [item["run_id"] for item in history["runs"]] == [result["run_id"]]
     assert history["runs"][0]["simulation_inputs"]["signal_offset_count"] == 1
     assert history["runs"][0]["simulation_inputs"]["entry_fill_model"] == "adverse_candle_extreme"
+    assert history["runs"][0]["simulation_inputs"]["exit_fill_model"] == "adverse_stop_extreme"
 
     run_response = client.get(f"/api/v1/research/stage0-universe-runs/universe-march-may-vegas/portfolio-backtest/runs/{result['run_id']}")
     assert run_response.status_code == 200
@@ -5002,6 +5120,35 @@ def test_trading_route_archive_hides_route_and_lists_archived_strategy(tmp_path,
     assert direct_response.json()["route"]["archived"] is True
 
 
+def test_live_trading_route_start_waits_for_aligned_scheduler_wake(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'start-live.db'}")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    bundle = repository.create_execution_bundle(_execution_bundle(tmp_path))
+    route = repository.upsert_deployment_route_for_bundle(
+        bundle=bundle,
+        account_mode="live",
+        execution_adapter="okx",
+    )
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post(
+        f"/api/v1/trading/routes/{route['route_id']}/start",
+        json={"confirm_live": True, "auto_submit_enabled": False},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["cycle"]["status"] == "scheduled"
+    assert payload["cycle"]["reason"] == "live_route_waiting_for_aligned_candle_close"
+    assert payload["route"]["scheduler_status"] == "running"
+    assert payload["route"]["next_wake_at"] is not None
+    assert repository.list_wake_runs(route["route_id"]) == []
+
+    client.post(f"/api/v1/trading/routes/{route['route_id']}/stop")
+
+
 def test_archived_strategy_delete_removes_route_bundle_history_and_artifacts(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'archive-delete.db'}")
@@ -5579,6 +5726,24 @@ def _register_vegas_engine(repository):
             "configuration_schema": {},
         }
     )
+
+
+def _stage1_test_strategy_source(*, strategy_id: str, direction: str, reason_code: str) -> str:
+    return f'''
+def decide(context):
+    return {{
+        "decision_id": "{strategy_id}-" + context["signal"]["signal_id"],
+        "strategy_id": "{strategy_id}",
+        "strategy_version": "v0.1",
+        "signal_id": context["signal"]["signal_id"],
+        "trade_action": "ENTER",
+        "action": "ENTER",
+        "direction": "{direction}",
+        "confidence": 0.8,
+        "reason_code": "{reason_code}",
+        "diagnostics": {{}},
+    }}
+'''
 
 
 def _queue_candidate(candidate_id, asset, acceptance_status, trigger_rate_pct, *, total_records=None, packet_count=100):

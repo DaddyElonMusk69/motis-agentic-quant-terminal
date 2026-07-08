@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-from quant_terminal_worker.execution.lifecycle import run_route_lifecycle_cycle
+from quant_terminal_worker.execution.lifecycle import next_wake_at, run_route_lifecycle_cycle
 
 
 class FakeRuntimeRepository:
@@ -115,6 +115,27 @@ class FakeAdapter:
             "balance": {},
             "recent_fills": [],
         }
+
+
+def test_next_wake_at_aligns_live_5m_routes_to_utc_candle_close_grace():
+    route = {"account_mode": "live", "cron_interval_minutes": 5}
+
+    assert next_wake_at(route, from_time=datetime(2026, 7, 7, 7, 4, 0, tzinfo=UTC)) == datetime(
+        2026, 7, 7, 7, 5, 15, tzinfo=UTC
+    )
+    assert next_wake_at(route, from_time=datetime(2026, 7, 7, 7, 5, 5, tzinfo=UTC)) == datetime(
+        2026, 7, 7, 7, 5, 15, tzinfo=UTC
+    )
+    assert next_wake_at(route, from_time=datetime(2026, 7, 7, 7, 5, 16, tzinfo=UTC)) == datetime(
+        2026, 7, 7, 7, 10, 15, tzinfo=UTC
+    )
+
+
+def test_next_wake_at_keeps_non_live_routes_on_relative_interval():
+    route = {"account_mode": "paper", "cron_interval_minutes": 5}
+    assert next_wake_at(route, from_time=datetime(2026, 7, 7, 7, 4, 0, tzinfo=UTC)) == datetime(
+        2026, 7, 7, 7, 9, 0, tzinfo=UTC
+    )
 
 
 def test_lifecycle_does_not_block_live_wake_when_research_signal_extension_fails(tmp_path):

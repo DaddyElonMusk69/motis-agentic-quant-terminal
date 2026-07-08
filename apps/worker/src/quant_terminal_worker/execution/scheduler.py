@@ -36,7 +36,7 @@ class RouteLifecycleScheduler:
                 "last_lifecycle_error": {},
             },
         )
-        self._schedule(route_id, delay_seconds=0 if run_immediately else _interval_seconds(updated or route))
+        self._schedule(route_id, delay_seconds=0 if run_immediately else _resume_delay_seconds(updated or route, now=now))
         return updated or route
 
     def stop(self, route_id: str) -> dict[str, Any]:
@@ -65,6 +65,12 @@ class RouteLifecycleScheduler:
             if not _route_is_running(route):
                 continue
             route_id = str(route["route_id"])
+            if route.get("account_mode") == "live":
+                aligned_next_wake = next_wake_at(route, from_time=now)
+                route = self._update_route(route_id, {"next_wake_at": aligned_next_wake}) or {
+                    **route,
+                    "next_wake_at": aligned_next_wake,
+                }
             self._schedule(route_id, delay_seconds=_resume_delay_seconds(route, now=now))
             resumed.append(route_id)
         return resumed
@@ -104,7 +110,7 @@ class RouteLifecycleScheduler:
         route = self._load_route(route_id)
         if route is None or route.get("scheduler_status") != "running":
             return
-        self._schedule(route_id, delay_seconds=_interval_seconds(route))
+        self._schedule(route_id, delay_seconds=_resume_delay_seconds(route, now=datetime.now(UTC)))
 
 
 def _interval_seconds(route: dict[str, Any]) -> int:
@@ -120,9 +126,11 @@ def _route_is_running(route: dict[str, Any]) -> bool:
 
 
 def _resume_delay_seconds(route: dict[str, Any], *, now: datetime) -> float:
+    if route.get("account_mode") == "live":
+        return max(0.0, (next_wake_at(route, from_time=now) - now).total_seconds())
     next_wake = _parse_datetime(route.get("next_wake_at"))
     if next_wake is None:
-        return _interval_seconds(route)
+        return max(0.0, (next_wake_at(route, from_time=now) - now).total_seconds())
     return max(0.0, (next_wake - now).total_seconds())
 
 

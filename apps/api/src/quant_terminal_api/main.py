@@ -38,7 +38,7 @@ from quant_terminal_worker.ingestion.feature_enrichment import enrich_feature_fa
 from quant_terminal_worker.ingestion.raw_candle_fill import fill_raw_candle_dataset
 from quant_terminal_worker.ingestion.legacy_signals import import_legacy_signal_sets
 from quant_terminal_worker.ingestion.signal_pool_extension import extend_signal_pool_from_local_candles
-from quant_terminal_worker.execution.lifecycle import run_route_lifecycle_cycle
+from quant_terminal_worker.execution.lifecycle import next_wake_at, run_route_lifecycle_cycle
 from quant_terminal_worker.execution.order_submission import submit_wake_order_intents
 from quant_terminal_worker.execution.scheduler import RouteLifecycleScheduler
 from quant_terminal_worker.stage0.workspace import build_stage0_commands
@@ -177,6 +177,7 @@ class PortfolioBacktestRequest(BaseModel):
     margin_allocations_pct: dict[str, float] = Field(default_factory=dict)
     signal_offset_count: int = Field(default=0, ge=0)
     entry_fill_model: Literal["reference_price", "adverse_candle_extreme"] = "reference_price"
+    exit_fill_model: Literal["level_price", "adverse_stop_extreme"] = "level_price"
 
 
 class LegacySignalImportRequest(BaseModel):
@@ -841,6 +842,79 @@ def create_app(
         shutil.rmtree(iteration_root)
         return {"status": "deleted", "session_id": session_id, "iteration_id": iteration_id}
 
+    @app.post("/api/v1/research/stage1-sessions/{session_id}/iterations/{iteration_id}/promote")
+    def promote_stage1_training_iteration(session_id: str, iteration_id: str) -> dict[str, Any]:
+        repository = get_runtime_repository()
+        session = repository.get_stage1_research_session(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Stage 1 session not found")
+        artifact_root = Path(session["artifact_root"])
+        if not artifact_root.is_absolute():
+            artifact_root = Path.cwd() / artifact_root
+        iterations_root = (artifact_root / "iterations").resolve()
+        iteration_root = (iterations_root / iteration_id).resolve()
+        if iteration_root.parent != iterations_root or not iteration_root.name.startswith("iter_"):
+            raise HTTPException(status_code=400, detail="Invalid Stage 1 iteration id")
+        if not iteration_root.is_dir():
+            raise HTTPException(status_code=404, detail="Stage 1 iteration not found")
+        manifest_path = iteration_root / "manifest.json"
+        if not manifest_path.is_file():
+            raise HTTPException(status_code=400, detail="Stage 1 iteration manifest not found")
+        manifest = json.loads(manifest_path.read_text())
+        if manifest.get("sample_method") != "training":
+            raise HTTPException(status_code=400, detail="Only training Stage 1 iterations can be promoted")
+        source_strategy_root = iteration_root / "strategy_module"
+        if not (source_strategy_root / "strategy.py").is_file():
+            source_strategy_root = iteration_root / "source_artifacts" / "strategy_module_snapshot"
+        source_strategy_path = source_strategy_root / "strategy.py"
+        if not source_strategy_path.is_file():
+            raise HTTPException(status_code=400, detail="Stage 1 iteration strategy module not found")
+        try:
+            validate_strategy_module(source_strategy_path)
+        except ContractValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        session_strategy_root = artifact_root / "strategy_module"
+        if session_strategy_root.exists():
+            shutil.rmtree(session_strategy_root)
+        shutil.copytree(source_strategy_root, session_strategy_root)
+
+        try:
+            result = run_stage1a_canonical_full_cycle(
+                workspace_root=Path.cwd(),
+                session=session,
+                signals_by_role=_stage1_full_cycle_signals(session),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        promoted_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        promoted_metadata = {
+            "iteration_id": iteration_id,
+            "sample_method": "training",
+            "source_strategy_path": str(source_strategy_path),
+            "promoted_at": promoted_at,
+            "note": "MVP Stage 1 promotion reuses the frozen Stage 1 path; rerun downstream stages manually.",
+        }
+        frozen_manifest = {
+            **(session.get("manifest") or {}),
+            "status": "stage1a_frozen",
+            "stage1a_promoted_iteration": promoted_metadata,
+            "stage1a_canonical_readout": _relative_nested_paths(Path.cwd(), result),
+        }
+        updater = getattr(repository, "update_stage1_research_session_state", None)
+        if callable(updater):
+            updater(session_id=session_id, status="stage1a_frozen", manifest=frozen_manifest)
+        refreshed_session = {**session, "status": "stage1a_frozen", "manifest": frozen_manifest}
+        return {
+            "promoted_iteration_id": iteration_id,
+            "promoted_iteration": _relative_nested_paths(Path.cwd(), promoted_metadata),
+            "canonical_readout": _relative_nested_paths(Path.cwd(), result),
+            "gate": _relative_nested_paths(
+                Path.cwd(),
+                build_stage1_gate_summary(workspace_root=Path.cwd(), session=refreshed_session),
+            ),
+        }
+
     @app.get("/api/v1/research/stage1-sessions/{session_id}/iterations/{iteration_id}/agent-prompt")
     def get_stage1_research_iteration_agent_prompt(session_id: str, iteration_id: str) -> dict[str, Any]:
         session = get_runtime_repository().get_stage1_research_session(session_id)
@@ -1268,6 +1342,7 @@ def create_app(
                 "margin_allocations_pct": request.margin_allocations_pct,
                 "signal_offset_count": request.signal_offset_count,
                 "entry_fill_model": request.entry_fill_model,
+                "exit_fill_model": request.exit_fill_model,
             },
             current_step="queued",
         )
@@ -1283,6 +1358,7 @@ def create_app(
                 margin_allocations_pct=request.margin_allocations_pct,
                 signal_offset_count=request.signal_offset_count,
                 entry_fill_model=request.entry_fill_model,
+                exit_fill_model=request.exit_fill_model,
                 repository=get_runtime_repository(),
             )
         except ValueError as exc:
@@ -1575,13 +1651,21 @@ def create_app(
             manually_armed=True if route.get("account_mode") == "live" else route.get("manually_armed", False),
             scheduler_status="running",
             auto_submit_enabled=request.auto_submit_enabled,
-            next_wake_at=datetime.now(UTC),
+            next_wake_at=next_wake_at(route, from_time=datetime.now(UTC)),
             last_lifecycle_error={},
         )
         if route is None:
             raise HTTPException(status_code=404, detail="deployment route not found")
         try:
-            cycle = run_lifecycle_cycle_for_route(route_id)
+            cycle = (
+                {
+                    "status": "scheduled",
+                    "reason": "live_route_waiting_for_aligned_candle_close",
+                    "next_wake_at": route.get("next_wake_at"),
+                }
+                if route.get("account_mode") == "live"
+                else run_lifecycle_cycle_for_route(route_id)
+            )
             scheduled_route = scheduler.start(route_id, run_immediately=False)
         except ExchangeAdapterError as exc:
             repository.update_deployment_route_gate(

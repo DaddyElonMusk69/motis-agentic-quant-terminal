@@ -281,6 +281,10 @@ def test_5m_vegas_hft_base_strategy_validates():
     assert validate_strategy_module("packages/strategy_modules/src/quant_terminal_strategies/vegas_ema_5m_hft_base.py") == []
 
 
+def test_5m_vegas_hft_v3_base_strategy_validates():
+    assert validate_strategy_module("packages/strategy_modules/src/quant_terminal_strategies/vegas_ema_5m_hft_v3_base.py") == []
+
+
 def test_5m_vegas_hft_base_enters_with_aligned_context():
     strategy = importlib.import_module("quant_terminal_strategies.vegas_ema_5m_hft_base")
 
@@ -302,7 +306,7 @@ def test_5m_vegas_hft_base_enters_with_aligned_context():
 
     assert decision["action"] == "ENTER"
     assert decision["direction"] == "LONG"
-    assert decision["reason_code"] == "aligned_5m_cluster_with_2h_1d_context"
+    assert decision["reason_code"] == "daily_1d_last_return_override"
     assert decision["diagnostics"]["matched_ema_count"] == 3
 
 
@@ -327,8 +331,100 @@ def test_5m_vegas_hft_base_accepts_top_level_packet_shape():
 
     assert decision["action"] == "ENTER"
     assert decision["direction"] == "LONG"
-    assert decision["reason_code"] == "aligned_5m_cluster_with_2h_1d_context"
+    assert decision["reason_code"] == "daily_1d_last_return_override"
     assert decision["diagnostics"]["matched_ema_count"] == 3
+
+
+def test_5m_vegas_hft_base_uses_forming_htf_context_when_completed_context_is_flat():
+    strategy = importlib.import_module("quant_terminal_strategies.vegas_ema_5m_hft_base")
+
+    payload = _cluster_payload(
+        matched_periods=[36, 43, 144],
+        five_minute_closes=[100, 100.2, 100.4, 100.7],
+        two_hour_closes=[100, 100.02, 100.01, 100.03],
+        one_day_closes=[100, 100.1, 100.05, 100.08],
+        ema_values={"36": "101.0", "43": "100.8", "144": "100.2", "169": "99.8", "576": "99.0", "676": "98.8"},
+        forming_context={
+            "2h": _forming_context(open_=100, high=101.5, low=99.8, close=101.0, source_candle_count=18),
+            "1d": _forming_context(open_=100, high=102.5, low=99.5, close=102.0, source_candle_count=160),
+        },
+    )
+
+    decision = strategy.decide(
+        {
+            "signal": {
+                "signal_id": "vegas_5m_cluster_v2:ETH:test:20260608T060000Z",
+                "payload": payload,
+            },
+            "runtime_mode": "backtest",
+        }
+    )
+
+    assert decision["action"] == "ENTER"
+    assert decision["direction"] == "LONG"
+    assert decision["reason_code"] == "daily_1d_forming_return_override"
+    assert decision["diagnostics"]["local_direction"] == "LONG"
+    assert decision["diagnostics"]["macro_direction"] == "LONG"
+    assert decision["diagnostics"]["two_hour_forming_return_pct"] == pytest.approx(1.0)
+    assert decision["diagnostics"]["one_day_forming_return_pct"] == pytest.approx(2.0)
+
+
+def test_5m_vegas_hft_base_uses_forming_daily_override_when_context_conflicts():
+    strategy = importlib.import_module("quant_terminal_strategies.vegas_ema_5m_hft_base")
+
+    payload = _cluster_payload(
+        matched_periods=[36, 43, 144],
+        five_minute_closes=[100, 100.2, 100.4, 100.7],
+        two_hour_closes=[98, 99, 100, 101],
+        one_day_closes=[90, 94, 98, 102],
+        ema_values={"36": "101.0", "43": "100.8", "144": "100.2", "169": "99.8", "576": "99.0", "676": "98.8"},
+        forming_context={
+            "2h": _forming_context(open_=100, high=100.2, low=98.7, close=99.0, source_candle_count=18),
+            "1d": _forming_context(open_=100, high=100.4, low=97.5, close=98.0, source_candle_count=160),
+        },
+    )
+
+    decision = strategy.decide(
+        {
+            "signal": {
+                "signal_id": "vegas_5m_cluster_v2:ETH:test:20260608T060000Z",
+                "payload": payload,
+            },
+            "runtime_mode": "backtest",
+        }
+    )
+
+    assert decision["action"] == "ENTER"
+    assert decision["direction"] == "SHORT"
+    assert decision["reason_code"] == "daily_1d_forming_return_override"
+    assert decision["diagnostics"]["local_completed_direction"] == "LONG"
+    assert decision["diagnostics"]["local_forming_direction"] == "SHORT"
+    assert decision["diagnostics"]["macro_completed_direction"] == "LONG"
+    assert decision["diagnostics"]["macro_forming_direction"] == "SHORT"
+
+
+def test_5m_vegas_hft_base_enters_on_thin_context_like_btc_seed():
+    strategy = importlib.import_module("quant_terminal_strategies.vegas_ema_5m_hft_base")
+
+    decision = strategy.decide(
+        {
+            "signal": {
+                "signal_id": "vegas_5m_cluster_v2:ETH:test:20260608T060000Z",
+                "payload": _cluster_payload(
+                    matched_periods=[36, 43, 144],
+                    five_minute_closes=[100, 100.02, 100.01, 100.03],
+                    two_hour_closes=[100, 100.01, 100.02, 100.01],
+                    one_day_closes=[100, 100.2, 100.4, 100.6, 100.8, 101.0, 101.2, 101.4, 101.6],
+                    ema_values={"36": "100.4", "43": "100.2", "144": "101.0", "169": "100.8", "576": "99.0", "676": "99.2"},
+                ),
+            },
+            "runtime_mode": "backtest",
+        }
+    )
+
+    assert decision["action"] == "ENTER"
+    assert decision["direction"] == "LONG"
+    assert decision["reason_code"] == "thin_context_follow_1d_2h_5m_evidence"
 
 
 def test_5m_vegas_hft_base_skips_without_required_context():
@@ -346,6 +442,99 @@ def test_5m_vegas_hft_base_skips_without_required_context():
     assert decision["action"] == "SKIP"
     assert decision["direction"] == "FLAT"
     assert decision["reason_code"] == "missing_required_5m_2h_or_1d_context"
+
+
+def test_5m_vegas_hft_v3_base_uses_8h_regime_context():
+    strategy = importlib.import_module("quant_terminal_strategies.vegas_ema_5m_hft_v3_base")
+    payload = _cluster_payload(
+        matched_periods=[36, 43, 144],
+        five_minute_closes=[100, 100.2, 100.4, 100.7],
+        two_hour_closes=[100, 100.02, 100.01, 100.03],
+        eight_hour_closes=[100, 101, 102, 103],
+        one_day_closes=[100, 100.1, 100.05, 100.08],
+        ema_values={"36": "101.0", "43": "100.8", "144": "100.2", "169": "99.8", "576": "99.0", "676": "98.8"},
+        forming_context={
+            "2h": _forming_context(open_=100, high=100.2, low=99.8, close=100.05, source_candle_count=18),
+            "8h": _forming_context(open_=100, high=104, low=99.5, close=103.5, source_candle_count=48),
+            "1d": _forming_context(open_=100, high=100.4, low=99.5, close=100.1, source_candle_count=160),
+        },
+    )
+
+    decision = strategy.decide(
+        {
+            "signal": {
+                "signal_id": "vegas_5m_cluster_v3:ETH:test:20260608T060000Z",
+                "payload": payload,
+            },
+            "runtime_mode": "backtest",
+        }
+    )
+
+    assert decision["action"] == "ENTER"
+    assert decision["direction"] == "LONG"
+    assert decision["diagnostics"]["regime_direction"] == "LONG"
+    assert decision["diagnostics"]["eight_hour_return_pct"] == pytest.approx(3.0)
+    assert decision["diagnostics"]["eight_hour_forming_return_pct"] == pytest.approx(3.5)
+
+
+def test_5m_vegas_hft_v3_base_uses_8h_last_return_override_when_daily_is_flat():
+    strategy = importlib.import_module("quant_terminal_strategies.vegas_ema_5m_hft_v3_base")
+    payload = _cluster_payload(
+        matched_periods=[36, 43, 144],
+        five_minute_closes=[100, 100.02, 100.01, 100.03],
+        two_hour_closes=[100, 100.02, 100.01, 100.03],
+        eight_hour_closes=[100, 100.1, 100.2, 101.0],
+        one_day_closes=[100, 100.05, 100.04, 100.06],
+        ema_values={"36": "100.4", "43": "100.2", "144": "101.0", "169": "100.8", "576": "99.0", "676": "99.2"},
+    )
+
+    decision = strategy.decide(
+        {
+            "signal": {
+                "signal_id": "vegas_5m_cluster_v3:ETH:test:20260608T060000Z",
+                "payload": payload,
+            },
+            "runtime_mode": "backtest",
+        }
+    )
+
+    assert decision["action"] == "ENTER"
+    assert decision["direction"] == "LONG"
+    assert decision["reason_code"] == "regime_8h_last_return_override"
+    assert decision["diagnostics"]["daily_last_direction"] is None
+    assert decision["diagnostics"]["eight_hour_last_direction"] == "LONG"
+
+
+def test_5m_vegas_hft_v3_base_uses_forming_8h_override_before_daily_forms():
+    strategy = importlib.import_module("quant_terminal_strategies.vegas_ema_5m_hft_v3_base")
+    payload = _cluster_payload(
+        matched_periods=[36, 43, 144],
+        five_minute_closes=[100, 100.02, 100.01, 100.03],
+        two_hour_closes=[100, 100.02, 100.01, 100.03],
+        eight_hour_closes=[100, 100.05, 100.03, 100.04],
+        one_day_closes=[100, 100.05, 100.04, 100.06],
+        ema_values={"36": "100.4", "43": "100.2", "144": "101.0", "169": "100.8", "576": "99.0", "676": "99.2"},
+        forming_context={
+            "8h": _forming_context(open_=100, high=100.2, low=96.5, close=97.0, source_candle_count=48),
+            "1d": _forming_context(open_=100, high=100.2, low=99.8, close=100.05, source_candle_count=90),
+        },
+    )
+
+    decision = strategy.decide(
+        {
+            "signal": {
+                "signal_id": "vegas_5m_cluster_v3:ETH:test:20260608T060000Z",
+                "payload": payload,
+            },
+            "runtime_mode": "backtest",
+        }
+    )
+
+    assert decision["action"] == "ENTER"
+    assert decision["direction"] == "SHORT"
+    assert decision["reason_code"] == "regime_8h_forming_return_override"
+    assert decision["diagnostics"]["eight_hour_last_direction"] == "SHORT"
+    assert decision["diagnostics"]["eight_hour_forming_source_candle_count"] == 48
 
 
 def test_recursive_vegas_features_base_strategy_validates_and_registry_points_to_it():
@@ -562,9 +751,11 @@ def _cluster_payload(
     two_hour_closes: list[float],
     one_day_closes: list[float],
     ema_values: dict[str, str],
+    eight_hour_closes: list[float] | None = None,
+    forming_context: dict[str, object] | None = None,
 ) -> dict[str, object]:
     columns = ["ts", "open", "high", "low", "close", "volume", "vol_ccy", "vol_ccy_quote", "confirm"]
-    return {
+    payload: dict[str, object] = {
         "schema_version": "signal_packet.v2",
         "asset": "ETH",
         "instrument": "ETH-USDT-SWAP",
@@ -596,10 +787,39 @@ def _cluster_payload(
             },
         },
     }
+    if eight_hour_closes is not None:
+        payload["evidence"]["context_timeframes"] = ["2h", "8h", "1d"]
+        payload["charts"]["8h"] = {
+            "role": "context",
+            "columns": columns,
+            "completed_candles": [_candle_row(index, close) for index, close in enumerate(eight_hour_closes)],
+        }
+    if forming_context is not None:
+        payload["forming_context"] = forming_context
+        payload["evidence"]["forming_context"] = forming_context
+    return payload
 
 
 def _candle_row(index: int, close: float) -> list[object]:
     return [f"2026-06-08T00:{index:02d}:00Z", str(close), str(close), str(close), str(close), "1", "1", "1", 1]
+
+
+def _forming_context(*, open_: float, high: float, low: float, close: float, source_candle_count: int) -> dict[str, object]:
+    return {
+        "role": "forming_context",
+        "source": "aggregated_confirmed_5m_up_to_signal",
+        "is_completed": False,
+        "source_candle_count": source_candle_count,
+        "ohlcv": {
+            "open": str(open_),
+            "high": str(high),
+            "low": str(low),
+            "close": str(close),
+            "volume": "1",
+            "vol_ccy": "1",
+            "vol_ccy_quote": "1",
+        },
+    }
 
 
 def _recursive_feature_payload(

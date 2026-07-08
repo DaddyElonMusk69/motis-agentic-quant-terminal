@@ -894,7 +894,7 @@
 .execution-command-center__metrics {
   display: grid;
   gap: 1px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(120px, 0.45fr) minmax(220px, 1.55fr);
   padding: 0;
 }
 

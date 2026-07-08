@@ -260,12 +260,10 @@ function formatProtectionPolicy(policy: Record<string, unknown>): string {
   }
   const trigger = readRecordValue(policy, "protect_trigger_pct");
   const trail = readRecordValue(policy, "trail_sl_pct");
-  const lock = readRecordValue(policy, "lock_profit_pct");
   return [
     "On",
     `trigger ${formatSetupValue(trigger, "%")}`,
-    `trail ${formatSetupValue(trail, "%")}`,
-    lock !== undefined ? `lock ${formatSetupValue(lock, "%")}` : null
+    `trail ${formatSetupValue(trail, "%")}`
   ].filter(Boolean).join(" · ");
 }
 
@@ -275,8 +273,7 @@ function routeProtectionRows(route: DeploymentRoute): Array<{ label: string; val
   const short = sidePolicy(setup, "SHORT");
   if (long && short) {
     return [
-      { label: "Long SL Protection", value: formatProtectionPolicy(long) },
-      { label: "Short SL Protection", value: formatProtectionPolicy(short) }
+      { label: "SL Protection", value: `Long ${formatProtectionPolicy(long)} | Short ${formatProtectionPolicy(short)}` }
     ];
   }
   return [{ label: "SL Protection", value: formatProtectionPolicy(setup) }];
@@ -364,19 +361,6 @@ function formatDecision(wake: WakeRun): string {
     return String(action);
   }
   return wake.status === "blocked" ? "Blocked" : "No decision";
-}
-
-function positionSummary(snapshot?: Record<string, unknown>): string {
-  if (!snapshot || !Array.isArray(snapshot.positions) || snapshot.positions.length === 0) {
-    return "Flat";
-  }
-  const active = snapshot.positions
-    .filter((position): position is Record<string, unknown> => Boolean(position) && typeof position === "object")
-    .filter((position) => Number(position.pos ?? position.size ?? position.sz ?? 0) !== 0);
-  if (!active.length) {
-    return "Flat";
-  }
-  return active.map((position) => `${String(position.posSide ?? position.side ?? "Position")} ${String(position.pos ?? position.size ?? position.sz ?? "n/a")}`).join(", ");
 }
 
 function formatSnapshotValue(value: unknown): string {
@@ -702,8 +686,6 @@ export function TradingPage() {
             {route ? (
               <>
                 <ExecutionCommandCenter
-                  health={healthQuery.data ?? null}
-                  latestWake={latestWake}
                   onToggle={() => toggleLifecycle(route)}
                   route={route}
                   startInProgress={startInProgress}
@@ -727,7 +709,6 @@ export function TradingPage() {
                     </div>
                   </div>
                 ) : null}
-                <LatestWakeSummary latestWake={latestWake} route={route} />
 
                 {pending ? (
                   <TerminalPanel title="Pending Intent">
@@ -871,16 +852,12 @@ export function TradingPage() {
 }
 
 function ExecutionCommandCenter({
-  health,
-  latestWake,
   onToggle,
   route,
   startInProgress,
   stopInProgress,
   warmup
 }: {
-  health: ExchangeHealth | null;
-  latestWake: WakeRun | null;
   onToggle: () => void;
   route: DeploymentRoute;
   startInProgress: boolean;
@@ -889,8 +866,6 @@ function ExecutionCommandCenter({
 }) {
   const status = routeStatus(route);
   const freshness = effectiveDataFreshness(route, warmup);
-  const sizing = effectiveRouteSizing(route);
-  const liveMode = route.auto_submit_enabled ? "Live submit" : "Intent-only";
   const actionDisabled = startInProgress || stopInProgress || (route.scheduler_status !== "running" && hasHardBlockers(route));
   return (
     <section className={`execution-command-center execution-command-center--${status.state}`}>
@@ -904,9 +879,6 @@ function ExecutionCommandCenter({
       </div>
 
       <div className="execution-command-center__action">
-        <span className={route.auto_submit_enabled ? "execution-mode-pill execution-mode-pill--live" : "execution-mode-pill"}>
-          {liveMode}
-        </span>
         <button
           className={route.scheduler_status === "running" ? "button button--danger execution-command-center__button" : "button button--primary execution-command-center__button"}
           disabled={actionDisabled}
@@ -924,73 +896,8 @@ function ExecutionCommandCenter({
           <strong className={freshness?.status === "stale" ? "tone-warn" : freshness?.status === "fresh" ? "tone-pass" : undefined}>{dataFreshnessLabel(freshness)}</strong>
         </div>
         <div>
-          <span>Last Decision</span>
-          <strong>{latestWake ? formatDecision(latestWake) : "n/a"}</strong>
-        </div>
-        <div>
-          <span>Position</span>
-          <strong>{positionSummary(latestWake?.exchange_snapshot)}</strong>
-        </div>
-        <div>
-          <span>Sizing</span>
-          <strong>{formatPercent(sizing.margin_allocation_pct)} @ {formatNumber(sizing.leverage)}x</strong>
-        </div>
-        <div>
           <span>Next Wake</span>
           <strong>{formatTimestamp(route.next_wake_at)}</strong>
-        </div>
-        <div>
-          <span>Exchange</span>
-          <strong className={health?.connected ? "tone-pass" : health?.status === "blocked" ? "tone-warn" : undefined}>{health?.connected ? "CLI connected" : health?.status ? String(health.status).replaceAll("_", " ") : "unchecked"}</strong>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function LatestWakeSummary({ latestWake, route }: { latestWake: WakeRun | null; route: DeploymentRoute }) {
-  if (!latestWake) {
-    return (
-      <section className="latest-wake-summary latest-wake-summary--empty">
-        <div className="execution-section-heading">
-          <span>latest cycle</span>
-          <strong>No wake recorded yet</strong>
-        </div>
-        <p>Start the route or run one wake to populate live exchange, signal, and strategy evidence.</p>
-      </section>
-    );
-  }
-  const intentCount = latestWake.order_intents.length;
-  return (
-    <section className="latest-wake-summary">
-      <div className="execution-section-heading">
-        <span>latest cycle</span>
-        <strong>{formatTimestamp(latestWake.completed_at ?? latestWake.started_at)}</strong>
-      </div>
-      <div className="latest-wake-summary__grid">
-        <div>
-          <span>Branch</span>
-          <strong>{latestWake.branch}</strong>
-        </div>
-        <div>
-          <span>Decision</span>
-          <strong>{formatDecision(latestWake)}</strong>
-        </div>
-        <div>
-          <span>Signal</span>
-          <strong>{formatSignalScan(latestWake)}</strong>
-        </div>
-        <div>
-          <span>Intents</span>
-          <strong>{formatNumber(intentCount)}</strong>
-        </div>
-        <div>
-          <span>Open Orders</span>
-          <strong>{formatNumber(Array.isArray(latestWake.exchange_snapshot?.open_orders) ? latestWake.exchange_snapshot?.open_orders.length : undefined)}</strong>
-        </div>
-        <div>
-          <span>Route</span>
-          <strong>{route.asset} / {route.signal_engine_id}</strong>
         </div>
       </div>
     </section>
@@ -1336,16 +1243,8 @@ function BundleReadout({ route }: { route: DeploymentRoute }) {
         <strong>{formatSetupValue(setup.max_hold_hours ?? readRecordValue(route.active_bundle?.execution_setup, "hard_exit_after_hours"), "h")}</strong>
       </div>
       <div className="strategy-readout-grid__item">
-        <span>Sizing Source</span>
-        <strong>{sizing.source}</strong>
-      </div>
-      <div className="strategy-readout-grid__item">
         <span>Per-Leg Margin</span>
         <strong>{formatPercent(perLegMarginPct)}</strong>
-      </div>
-      <div className="strategy-readout-grid__item">
-        <span>Initial Notional</span>
-        <strong>{formatPercent(perLegMarginPct * Number(sizing.leverage ?? 1))}</strong>
       </div>
     </div>
   );

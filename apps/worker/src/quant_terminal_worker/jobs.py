@@ -472,6 +472,7 @@ def _execute_portfolio_backtest(
         margin_allocations_pct={str(key): float(value) for key, value in (payload.get("margin_allocations_pct") or {}).items()},
         signal_offset_count=int(payload.get("signal_offset_count") or 0),
         entry_fill_model=str(payload.get("entry_fill_model") or "reference_price"),
+        exit_fill_model=str(payload.get("exit_fill_model") or "level_price"),
         repository=repository,
     )
     return {"portfolio_backtest": result, "universe_run_id": universe_run_id}

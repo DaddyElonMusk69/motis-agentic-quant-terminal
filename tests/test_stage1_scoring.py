@@ -217,6 +217,7 @@ def decide(context):
     result = run_stage1a_training_score(iteration_root=iteration_root)
 
     assert result["metrics"]["matches"] == 1
+    assert (iteration_root / "strategy_module" / "strategy.py").read_text() == (strategy_root / "strategy.py").read_text()
 
 
 def test_generate_stage1a_failure_audit_writes_failure_ledger_and_prompt(tmp_path: Path):
