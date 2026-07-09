@@ -379,6 +379,19 @@ class RuntimeRepository:
             )
         return next((engine for engine in self.list_signal_engines() if engine["signal_engine_id"] == signal_engine_id), None)
 
+    def delete_signal_engine_registration(self, *, signal_engine_id: str) -> dict[str, int]:
+        with self.engine.begin() as connection:
+            deleted_versions = connection.execute(
+                signal_engine_versions.delete().where(signal_engine_versions.c.signal_engine_id == signal_engine_id)
+            )
+            deleted_engines = connection.execute(
+                signal_engines.delete().where(signal_engines.c.signal_engine_id == signal_engine_id)
+            )
+        return {
+            "deleted_engine_version_rows": int(deleted_versions.rowcount or 0),
+            "deleted_engine_rows": int(deleted_engines.rowcount or 0),
+        }
+
     def register_strategy(self, registration: dict[str, Any]) -> None:
         with self.engine.begin() as connection:
             connection.execute(
@@ -897,6 +910,136 @@ class RuntimeRepository:
         with self.engine.connect() as connection:
             row = connection.execute(statement).mappings().first()
             return _normalize_signal_set_row(dict(row)) if row else None
+
+    def signal_set_delete_blockers(self, *, signal_engine_id: str, asset: str) -> dict[str, Any]:
+        normalized_asset = asset.upper()
+        with self.engine.connect() as connection:
+            set_rows = [
+                _normalize_signal_set_row(dict(row))
+                for row in connection.execute(
+                    select(signal_sets)
+                    .where(signal_sets.c.signal_engine_id == signal_engine_id)
+                    .where(signal_sets.c.asset == normalized_asset)
+                ).mappings()
+            ]
+            set_keys = [row["signal_set_key"] for row in set_rows]
+            if not set_keys:
+                return {
+                    "signal_sets": [],
+                    "stage0_candidate_count": 0,
+                    "stage0_universe_run_ids": [],
+                    "stage1_session_count": 0,
+                    "stage1_session_ids": [],
+                }
+            candidate_rows = [
+                dict(row)
+                for row in connection.execute(
+                    select(
+                        stage0_universe_candidates.c.candidate_id,
+                        stage0_universe_candidates.c.universe_run_id,
+                    ).where(stage0_universe_candidates.c.signal_set_key.in_(set_keys))
+                ).mappings()
+            ]
+            candidate_ids = [row["candidate_id"] for row in candidate_rows]
+            session_rows = []
+            if candidate_ids:
+                session_rows = [
+                    dict(row)
+                    for row in connection.execute(
+                        select(stage1_research_sessions.c.session_id).where(
+                            stage1_research_sessions.c.source_candidate_id.in_(candidate_ids)
+                        )
+                    ).mappings()
+                ]
+        return {
+            "signal_sets": set_rows,
+            "stage0_candidate_count": len(candidate_rows),
+            "stage0_universe_run_ids": sorted({row["universe_run_id"] for row in candidate_rows}),
+            "stage1_session_count": len(session_rows),
+            "stage1_session_ids": sorted(row["session_id"] for row in session_rows),
+        }
+
+    def signal_engine_delete_blockers(self, *, signal_engine_id: str) -> dict[str, Any]:
+        with self.engine.connect() as connection:
+            set_rows = [
+                _normalize_signal_set_row(dict(row))
+                for row in connection.execute(
+                    select(signal_sets).where(signal_sets.c.signal_engine_id == signal_engine_id)
+                ).mappings()
+            ]
+            set_keys = [row["signal_set_key"] for row in set_rows]
+            if not set_keys:
+                return {
+                    "signal_sets": [],
+                    "stage0_candidate_count": 0,
+                    "stage0_universe_run_ids": [],
+                    "stage1_session_count": 0,
+                    "stage1_session_ids": [],
+                }
+            candidate_rows = [
+                dict(row)
+                for row in connection.execute(
+                    select(
+                        stage0_universe_candidates.c.candidate_id,
+                        stage0_universe_candidates.c.universe_run_id,
+                    ).where(stage0_universe_candidates.c.signal_set_key.in_(set_keys))
+                ).mappings()
+            ]
+            candidate_ids = [row["candidate_id"] for row in candidate_rows]
+            session_rows = []
+            if candidate_ids:
+                session_rows = [
+                    dict(row)
+                    for row in connection.execute(
+                        select(stage1_research_sessions.c.session_id).where(
+                            stage1_research_sessions.c.source_candidate_id.in_(candidate_ids)
+                        )
+                    ).mappings()
+                ]
+        return {
+            "signal_sets": set_rows,
+            "stage0_candidate_count": len(candidate_rows),
+            "stage0_universe_run_ids": sorted({row["universe_run_id"] for row in candidate_rows}),
+            "stage1_session_count": len(session_rows),
+            "stage1_session_ids": sorted(row["session_id"] for row in session_rows),
+        }
+
+    def delete_signal_sets_for_engine_asset(self, *, signal_engine_id: str, asset: str) -> dict[str, Any]:
+        normalized_asset = asset.upper()
+        set_statement = (
+            select(signal_sets)
+            .where(signal_sets.c.signal_engine_id == signal_engine_id)
+            .where(signal_sets.c.asset == normalized_asset)
+        )
+        with self.engine.begin() as connection:
+            set_rows = [_normalize_signal_set_row(dict(row)) for row in connection.execute(set_statement).mappings()]
+            if not set_rows:
+                return {"signal_sets": [], "signals": [], "deleted_signal_sets": 0, "deleted_signals": 0}
+            set_keys = [row["signal_set_key"] for row in set_rows]
+            deleted_signals = connection.execute(signals.delete().where(signals.c.signal_set_key.in_(set_keys)))
+            deleted_sets = connection.execute(signal_sets.delete().where(signal_sets.c.signal_set_key.in_(set_keys)))
+        return {
+            "signal_sets": set_rows,
+            "signals": [],
+            "deleted_signal_sets": int(deleted_sets.rowcount or 0),
+            "deleted_signals": int(deleted_signals.rowcount or 0),
+        }
+
+    def delete_signal_sets_for_engine(self, *, signal_engine_id: str) -> dict[str, Any]:
+        set_statement = select(signal_sets).where(signal_sets.c.signal_engine_id == signal_engine_id)
+        with self.engine.begin() as connection:
+            set_rows = [_normalize_signal_set_row(dict(row)) for row in connection.execute(set_statement).mappings()]
+            if not set_rows:
+                return {"signal_sets": [], "signals": [], "deleted_signal_sets": 0, "deleted_signals": 0}
+            set_keys = [row["signal_set_key"] for row in set_rows]
+            deleted_signals = connection.execute(signals.delete().where(signals.c.signal_set_key.in_(set_keys)))
+            deleted_sets = connection.execute(signal_sets.delete().where(signal_sets.c.signal_set_key.in_(set_keys)))
+        return {
+            "signal_sets": set_rows,
+            "signals": [],
+            "deleted_signal_sets": int(deleted_sets.rowcount or 0),
+            "deleted_signals": int(deleted_signals.rowcount or 0),
+        }
 
     def get_candle_ref(
         self,

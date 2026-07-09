@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Eye, FileJson, MoreVertical, Plus, RefreshCw, SlidersHorizontal, X } from "lucide-react";
+import { ArrowLeft, Eye, FileJson, MoreVertical, Plus, RefreshCw, SlidersHorizontal, Trash2, X } from "lucide-react";
 import {
   createSignalSet,
+  deleteSignalEngineData,
+  deleteSignalSetTicker,
   extendSignalPoolFromLocalCandles,
   fetchJob,
   fetchJobs,
@@ -412,6 +414,31 @@ export function EnginesPage() {
     }
   });
 
+  const deleteSignalSetMutation = useMutation({
+    mutationFn: ({ signal_engine_id, asset }: { signal_engine_id: string; asset: string; signal_set_key: string }) =>
+      deleteSignalSetTicker({ signal_engine_id, asset }),
+    onSuccess: (result, variables) => {
+      void queryClient.invalidateQueries({ queryKey: ["signal-engines"] });
+      void queryClient.invalidateQueries({ queryKey: ["signal-sets", result.signal_engine_id] });
+      void queryClient.invalidateQueries({ queryKey: ["signals", variables.signal_set_key] });
+      if (selectedSignalSet?.signal_set_key === variables.signal_set_key) {
+        updateEngineUrl({ engine: result.signal_engine_id });
+      }
+    }
+  });
+
+  const deleteSignalEngineMutation = useMutation({
+    mutationFn: (signalEngineId: string) => deleteSignalEngineData(signalEngineId),
+    onSuccess: (result) => {
+      setMenuEngineId(null);
+      void queryClient.invalidateQueries({ queryKey: ["signal-engines"] });
+      void queryClient.invalidateQueries({ queryKey: ["signal-sets", result.signal_engine_id] });
+      if (selectedEngine?.signal_engine_id === result.signal_engine_id) {
+        showEngineIndex();
+      }
+    }
+  });
+
   const signalUpdateResult = isJobResponse(signalUpdateMutation.data) ? undefined : signalUpdateMutation.data;
   const activeSignalJob = activeJobQuery.data?.job ?? null;
   const activeSignalJobRunning = Boolean(activeSignalJob && ["queued", "running"].includes(activeSignalJob.status));
@@ -419,7 +446,9 @@ export function EnginesPage() {
   const selectedUpdateError = signalUpdateMutation.variables?.asset === selectedSignalSet?.asset ? signalUpdateMutation.error : undefined;
   const isUpdatingSelected = (signalUpdateMutation.isPending && signalUpdateMutation.variables?.asset === selectedSignalSet?.asset) || activeSignalJobRunning;
   const renameError = renameMutation.error;
+  const deleteSignalEngineError = deleteSignalEngineMutation.error;
   const createSignalSetError = createSignalSetMutation.error;
+  const deleteSignalSetError = deleteSignalSetMutation.error;
   const selectedTickerSet = useMemo(() => new Set(selectedTickerAssets), [selectedTickerAssets]);
   const availableTickerAssets = useMemo(() => {
     if (!selectedEngine || !catalogQuery.data) {
@@ -467,6 +496,7 @@ export function EnginesPage() {
                 </div>
                 {enginesQuery.isLoading ? <ListSkeleton count={6} label="Loading signal engine catalog" /> : null}
                 {enginesQuery.error ? <div className="state-line state-line--error">{enginesQuery.error.message}</div> : null}
+                {deleteSignalEngineError ? <div className="state-line state-line--error">{deleteSignalEngineError.message}</div> : null}
                 {!enginesQuery.isLoading && orderedEngines.length === 0 ? <div className="state-line">No signal engines registered.</div> : null}
                 {orderedEngines.map((engine) => (
                   <div className="entity-row entity-row--with-menu" key={engine.signal_engine_id}>
@@ -491,6 +521,24 @@ export function EnginesPage() {
                         >
                           Rename
                         </button>
+                        <button
+                          className="card-menu__danger"
+                          disabled={deleteSignalEngineMutation.isPending}
+                          onClick={() => {
+                            if (
+                              window.confirm(
+                                `Delete ${engine.name}? This removes the engine from the catalog plus ${formatNumber(engine.signal_set_count)} signal sets, ${formatNumber(engine.packet_count)} signal packets, and generated packet files. Source code files are left untouched. This is blocked if any training pool is linked.`
+                              )
+                            ) {
+                              deleteSignalEngineMutation.mutate(engine.signal_engine_id);
+                              setMenuEngineId(null);
+                            }
+                          }}
+                          title="Delete this engine from the catalog"
+                          type="button"
+                        >
+                          {deleteSignalEngineMutation.isPending && deleteSignalEngineMutation.variables === engine.signal_engine_id ? "Deleting..." : "Delete engine"}
+                        </button>
                       </div>
                     ) : null}
                   </div>
@@ -507,26 +555,56 @@ export function EnginesPage() {
                 </div>
                 {signalSetsQuery.isLoading ? <ListSkeleton count={7} label="Loading signal pools" variant="card" /> : null}
                 {signalSetsQuery.error ? <div className="state-line state-line--error">{signalSetsQuery.error.message}</div> : null}
+                {deleteSignalSetError ? <div className="state-line state-line--error">{deleteSignalSetError.message}</div> : null}
                 {!signalSetsQuery.isLoading && signalSets.length === 0 ? <div className="state-line">No signal pools registered for this engine.</div> : null}
                 {signalSets.map((set) => {
                   const state = signalSetState(set);
                   return (
-                    <button
-                      className={set.signal_set_key === selectedSignalSet?.signal_set_key ? "signal-pool-card is-selected" : "signal-pool-card"}
+                    <div
+                      className={set.signal_set_key === selectedSignalSet?.signal_set_key ? "signal-pool-card signal-pool-card--deletable is-selected" : "signal-pool-card signal-pool-card--deletable"}
                       key={set.signal_set_key}
-                      onClick={() => updateEngineUrl({ engine: set.signal_engine_id, asset: set.asset, signalSetKey: set.signal_set_key })}
-                      type="button"
                     >
-                      <div className="signal-pool-card__top">
-                        <strong>{set.asset}</strong>
-                        <StatusBadge tone={state.tone}>{state.label}</StatusBadge>
-                      </div>
-                      <span>{set.instrument}</span>
-                      <small className="mono">
-                        {formatTimestamp(set.coverage_start_ts ?? set.start_ts)} - {formatTimestamp(set.coverage_end_ts ?? set.end_ts)}
-                      </small>
-                      <small>{formatNumber(set.packet_count)} packets · last {formatTimestamp(set.packet_end_ts ?? set.end_ts)}</small>
-                    </button>
+                      <button
+                        className="signal-pool-card__main"
+                        onClick={() => updateEngineUrl({ engine: set.signal_engine_id, asset: set.asset, signalSetKey: set.signal_set_key })}
+                        type="button"
+                      >
+                        <div className="signal-pool-card__top">
+                          <strong>{set.asset}</strong>
+                          <StatusBadge tone={state.tone}>{state.label}</StatusBadge>
+                        </div>
+                        <span>{set.instrument}</span>
+                        <small className="mono">
+                          {formatTimestamp(set.coverage_start_ts ?? set.start_ts)} - {formatTimestamp(set.coverage_end_ts ?? set.end_ts)}
+                        </small>
+                        <small>{formatNumber(set.packet_count)} packets · last {formatTimestamp(set.packet_end_ts ?? set.end_ts)}</small>
+                      </button>
+                      <button
+                        aria-label={`Delete ${set.asset} signal pool`}
+                        className="icon-button signal-pool-card__delete"
+                        disabled={deleteSignalSetMutation.isPending}
+                        onClick={() => {
+                          if (
+                            window.confirm(
+                              `Delete ${set.asset} from ${selectedEngine.name}? This removes the signal-set DB rows and generated packet files for this engine ticker.`
+                            )
+                          ) {
+                            deleteSignalSetMutation.mutate({
+                              signal_engine_id: set.signal_engine_id,
+                              asset: set.asset,
+                              signal_set_key: set.signal_set_key
+                            });
+                          }
+                        }}
+                        type="button"
+                      >
+                        {deleteSignalSetMutation.isPending && deleteSignalSetMutation.variables?.signal_set_key === set.signal_set_key ? (
+                          <RefreshCw aria-hidden="true" className="spin-icon" />
+                        ) : (
+                          <Trash2 aria-hidden="true" />
+                        )}
+                      </button>
+                    </div>
                   );
                 })}
               </>

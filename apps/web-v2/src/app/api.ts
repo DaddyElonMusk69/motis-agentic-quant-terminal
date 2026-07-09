@@ -1318,6 +1318,52 @@ export function createSignalSet(request: { signal_engine_id: string; asset: stri
   });
 }
 
+export function deleteSignalSetTicker(request: { signal_engine_id: string; asset: string }): Promise<{
+  status: string;
+  signal_engine_id: string;
+  asset: string;
+  deleted_signal_sets: number;
+  deleted_signals: number;
+  deleted_packet_files: number;
+}> {
+  return requestJson<{
+    status: string;
+    signal_engine_id: string;
+    asset: string;
+    deleted_signal_sets: number;
+    deleted_signals: number;
+    deleted_packet_files: number;
+  }>(`/api/v1/signal-engines/${request.signal_engine_id}/signal-sets/${request.asset}`, {
+    method: "DELETE"
+  });
+}
+
+export function deleteSignalEngineData(signalEngineId: string): Promise<{
+  status: string;
+  signal_engine_id: string;
+  deleted_signal_sets: number;
+  deleted_signals: number;
+  deleted_engine_rows?: number;
+  deleted_engine_version_rows?: number;
+  deleted_registry_entry?: boolean;
+  deleted_packet_files: number;
+  deleted_artifact_dirs?: number;
+}> {
+  return requestJson<{
+    status: string;
+    signal_engine_id: string;
+    deleted_signal_sets: number;
+    deleted_signals: number;
+    deleted_engine_rows?: number;
+    deleted_engine_version_rows?: number;
+    deleted_registry_entry?: boolean;
+    deleted_packet_files: number;
+    deleted_artifact_dirs?: number;
+  }>(`/api/v1/signal-engines/${signalEngineId}`, {
+    method: "DELETE"
+  });
+}
+
 export function fetchSignals(signalSetKey: string, limit = 5, descending = false): Promise<{ signals: SignalRecord[] }> {
   const params = new URLSearchParams({ signal_set_key: signalSetKey, limit: String(limit) });
   if (descending) {

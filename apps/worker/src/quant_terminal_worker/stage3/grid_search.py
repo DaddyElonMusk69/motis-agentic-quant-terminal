@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 import itertools
 import json
 import shutil
@@ -82,6 +83,7 @@ def run_stage3_fixed_sl_baseline(
         config=_fixed_sl_config(context),
         trades=context["trade_inputs"],
         candles=context["candle_rows"],
+        trade_candle_windows=context["trade_candle_windows"],
         leverage=leverage,
         fees_bps_per_side=fees_bps_per_side,
     )
@@ -126,6 +128,7 @@ def run_stage3_exact_protection(
         config=_exact_protection_config(context),
         trades=context["trade_inputs"],
         candles=context["candle_rows"],
+        trade_candle_windows=context["trade_candle_windows"],
         leverage=leverage,
         fees_bps_per_side=fees_bps_per_side,
     )
@@ -181,6 +184,7 @@ def run_stage3_local_variants(
             config=config,
             trades=context["trade_inputs"],
             candles=context["candle_rows"],
+            trade_candle_windows=context["trade_candle_windows"],
             leverage=leverage,
             fees_bps_per_side=fees_bps_per_side,
         )
@@ -252,6 +256,11 @@ def _prepare_stage3_context(
 
     candle_rows = [_coerce_candle(candle) for candle in candles]
     candle_rows.sort(key=lambda row: row["timestamp"])
+    trade_candle_windows = _build_trade_candle_windows(
+        trades=trade_inputs,
+        candles=candle_rows,
+        hard_exit_hours=hard_exit_hours,
+    )
     return {
         "workspace_root": workspace_root,
         "artifact_root": artifact_root,
@@ -263,6 +272,7 @@ def _prepare_stage3_context(
         "hard_exit_hours": hard_exit_hours,
         "tp_levels": tp_levels,
         "candle_rows": candle_rows,
+        "trade_candle_windows": trade_candle_windows,
         "leverage": leverage,
         "fees_bps_per_side": fees_bps_per_side,
     }
@@ -385,16 +395,20 @@ def _score_policy_config(
     config: dict[str, Any],
     trades: list[dict[str, Any]],
     candles: list[dict[str, Any]],
+    trade_candle_windows: list[list[dict[str, Any]]] | None = None,
     leverage: int,
     fees_bps_per_side: float,
 ) -> dict[str, Any]:
+    if trade_candle_windows is not None and len(trade_candle_windows) != len(trades):
+        raise ValueError("Stage 3 trade candle windows must align with trade inputs.")
     outcomes = []
-    for trade in trades:
+    for index, trade in enumerate(trades):
         trade_policy = _policy_for_trade(config, trade)
+        trade_candles = trade_candle_windows[index] if trade_candle_windows is not None else candles
         outcomes.append(
             _simulate_policy_trade(
                 trade=trade,
-                candles=candles,
+                candles=trade_candles,
                 protection_enabled=bool(trade_policy["protection_enabled"]),
                 final_tp_pct=trade_policy["final_tp_pct"],
                 initial_sl_pct=trade_policy["initial_sl_pct"],
@@ -420,6 +434,32 @@ def _score_policy_config(
         "fees_bps_per_side": fees_bps_per_side,
         "outcomes": outcomes,
     }
+
+
+def _build_trade_candle_windows(
+    *,
+    trades: list[dict[str, Any]],
+    candles: list[Any],
+    hard_exit_hours: int,
+) -> list[list[dict[str, Any]]]:
+    candle_rows = [
+        candle if _is_coerced_stage3_candle(candle) else _coerce_candle(candle)
+        for candle in candles
+    ]
+    candle_rows.sort(key=lambda row: row["timestamp"])
+    timestamps = [row["timestamp"] for row in candle_rows]
+    windows = []
+    for trade in trades:
+        signal_ts = _coerce_datetime(trade["signal_ts"])
+        cutoff = signal_ts + timedelta(hours=hard_exit_hours)
+        start_index = bisect.bisect_right(timestamps, signal_ts)
+        end_index = bisect.bisect_right(timestamps, cutoff)
+        windows.append(candle_rows[start_index:end_index])
+    return windows
+
+
+def _is_coerced_stage3_candle(candle: Any) -> bool:
+    return isinstance(candle, dict) and isinstance(candle.get("timestamp"), datetime)
 
 
 def _policy_for_trade(config: dict[str, Any], trade: dict[str, Any]) -> dict[str, Any]:

@@ -429,6 +429,26 @@
   color: var(--ink-primary);
 }
 
+.card-menu button:disabled {
+  color: var(--ink-muted);
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.card-menu button:disabled:hover {
+  background: transparent;
+  color: var(--ink-muted);
+}
+
+.card-menu__danger {
+  color: var(--danger, #b42318) !important;
+}
+
+.card-menu__danger:hover {
+  background: color-mix(in oklch, var(--danger, #b42318) 10%, transparent) !important;
+  color: var(--danger, #b42318) !important;
+}
+
 .entity-row strong,
 .route-card strong {
   color: var(--ink-primary);
@@ -455,6 +475,7 @@
 .entity-row__main:focus-visible,
 .route-card:focus-visible,
 .signal-pool-card:focus-visible,
+.signal-pool-card__main:focus-visible,
 .training-pool-card__main:focus-visible,
 .development-candidate-card:focus-visible,
 .ticker-option:focus-visible,
@@ -1448,7 +1469,27 @@
   padding: 0;
 }
 
+.signal-pool-card--deletable {
+  cursor: default;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  padding: 0;
+}
+
 .training-pool-card__main {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-3);
+  text-align: left;
+}
+
+.signal-pool-card__main {
   background: transparent;
   border: 0;
   color: inherit;
@@ -1467,6 +1508,13 @@
   margin: var(--space-2) var(--space-2) 0 0;
 }
 
+.signal-pool-card__delete {
+  align-self: start;
+  color: var(--ink-muted);
+  margin: var(--space-2) var(--space-2) 0 0;
+}
+
+.signal-pool-card__delete:hover,
 .training-pool-card__delete:hover {
   color: var(--status-risk);
 }

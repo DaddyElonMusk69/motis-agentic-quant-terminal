@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import quant_terminal_worker.stage3.pyramid as stage3_pyramid
 from quant_terminal_worker.stage3.pyramid import run_stage3_pyramid
 
 
@@ -150,6 +151,48 @@ def test_stage3_pyramid_scores_side_specific_candidate_by_trade_direction(tmp_pa
     assert pyramid_candidates
     assert pyramid_candidates[0]["setup"]["policy_mode"] == "side_specific"
     assert pyramid_candidates[0]["setup"]["side_policies"]["SHORT"]["final_tp_pct"] == 0.5
+
+
+def test_stage3_pyramid_scoring_uses_precomputed_trade_windows(monkeypatch):
+    trades = [
+        {
+            "signal_id": "sig-window",
+            "sample_role": "training",
+            "decision_direction": "LONG",
+            "direction": "LONG",
+            "agreement": "MATCH",
+            "signal_ts": "2026-05-01T00:10:00Z",
+            "reference_price": 100,
+        }
+    ]
+    full_candles = [
+        {"timestamp": "2026-05-01T00:00:00Z", "open": 100, "high": 100, "low": 100, "close": 100},
+        {"timestamp": "2026-05-01T00:15:00Z", "open": 100, "high": 101, "low": 99, "close": 100},
+    ]
+    window = [full_candles[1]]
+    observed_candles = []
+
+    def fake_simulate_pyramid_trade(**kwargs):
+        observed_candles.append(kwargs["candles"])
+        return {"pnl_pct": 0.0, "legs_filled": 1, "wins": 0, "losses": 0}
+
+    monkeypatch.setattr(stage3_pyramid, "simulate_pyramid_trade", fake_simulate_pyramid_trade)
+
+    stage3_pyramid._score_pyramid_setup(
+        trades=trades,
+        candles=full_candles,
+        trade_candle_windows=[window],
+        tp_pct=1.0,
+        sl_pct=1.0,
+        step_pct=0.5,
+        max_legs=2,
+        sl_breakeven=False,
+        forward_hours=1,
+        leverage=1,
+        fees_bps_per_side=0,
+    )
+
+    assert observed_candles == [window]
 
 
 def test_stage3_pyramid_refuses_missing_stage3_candidate_shortlist(tmp_path: Path):

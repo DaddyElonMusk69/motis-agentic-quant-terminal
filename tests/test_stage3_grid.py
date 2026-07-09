@@ -3,7 +3,9 @@ from pathlib import Path
 
 import pytest
 
+import quant_terminal_worker.stage3.grid_search as stage3_grid
 from quant_terminal_worker.stage3.grid_search import (
+    _build_trade_candle_windows,
     run_stage3_exact_protection,
     run_stage3_fixed_sl_baseline,
     run_stage3_grid_search,
@@ -369,6 +371,89 @@ def test_stage3c_side_specific_variants_are_paired_not_cartesian(tmp_path: Path)
     assert all(row["policy_mode"] == "side_specific" for row in variants)
     assert all(set(row["side_policies"]) == {"LONG", "SHORT"} for row in variants)
     assert any(row["side_policies"]["LONG"]["final_tp_pct"] != row["side_policies"]["SHORT"]["final_tp_pct"] for row in variants)
+
+
+def test_stage3_trade_candle_windows_trim_to_post_signal_hard_exit_range():
+    trades = [
+        {
+            "signal_id": "sig-window",
+            "sample_role": "training",
+            "direction": "LONG",
+            "decision_direction": "LONG",
+            "agreement": "MATCH",
+            "signal_ts": "2026-05-01T00:10:00Z",
+            "reference_price": 100,
+        }
+    ]
+    candles = [
+        {"timestamp": "2026-05-01T00:00:00Z", "open": 100, "high": 100, "low": 100, "close": 100},
+        {"timestamp": "2026-05-01T00:10:00Z", "open": 100, "high": 100, "low": 100, "close": 100},
+        {"timestamp": "2026-05-01T00:15:00Z", "open": 100, "high": 101, "low": 99, "close": 100},
+        {"timestamp": "2026-05-01T01:10:00Z", "open": 100, "high": 101, "low": 99, "close": 100},
+        {"timestamp": "2026-05-01T01:15:00Z", "open": 100, "high": 101, "low": 99, "close": 100},
+    ]
+
+    windows = _build_trade_candle_windows(trades=trades, candles=candles, hard_exit_hours=1)
+
+    assert [[row["timestamp"].isoformat().replace("+00:00", "Z") for row in window] for window in windows] == [
+        ["2026-05-01T00:15:00Z", "2026-05-01T01:10:00Z"]
+    ]
+
+
+def test_stage3_policy_scoring_uses_precomputed_trade_windows(monkeypatch):
+    trades = [
+        {
+            "signal_id": "sig-window",
+            "sample_role": "training",
+            "direction": "LONG",
+            "decision_direction": "LONG",
+            "agreement": "MATCH",
+            "signal_ts": "2026-05-01T00:10:00Z",
+            "reference_price": 100,
+        }
+    ]
+    full_candles = [
+        {"timestamp": "2026-05-01T00:00:00Z", "open": 100, "high": 100, "low": 100, "close": 100},
+        {"timestamp": "2026-05-01T00:15:00Z", "open": 100, "high": 101, "low": 99, "close": 100},
+    ]
+    window = [full_candles[1]]
+    observed_candles = []
+
+    def fake_simulate_policy_trade(**kwargs):
+        observed_candles.append(kwargs["candles"])
+        return {
+            "signal_id": kwargs["trade"]["signal_id"],
+            "sample_role": kwargs["trade"]["sample_role"],
+            "direction": kwargs["trade"]["direction"],
+            "agreement": kwargs["trade"]["agreement"],
+            "outcome": "TIME_EXIT",
+            "gross_pnl_pct": 0.0,
+            "fees_pct": 0.0,
+            "net_pnl_pct": 0.0,
+        }
+
+    monkeypatch.setattr(stage3_grid, "_simulate_policy_trade", fake_simulate_policy_trade)
+
+    stage3_grid._score_policy_config(
+        config={
+            "config_id": "fixed",
+            "stage3_step": "fixed_sl_variant",
+            "policy_mode": "shared",
+            "protection_enabled": False,
+            "final_tp_pct": 1.0,
+            "initial_sl_pct": 1.0,
+            "protect_trigger_pct": None,
+            "trail_sl_pct": None,
+            "hard_exit_hours": 1,
+        },
+        trades=trades,
+        candles=full_candles,
+        trade_candle_windows=[window],
+        leverage=1,
+        fees_bps_per_side=0,
+    )
+
+    assert observed_candles == [window]
 
 
 def test_stage3_policy_test_refuses_missing_stage2_exit_policy(tmp_path: Path):

@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.pool import StaticPool
 
 import quant_terminal_api.main as api_main
-from quant_terminal_api.db.models import deployment_routes, execution_bundles, metadata, owner_states, wake_runs
+from quant_terminal_api.db.models import deployment_routes, execution_bundles, metadata, owner_states, signal_engines, wake_runs
 from quant_terminal_api.main import create_app
 from quant_terminal_api.repositories.runtime import RuntimeRepository
 from quant_terminal_worker.execution.bundle_loader import load_strategy_module
@@ -791,6 +791,422 @@ def test_signal_pool_create_accepts_feature_required_data_refs(tmp_path, monkeyp
     signal_set = response.json()["signal_set"]
     assert signal_set["signal_set_key"] == "feature_engine:AAVE:AAVE-feature_engine-canonical"
     assert signal_set["manifest"]["data_refs"] == ["AAVE-raw-5m", "AAVE-feature-base-5m"]
+
+
+def test_signal_pool_delete_removes_db_rows_and_generated_packet_files(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'signal-delete.db'}")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    repository.upsert_signal_set(
+        {
+            "signal_set_key": "vegas_ema:AAVE:AAVE-vegas_ema-canonical",
+            "signal_set_id": "AAVE-vegas_ema-canonical",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "AAVE",
+            "instrument": "AAVE-USDT-SWAP",
+            "start_ts": "2026-06-01T00:00:00Z",
+            "end_ts": "2026-06-01T00:05:00Z",
+            "packet_count": 2,
+            "payload_schema": "signal_packet.v2",
+            "source_path": "canonicalized:signals",
+            "manifest": {},
+        }
+    )
+    repository.upsert_signals(
+        [
+            {
+                "signal_id": "sig-aave-1",
+                "signal_set_key": "vegas_ema:AAVE:AAVE-vegas_ema-canonical",
+                "signal_engine_id": "vegas_ema",
+                "signal_engine_version": "0.1",
+                "asset": "AAVE",
+                "instrument": "AAVE-USDT-SWAP",
+                "timestamp": "2026-06-01T00:00:00Z",
+                "data_refs": [],
+                "payload_schema": "signal_packet.v2",
+                "payload": {"packet_path": "dev/signals/vegas_ema/AAVE/AAVE-vegas_ema-canonical/packets/sig-aave-1.json"},
+            },
+            {
+                "signal_id": "sig-aave-2",
+                "signal_set_key": "vegas_ema:AAVE:AAVE-vegas_ema-canonical",
+                "signal_engine_id": "vegas_ema",
+                "signal_engine_version": "0.1",
+                "asset": "AAVE",
+                "instrument": "AAVE-USDT-SWAP",
+                "timestamp": "2026-06-01T00:05:00Z",
+                "data_refs": [],
+                "payload_schema": "signal_packet.v2",
+                "payload": {},
+            },
+        ]
+    )
+    packet_dir = tmp_path / "dev" / "signals" / "vegas_ema" / "AAVE" / "AAVE-vegas_ema-canonical" / "packets"
+    packet_dir.mkdir(parents=True)
+    (packet_dir / "sig-aave-1.json").write_text(json.dumps({"signal_id": "sig-aave-1"}))
+    (packet_dir / "sig-aave-2.json").write_text(json.dumps({"signal_id": "sig-aave-2"}))
+    unrelated_packet = tmp_path / "dev" / "signals" / "vegas_ema" / "BTC" / "BTC-vegas_ema-canonical" / "packets" / "sig-btc.json"
+    unrelated_packet.parent.mkdir(parents=True)
+    unrelated_packet.write_text(json.dumps({"signal_id": "sig-btc"}))
+
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.delete("/api/v1/signal-engines/vegas_ema/signal-sets/AAVE")
+
+    assert response.status_code == 200
+    assert response.json()["deleted_signal_sets"] == 1
+    assert response.json()["deleted_signals"] == 2
+    assert response.json()["deleted_packet_files"] == 2
+    assert repository.get_signal_set("vegas_ema:AAVE:AAVE-vegas_ema-canonical") is None
+    assert repository.list_signals(signal_set_key="vegas_ema:AAVE:AAVE-vegas_ema-canonical") == []
+    assert not packet_dir.exists()
+    assert unrelated_packet.exists()
+
+
+def test_signal_engine_delete_removes_all_signal_sets_signals_and_generated_packet_files(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'engine-delete.db'}")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    for asset in ("AAVE", "BTC"):
+        repository.upsert_signal_set(
+            {
+                "signal_set_key": f"vegas_v5:{asset}:{asset}-vegas_v5-canonical",
+                "signal_set_id": f"{asset}-vegas_v5-canonical",
+                "signal_engine_id": "vegas_v5",
+                "signal_engine_version": "0.1",
+                "asset": asset,
+                "instrument": f"{asset}-USDT-SWAP",
+                "start_ts": "2026-06-01T00:00:00Z",
+                "end_ts": "2026-06-01T00:05:00Z",
+                "packet_count": 1,
+                "payload_schema": "signal_packet.v2",
+                "source_path": "canonicalized:signals",
+                "manifest": {},
+            }
+        )
+        repository.upsert_signals(
+            [
+                {
+                    "signal_id": f"sig-{asset.lower()}-1",
+                    "signal_set_key": f"vegas_v5:{asset}:{asset}-vegas_v5-canonical",
+                    "signal_engine_id": "vegas_v5",
+                    "signal_engine_version": "0.1",
+                    "asset": asset,
+                    "instrument": f"{asset}-USDT-SWAP",
+                    "timestamp": "2026-06-01T00:00:00Z",
+                    "data_refs": [],
+                    "payload_schema": "signal_packet.v2",
+                    "payload": {
+                        "packet_path": f"dev/signals/vegas_v5/{asset}/{asset}-vegas_v5-canonical/packets/sig-{asset.lower()}-1.json"
+                    },
+                }
+            ]
+        )
+        packet_dir = tmp_path / "dev" / "signals" / "vegas_v5" / asset / f"{asset}-vegas_v5-canonical" / "packets"
+        packet_dir.mkdir(parents=True)
+        (packet_dir / f"sig-{asset.lower()}-1.json").write_text(json.dumps({"signal_id": f"sig-{asset.lower()}-1"}))
+    unrelated_packet = tmp_path / "dev" / "signals" / "other_engine" / "ETH" / "ETH-other_engine-canonical" / "packets" / "sig-eth.json"
+    unrelated_packet.parent.mkdir(parents=True)
+    unrelated_packet.write_text(json.dumps({"signal_id": "sig-eth"}))
+
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.delete("/api/v1/signal-engines/vegas_v5")
+
+    assert response.status_code == 200
+    assert response.json()["deleted_signal_sets"] == 2
+    assert response.json()["deleted_signals"] == 2
+    assert response.json()["deleted_packet_files"] == 2
+    assert response.json()["deleted_artifact_dirs"] == 2
+    assert repository.list_signal_sets("vegas_v5") == []
+    assert repository.list_signals(signal_set_key="vegas_v5:AAVE:AAVE-vegas_v5-canonical") == []
+    assert not (tmp_path / "dev" / "signals" / "vegas_v5").exists()
+    assert unrelated_packet.exists()
+
+
+def test_signal_engine_delete_does_not_materialize_signal_payloads(tmp_path):
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'engine-delete-payloads.db'}")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    repository.upsert_signal_set(
+        {
+            "signal_set_key": "vegas_v5:BTC:BTC-vegas_v5-canonical",
+            "signal_set_id": "BTC-vegas_v5-canonical",
+            "signal_engine_id": "vegas_v5",
+            "signal_engine_version": "0.1",
+            "asset": "BTC",
+            "instrument": "BTC-USDT-SWAP",
+            "start_ts": "2026-06-01T00:00:00Z",
+            "end_ts": "2026-06-01T00:05:00Z",
+            "packet_count": 1,
+            "payload_schema": "signal_packet.v2",
+            "source_path": "canonicalized:signals",
+            "manifest": {},
+        }
+    )
+    repository.upsert_signals(
+        [
+            {
+                "signal_id": "sig-btc-heavy",
+                "signal_set_key": "vegas_v5:BTC:BTC-vegas_v5-canonical",
+                "signal_engine_id": "vegas_v5",
+                "signal_engine_version": "0.1",
+                "asset": "BTC",
+                "instrument": "BTC-USDT-SWAP",
+                "timestamp": "2026-06-01T00:00:00Z",
+                "data_refs": [],
+                "payload_schema": "signal_packet.v2",
+                "payload": {"packet_path": "dev/signals/vegas_v5/BTC/BTC-vegas_v5-canonical/packets/sig-btc-heavy.json", "candles": ["x" * 1000]},
+            }
+        ]
+    )
+
+    deleted = repository.delete_signal_sets_for_engine(signal_engine_id="vegas_v5")
+
+    assert deleted["deleted_signal_sets"] == 1
+    assert deleted["deleted_signals"] == 1
+    assert deleted["signals"] == []
+
+
+def test_signal_engine_delete_removes_registry_only_engine_definition(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    registry_root = tmp_path / "artifacts" / "signal_engine"
+    registry_root.mkdir(parents=True)
+    registry_path = registry_root / "engine_registry.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "vegas_v4": {
+                    "signal_engine_id": "vegas_v4",
+                    "version": "0.1",
+                    "name": "Vegas v4",
+                    "description": "Temporary registry engine",
+                    "code_ref": {},
+                    "required_data": [],
+                    "output_envelope_version": "signal_packet.v2",
+                    "runtime_entrypoint": "engines.vegas_v4:generate",
+                    "live_scanner_entrypoint": "engines.vegas_v4:scan",
+                    "configuration_schema": {},
+                }
+            }
+        )
+    )
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'engine-delete-registry.db'}")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.delete("/api/v1/signal-engines/vegas_v4")
+
+    assert response.status_code == 200
+    assert response.json()["deleted_signal_sets"] == 0
+    assert response.json()["deleted_registry_entry"] is True
+    assert json.loads(registry_path.read_text()) == {}
+    assert [engine["signal_engine_id"] for engine in client.get("/api/v1/signal-engines").json()["engines"]] == []
+
+
+def test_signal_engine_delete_removes_registered_engine_definition(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'engine-delete-registered.db'}")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    repository.register_signal_engine(
+        {
+            "signal_engine_id": "vegas_v4",
+            "name": "Vegas v4",
+            "description": "Temporary registered engine",
+            "version": "0.1",
+            "code_ref": {},
+            "supported_input_data_types": ["candles"],
+            "required_data": [],
+            "output_envelope_version": "signal_packet.v2",
+            "runtime_entrypoint": "engines.vegas_v4:generate",
+            "live_scanner_entrypoint": "engines.vegas_v4:scan",
+            "configuration_schema": {},
+        }
+    )
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.delete("/api/v1/signal-engines/vegas_v4")
+
+    assert response.status_code == 200
+    assert response.json()["deleted_engine_rows"] == 1
+    assert response.json()["deleted_engine_version_rows"] == 1
+    assert repository.list_signal_engines() == []
+    with engine.connect() as connection:
+        assert connection.execute(select(signal_engines).where(signal_engines.c.signal_engine_id == "vegas_v4")).first() is None
+
+
+def test_signal_engine_delete_blocks_when_any_training_pool_references_engine_signal_set(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'engine-delete-linked.db'}")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    repository.upsert_signal_set(
+        {
+            "signal_set_key": "vegas_v5:BNB:BNB-vegas_v5-canonical",
+            "signal_set_id": "BNB-vegas_v5-canonical",
+            "signal_engine_id": "vegas_v5",
+            "signal_engine_version": "0.1",
+            "asset": "BNB",
+            "instrument": "BNB-USDT-SWAP",
+            "start_ts": "2026-06-01T00:00:00Z",
+            "end_ts": "2026-06-01T00:05:00Z",
+            "packet_count": 1,
+            "payload_schema": "signal_packet.v2",
+            "source_path": "canonicalized:signals",
+            "manifest": {},
+        }
+    )
+    repository.upsert_signals(
+        [
+            {
+                "signal_id": "sig-bnb-1",
+                "signal_set_key": "vegas_v5:BNB:BNB-vegas_v5-canonical",
+                "signal_engine_id": "vegas_v5",
+                "signal_engine_version": "0.1",
+                "asset": "BNB",
+                "instrument": "BNB-USDT-SWAP",
+                "timestamp": "2026-06-01T00:00:00Z",
+                "data_refs": [],
+                "payload_schema": "signal_packet.v2",
+                "payload": {},
+            }
+        ]
+    )
+    repository.create_stage0_universe(
+        {
+            "universe_run_id": "training-pool-v5",
+            "window_start": "2026-05-01T00:00:00Z",
+            "window_end": "2026-06-01T00:00:00Z",
+            "forward_hours": 24,
+            "trigger_rate_threshold_pct": 80,
+            "config_hash": "hash",
+            "engine_filter": ["vegas_v5"],
+            "status": "created",
+            "summary": {},
+        },
+        [
+            {
+                "candidate_id": "candidate-bnb",
+                "universe_run_id": "training-pool-v5",
+                "signal_set_key": "vegas_v5:BNB:BNB-vegas_v5-canonical",
+                "signal_engine_id": "vegas_v5",
+                "signal_engine_version": "0.1",
+                "asset": "BNB",
+                "signal_set_id": "BNB-vegas_v5-canonical",
+                "packet_count": 1,
+                "trigger_rate_pct": None,
+                "branch_path": "dev/stage0/training-pool-v5/BNB",
+                "acceptance_status": "accepted",
+                "duplicate_status": "new",
+                "existing_strategy_id": None,
+                "last_error": {},
+                "metrics": {},
+            }
+        ],
+    )
+    packet_dir = tmp_path / "dev" / "signals" / "vegas_v5" / "BNB" / "BNB-vegas_v5-canonical" / "packets"
+    packet_dir.mkdir(parents=True)
+    (packet_dir / "sig-bnb-1.json").write_text(json.dumps({"signal_id": "sig-bnb-1"}))
+
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.delete("/api/v1/signal-engines/vegas_v5")
+
+    assert response.status_code == 409
+    assert "linked to 1 Stage 0 candidate" in response.json()["detail"]
+    assert repository.get_signal_set("vegas_v5:BNB:BNB-vegas_v5-canonical") is not None
+    assert repository.list_signals(signal_set_key="vegas_v5:BNB:BNB-vegas_v5-canonical")
+    assert packet_dir.exists()
+
+
+def test_signal_pool_delete_blocks_when_stage0_candidate_references_signal_set(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'signal-delete-linked.db'}")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    repository.upsert_signal_set(
+        {
+            "signal_set_key": "vegas_5m_cluster_v3:ETH:ETH-vegas_5m_cluster_v3-canonical",
+            "signal_set_id": "ETH-vegas_5m_cluster_v3-canonical",
+            "signal_engine_id": "vegas_5m_cluster_v3",
+            "signal_engine_version": "0.1",
+            "asset": "ETH",
+            "instrument": "ETH-USDT-SWAP",
+            "start_ts": "2026-06-01T00:00:00Z",
+            "end_ts": "2026-06-01T00:05:00Z",
+            "packet_count": 1,
+            "payload_schema": "signal_packet.v2",
+            "source_path": "canonicalized:signals",
+            "manifest": {},
+        }
+    )
+    repository.upsert_signal(
+        {
+            "signal_id": "sig-eth-1",
+            "signal_set_key": "vegas_5m_cluster_v3:ETH:ETH-vegas_5m_cluster_v3-canonical",
+            "signal_engine_id": "vegas_5m_cluster_v3",
+            "signal_engine_version": "0.1",
+            "asset": "ETH",
+            "instrument": "ETH-USDT-SWAP",
+            "timestamp": "2026-06-01T00:00:00Z",
+            "data_refs": [],
+            "payload_schema": "signal_packet.v2",
+            "payload": {},
+        }
+    )
+    repository.create_stage0_universe(
+        {
+            "universe_run_id": "training-pool-v3",
+            "name": "Training Pool v3",
+            "config_hash": "hash",
+            "window_start": "2026-05-15T00:00:00Z",
+            "window_end": "2026-07-05T00:00:00Z",
+            "train_start": "2026-05-15",
+            "train_end": "2026-06-27",
+            "walk_forward_start": "2026-06-28",
+            "walk_forward_end": "2026-07-05",
+            "forward_hours": 12,
+            "trigger_rate_threshold_pct": 0,
+            "engine_filter": ["vegas_5m_cluster_v3"],
+            "status": "completed",
+            "summary": {},
+        },
+        [
+            {
+                "candidate_id": "candidate-eth-v3",
+                "universe_run_id": "training-pool-v3",
+                "signal_set_key": "vegas_5m_cluster_v3:ETH:ETH-vegas_5m_cluster_v3-canonical",
+                "signal_engine_id": "vegas_5m_cluster_v3",
+                "signal_engine_version": "0.1",
+                "asset": "ETH",
+                "signal_set_id": "ETH-vegas_5m_cluster_v3-canonical",
+                "packet_count": 1,
+                "trigger_rate_pct": 100,
+                "branch_path": "dev/stage0/training-pool-v3/ETH",
+                "acceptance_status": "accepted",
+                "duplicate_status": "new",
+                "existing_strategy_id": None,
+                "last_error": {},
+                "metrics": {},
+            }
+        ],
+    )
+    packet_dir = tmp_path / "dev" / "signals" / "vegas_5m_cluster_v3" / "ETH" / "ETH-vegas_5m_cluster_v3-canonical" / "packets"
+    packet_dir.mkdir(parents=True)
+    (packet_dir / "sig-eth-1.json").write_text(json.dumps({"signal_id": "sig-eth-1"}))
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.delete("/api/v1/signal-engines/vegas_5m_cluster_v3/signal-sets/ETH")
+
+    assert response.status_code == 409
+    assert "linked to 1 Stage 0 candidate" in response.json()["detail"]
+    assert repository.get_signal_set("vegas_5m_cluster_v3:ETH:ETH-vegas_5m_cluster_v3-canonical") is not None
+    assert repository.list_signals(signal_set_key="vegas_5m_cluster_v3:ETH:ETH-vegas_5m_cluster_v3-canonical")
+    assert packet_dir.exists()
 
 
 def test_signal_pool_extend_endpoint_uses_local_extension_service():

@@ -10,6 +10,7 @@ from quant_terminal_worker.stage3.grid_search import (
     DEFAULT_FORWARD_HOURS,
     DEFAULT_FEES_BPS_PER_SIDE,
     DEFAULT_LEVERAGE,
+    _build_trade_candle_windows,
     _coerce_candle,
     _coerce_datetime,
     _load_trade_inputs,
@@ -45,6 +46,11 @@ def run_stage3_pyramid(
     setups = _resolve_stage4_setups(promotion_root, tp_pct=tp_pct, sl_pct=sl_pct)
     candle_rows = [_coerce_candle(candle) for candle in candles]
     candle_rows.sort(key=lambda row: row["timestamp"])
+    trade_candle_windows = _build_trade_candle_windows(
+        trades=trade_inputs,
+        candles=candle_rows,
+        hard_exit_hours=forward_hours,
+    )
 
     baseline = None
     records = []
@@ -52,6 +58,7 @@ def run_stage3_pyramid(
         setup_baseline = _score_pyramid_setup(
             trades=trade_inputs,
             candles=candle_rows,
+            trade_candle_windows=trade_candle_windows,
             tp_pct=setup["tp_pct"],
             sl_pct=setup["sl_pct"],
             side_policies=setup.get("side_policies"),
@@ -82,6 +89,7 @@ def run_stage3_pyramid(
                 record = _score_pyramid_setup(
                     trades=trade_inputs,
                     candles=candle_rows,
+                    trade_candle_windows=trade_candle_windows,
                     tp_pct=setup["tp_pct"],
                     sl_pct=setup["sl_pct"],
                     side_policies=setup.get("side_policies"),
@@ -253,6 +261,7 @@ def _score_pyramid_setup(
     *,
     trades: list[dict[str, Any]],
     candles: list[dict[str, Any]],
+    trade_candle_windows: list[list[dict[str, Any]]] | None = None,
     tp_pct: float,
     sl_pct: float,
     side_policies: dict[str, Any] | None = None,
@@ -263,20 +272,23 @@ def _score_pyramid_setup(
     leverage: int,
     fees_bps_per_side: float = DEFAULT_FEES_BPS_PER_SIDE,
 ) -> dict[str, Any]:
+    if trade_candle_windows is not None and len(trade_candle_windows) != len(trades):
+        raise ValueError("Stage 3 pyramid trade candle windows must align with trade inputs.")
     pnl = 0.0
     legs = 0
     wins = 0
     losses = 0
-    for trade in trades:
+    for index, trade in enumerate(trades):
         trade_tp_pct, trade_sl_pct = _pyramid_trade_policy(
             trade=trade,
             default_tp_pct=tp_pct,
             default_sl_pct=sl_pct,
             side_policies=side_policies,
         )
+        trade_candles = trade_candle_windows[index] if trade_candle_windows is not None else candles
         outcome = simulate_pyramid_trade(
             trade=trade,
-            candles=candles,
+            candles=trade_candles,
             tp_pct=trade_tp_pct,
             sl_pct=trade_sl_pct,
             step_pct=step_pct,

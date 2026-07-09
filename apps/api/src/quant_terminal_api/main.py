@@ -472,6 +472,58 @@ def create_app(
         )
         return {"engine": catalog_engine}
 
+    @app.delete("/api/v1/signal-engines/{signal_engine_id}")
+    def delete_signal_engine_data(signal_engine_id: str) -> dict[str, Any]:
+        repository = get_runtime_repository()
+        workspace_root = Path.cwd()
+        engine_exists = any(
+            engine.get("signal_engine_id") == signal_engine_id
+            for engine in _signal_engine_catalog(repository, workspace_root=workspace_root)
+        )
+        deleter = getattr(repository, "delete_signal_sets_for_engine", None)
+        if not callable(deleter):
+            raise HTTPException(status_code=501, detail="Signal engine data deletion is not supported by this repository")
+        blocker_reader = getattr(repository, "signal_engine_delete_blockers", None)
+        if callable(blocker_reader):
+            blockers = blocker_reader(signal_engine_id=signal_engine_id)
+            if blockers.get("stage0_candidate_count") or blockers.get("stage1_session_count"):
+                raise HTTPException(
+                    status_code=409,
+                    detail=_signal_engine_delete_blocker_message(
+                        signal_engine_id=signal_engine_id,
+                        blockers=blockers,
+                    ),
+                )
+        deleted = deleter(signal_engine_id=signal_engine_id)
+        registration_deleted = {"deleted_engine_version_rows": 0, "deleted_engine_rows": 0}
+        registration_deleter = getattr(repository, "delete_signal_engine_registration", None)
+        if callable(registration_deleter):
+            registration_deleted = registration_deleter(signal_engine_id=signal_engine_id)
+        registry_deleted = _delete_registry_signal_engine(workspace_root=workspace_root, signal_engine_id=signal_engine_id)
+        if (
+            not engine_exists
+            and not deleted.get("signal_sets")
+            and not int(registration_deleted.get("deleted_engine_rows") or 0)
+            and not int(registration_deleted.get("deleted_engine_version_rows") or 0)
+            and not registry_deleted
+        ):
+            raise HTTPException(status_code=404, detail="Signal engine not found")
+        artifact_cleanup = _delete_signal_pool_artifacts(
+            workspace_root=workspace_root,
+            signal_sets=deleted.get("signal_sets") or [],
+            signals=deleted.get("signals") or [],
+        )
+        return {
+            "status": "deleted",
+            "signal_engine_id": signal_engine_id,
+            "deleted_signal_sets": int(deleted.get("deleted_signal_sets") or 0),
+            "deleted_signals": int(deleted.get("deleted_signals") or 0),
+            "deleted_engine_rows": int(registration_deleted.get("deleted_engine_rows") or 0),
+            "deleted_engine_version_rows": int(registration_deleted.get("deleted_engine_version_rows") or 0),
+            "deleted_registry_entry": registry_deleted,
+            **artifact_cleanup,
+        }
+
     @app.get("/api/v1/signal-engines/{signal_engine_id}/signal-sets")
     def list_signal_sets(signal_engine_id: str) -> dict[str, Any]:
         return {"signal_sets": get_runtime_repository().list_signal_sets(signal_engine_id)}
@@ -498,6 +550,41 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"signal_set": signal_set}
+
+    @app.delete("/api/v1/signal-engines/{signal_engine_id}/signal-sets/{asset}")
+    def delete_signal_set_ticker(signal_engine_id: str, asset: str) -> dict[str, Any]:
+        repository = get_runtime_repository()
+        deleter = getattr(repository, "delete_signal_sets_for_engine_asset", None)
+        if not callable(deleter):
+            raise HTTPException(status_code=501, detail="Signal set deletion is not supported by this repository")
+        blocker_reader = getattr(repository, "signal_set_delete_blockers", None)
+        if callable(blocker_reader):
+            blockers = blocker_reader(signal_engine_id=signal_engine_id, asset=asset)
+            if blockers.get("stage0_candidate_count") or blockers.get("stage1_session_count"):
+                raise HTTPException(
+                    status_code=409,
+                    detail=_signal_set_delete_blocker_message(
+                        signal_engine_id=signal_engine_id,
+                        asset=asset,
+                        blockers=blockers,
+                    ),
+                )
+        deleted = deleter(signal_engine_id=signal_engine_id, asset=asset)
+        if not deleted.get("signal_sets"):
+            raise HTTPException(status_code=404, detail="Signal set not found")
+        artifact_cleanup = _delete_signal_pool_artifacts(
+            workspace_root=Path.cwd(),
+            signal_sets=deleted.get("signal_sets") or [],
+            signals=deleted.get("signals") or [],
+        )
+        return {
+            "status": "deleted",
+            "signal_engine_id": signal_engine_id,
+            "asset": asset.upper(),
+            "deleted_signal_sets": int(deleted.get("deleted_signal_sets") or 0),
+            "deleted_signals": int(deleted.get("deleted_signals") or 0),
+            **artifact_cleanup,
+        }
 
     @app.get("/api/v1/signals")
     def list_signals(
@@ -3010,6 +3097,18 @@ def _registry_signal_engine(*, workspace_root: Path, signal_engine_id: str) -> d
     return entry if isinstance(entry, dict) else None
 
 
+def _delete_registry_signal_engine(*, workspace_root: Path, signal_engine_id: str) -> bool:
+    registry_path = workspace_root / "artifacts" / "signal_engine" / "engine_registry.json"
+    if not registry_path.is_file():
+        return False
+    registry = json.loads(registry_path.read_text())
+    if not isinstance(registry, dict) or signal_engine_id not in registry:
+        return False
+    del registry[signal_engine_id]
+    registry_path.write_text(json.dumps(registry, indent=2, sort_keys=True) + "\n")
+    return True
+
+
 def _create_canonical_signal_set(*, repository: Any, engine: dict[str, Any], asset: str) -> dict[str, Any]:
     asset = asset.upper()
     required_refs, missing = _required_data_refs(repository=repository, engine=engine, asset=asset)
@@ -3049,6 +3148,162 @@ def _create_canonical_signal_set(*, repository: Any, engine: dict[str, Any], ass
     }
     repository.upsert_signal_set(signal_set)
     return _relative_nested_paths(Path.cwd(), repository.get_signal_set(signal_set_key) or signal_set)
+
+
+def _delete_signal_pool_artifacts(*, workspace_root: Path, signal_sets: list[dict[str, Any]], signals: list[dict[str, Any]]) -> dict[str, Any]:
+    workspace = workspace_root.resolve()
+    signals_root = (workspace / "dev" / "signals").resolve()
+    deleted_packet_files = 0
+    missing_packet_files = 0
+    deleted_artifact_dirs = 0
+    skipped_packet_paths = 0
+
+    set_roots: list[Path] = []
+    for signal_set in signal_sets:
+        root = (
+            workspace
+            / "dev"
+            / "signals"
+            / str(signal_set["signal_engine_id"])
+            / str(signal_set["asset"]).upper()
+            / str(signal_set["signal_set_id"])
+        )
+        resolved = _resolve_under(root, signals_root)
+        if resolved is not None:
+            set_roots.append(resolved)
+
+    deleted_roots: set[Path] = set()
+    for root in sorted(set(set_roots), key=lambda item: len(item.parts), reverse=True):
+        if not root.exists():
+            continue
+        deleted_packet_files += _count_files(root)
+        shutil.rmtree(root)
+        deleted_roots.add(root)
+        deleted_artifact_dirs += 1
+
+    for packet_path in _packet_paths_from_signals(signals):
+        resolved = _resolve_under(workspace / packet_path, signals_root)
+        if resolved is None:
+            skipped_packet_paths += 1
+            continue
+        if any(resolved == root or root in resolved.parents for root in deleted_roots):
+            continue
+        if resolved.exists() and resolved.is_file():
+            resolved.unlink()
+            deleted_packet_files += 1
+            _remove_empty_parents(resolved.parent, stop_at=signals_root)
+        else:
+            missing_packet_files += 1
+
+    for signal_set in signal_sets:
+        asset_root = (
+            workspace
+            / "dev"
+            / "signals"
+            / str(signal_set["signal_engine_id"])
+            / str(signal_set["asset"]).upper()
+        )
+        resolved_asset_root = _resolve_under(asset_root, signals_root)
+        if resolved_asset_root is not None:
+            _remove_empty_parents(resolved_asset_root, stop_at=signals_root)
+
+    return {
+        "deleted_packet_files": deleted_packet_files,
+        "missing_packet_files": missing_packet_files,
+        "deleted_artifact_dirs": deleted_artifact_dirs,
+        "skipped_packet_paths": skipped_packet_paths,
+    }
+
+
+def _signal_set_delete_blocker_message(*, signal_engine_id: str, asset: str, blockers: dict[str, Any]) -> str:
+    stage0_count = int(blockers.get("stage0_candidate_count") or 0)
+    stage1_count = int(blockers.get("stage1_session_count") or 0)
+    universe_ids = blockers.get("stage0_universe_run_ids") or []
+    session_ids = blockers.get("stage1_session_ids") or []
+    pool_text = f" across {len(universe_ids)} training pool{'s' if len(universe_ids) != 1 else ''}" if universe_ids else ""
+    session_text = ""
+    if stage1_count:
+        preview = ", ".join(str(item) for item in session_ids[:3])
+        suffix = "..." if len(session_ids) > 3 else ""
+        session_text = f" and {stage1_count} Stage 1 session{'s' if stage1_count != 1 else ''} ({preview}{suffix})"
+    return (
+        f"Cannot delete {asset.upper()} from {signal_engine_id}: signal pool is linked to "
+        f"{stage0_count} Stage 0 candidate{'s' if stage0_count != 1 else ''}{pool_text}{session_text}. "
+        "Delete or reset the linked training pool/session first."
+    )
+
+
+def _signal_engine_delete_blocker_message(*, signal_engine_id: str, blockers: dict[str, Any]) -> str:
+    stage0_count = int(blockers.get("stage0_candidate_count") or 0)
+    stage1_count = int(blockers.get("stage1_session_count") or 0)
+    universe_ids = blockers.get("stage0_universe_run_ids") or []
+    session_ids = blockers.get("stage1_session_ids") or []
+    set_rows = blockers.get("signal_sets") or []
+    asset_preview = ", ".join(sorted({str(row.get("asset", "")).upper() for row in set_rows if row.get("asset")})[:5])
+    asset_suffix = "..." if len({str(row.get("asset", "")).upper() for row in set_rows if row.get("asset")}) > 5 else ""
+    pool_text = f" across {len(universe_ids)} training pool{'s' if len(universe_ids) != 1 else ''}" if universe_ids else ""
+    session_text = ""
+    if stage1_count:
+        preview = ", ".join(str(item) for item in session_ids[:3])
+        suffix = "..." if len(session_ids) > 3 else ""
+        session_text = f" and {stage1_count} Stage 1 session{'s' if stage1_count != 1 else ''} ({preview}{suffix})"
+    asset_text = f" for assets {asset_preview}{asset_suffix}" if asset_preview else ""
+    return (
+        f"Cannot delete {signal_engine_id}{asset_text}: signal engine is linked to "
+        f"{stage0_count} Stage 0 candidate{'s' if stage0_count != 1 else ''}{pool_text}{session_text}. "
+        "Delete or reset the linked training pool/session first."
+    )
+
+
+def _packet_paths_from_signals(signal_rows: list[dict[str, Any]]) -> list[Path]:
+    paths: list[Path] = []
+    for row in signal_rows:
+        payload = row.get("payload")
+        for value in _find_packet_path_values(payload):
+            paths.append(Path(value))
+    return paths
+
+
+def _find_packet_path_values(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        found: list[str] = []
+        for key, nested in value.items():
+            if key in {"packet_path", "packet_file", "packet_uri"} and isinstance(nested, str):
+                found.append(nested)
+            else:
+                found.extend(_find_packet_path_values(nested))
+        return found
+    if isinstance(value, list):
+        found = []
+        for item in value:
+            found.extend(_find_packet_path_values(item))
+        return found
+    return []
+
+
+def _resolve_under(path: Path, root: Path) -> Path | None:
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    return resolved
+
+
+def _count_files(root: Path) -> int:
+    if root.is_file():
+        return 1
+    return sum(1 for path in root.rglob("*") if path.is_file())
+
+
+def _remove_empty_parents(path: Path, *, stop_at: Path) -> None:
+    current = path
+    while current != stop_at and stop_at in current.parents:
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        current = current.parent
 
 
 def _required_data_refs(*, repository: Any, engine: dict[str, Any], asset: str) -> tuple[list[dict[str, Any]], list[str]]:
