@@ -8,6 +8,7 @@ from quant_terminal_worker.ingestion.feature_enrichment import FEATURE_FAMILIES,
 
 
 FEATURE_DATA_TYPE_TO_FAMILY = {family.data_type: key for key, family in FEATURE_FAMILIES.items()}
+RAW_FILLABLE_DATA_TYPES = {"candles", "open_interest"}
 
 
 def warm_route_data(
@@ -53,17 +54,28 @@ def warm_route_data(
 
     for requirement in required_data:
         data_type = requirement.get("data_type")
-        if data_type != "candles" and data_type not in FEATURE_DATA_TYPE_TO_FAMILY:
+        if data_type not in RAW_FILLABLE_DATA_TYPES and data_type not in FEATURE_DATA_TYPE_TO_FAMILY:
             requirement_results.append(_requirement_result(requirement, "blocked", "unsupported_data_type"))
             blocked = True
             continue
-        if data_type != "candles" or requirement.get("origin") != "raw":
+        if data_type not in RAW_FILLABLE_DATA_TYPES or requirement.get("origin") != "raw":
             continue
 
         timeframe = requirement.get("timeframe") or "5m"
-        raw_ref = market_data_repository.get_raw_candle_ref(route["asset"], timeframe)
+        raw_ref = (
+            market_data_repository.get_raw_candle_ref(route["asset"], timeframe)
+            if data_type == "candles"
+            else _get_ref(
+                market_data_repository,
+                asset=route["asset"],
+                timeframe=timeframe,
+                origin="raw",
+                data_type=str(data_type),
+            )
+        )
         if raw_ref is None:
-            requirement_results.append(_requirement_result(requirement, "blocked", "missing_raw_candle_ref"))
+            reason = "missing_raw_candle_ref" if data_type == "candles" else f"missing_raw_{data_type}_ref"
+            requirement_results.append(_requirement_result(requirement, "blocked", reason))
             blocked = True
             continue
 
@@ -74,8 +86,8 @@ def warm_route_data(
             adapter=adapter,
             as_of=checked_at,
         )
-        raw_refs_by_key[("candles", timeframe)] = raw_ref
-        raw_results_by_key[("candles", timeframe)] = fill_result
+        raw_refs_by_key[(str(data_type), timeframe)] = raw_ref
+        raw_results_by_key[(str(data_type), timeframe)] = fill_result
         requirement_results.append(
             {
                 **_requirement_result(requirement, fill_result.get("status", "unknown")),
@@ -85,18 +97,29 @@ def warm_route_data(
         )
 
     for requirement in required_data:
-        if requirement.get("data_type") != "candles" or requirement.get("origin") != "derived":
+        if requirement.get("data_type") not in RAW_FILLABLE_DATA_TYPES or requirement.get("origin") != "derived":
             continue
 
         source = requirement.get("source") or {}
         source_timeframe = source.get("timeframe") or "5m"
-        source_key = (source.get("data_type") or "candles", source_timeframe)
+        source_data_type = source.get("data_type") or requirement.get("data_type")
+        source_key = (source_data_type, source_timeframe)
         if source_key not in raw_results_by_key:
             requirement_results.append(_requirement_result(requirement, "blocked", "missing_source_raw_requirement"))
             blocked = True
             continue
 
-        source_ref = market_data_repository.get_raw_candle_ref(route["asset"], source_timeframe)
+        source_ref = (
+            market_data_repository.get_raw_candle_ref(route["asset"], source_timeframe)
+            if source_data_type == "candles"
+            else _get_ref(
+                market_data_repository,
+                asset=route["asset"],
+                timeframe=source_timeframe,
+                origin="raw",
+                data_type=str(source_data_type),
+            )
+        )
         derived_refs = market_data_repository.list_derived_refs_for_raw(source_ref) if source_ref is not None else []
         matching_ref = next(
             (
@@ -109,7 +132,8 @@ def warm_route_data(
             None,
         )
         if matching_ref is None:
-            requirement_results.append(_requirement_result(requirement, "blocked", "missing_derived_candle_ref"))
+            reason = "missing_derived_candle_ref" if requirement.get("data_type") == "candles" else f"missing_derived_{requirement.get('data_type')}_ref"
+            requirement_results.append(_requirement_result(requirement, "blocked", reason))
             blocked = True
             continue
         requirement_results.append(

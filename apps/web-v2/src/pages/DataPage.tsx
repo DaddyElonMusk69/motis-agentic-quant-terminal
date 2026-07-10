@@ -34,6 +34,7 @@ type DatasetTypeOption = {
 
 type RefreshRequest =
   | { kind: "candles"; datasetId: string }
+  | { kind: "dataset"; datasetId: string }
   | { kind: "ema"; asset: string }
   | { kind: "feature"; asset: string; family: string };
 
@@ -45,6 +46,12 @@ const FEATURE_CATEGORIES = [
   { dataType: "feature_bollinger", family: "bollinger", label: "Bollinger Context" },
   { dataType: "feature_regime_momentum", family: "regime_momentum", label: "Regime / Momentum" }
 ] as const;
+
+const DATA_TYPE_PRIORITY = new Map<string, number>([
+  ["candles", 0],
+  ["open_interest", 1],
+  ["ema", 2]
+]);
 
 function featureCategoryForDataType(dataType: string) {
   return FEATURE_CATEGORIES.find((category) => category.dataType === dataType);
@@ -75,9 +82,7 @@ function getDataTypeOptions(catalog: CatalogResponse | undefined, selectedAsset:
   for (const dataset of datasets) {
     counts.set(dataset.data_type, (counts.get(dataset.data_type) ?? 0) + 1);
   }
-  const options = Array.from(counts.entries())
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([dataType, count]) => ({
+  const options = Array.from(counts.entries()).map(([dataType, count]) => ({
       dataType,
       label: dataType === "candles" ? "Candle data" : featureCategoryForDataType(dataType)?.label ?? titleize(dataType),
       count
@@ -86,7 +91,14 @@ function getDataTypeOptions(catalog: CatalogResponse | undefined, selectedAsset:
   if (derivedCandles.length) {
     options.push({ dataType: "ema", label: "EMA", count: derivedCandles.length });
   }
-  return options;
+  return options.sort((left, right) => {
+    const leftPriority = DATA_TYPE_PRIORITY.get(left.dataType) ?? 100;
+    const rightPriority = DATA_TYPE_PRIORITY.get(right.dataType) ?? 100;
+    if (leftPriority !== rightPriority) {
+      return leftPriority - rightPriority;
+    }
+    return left.label.localeCompare(right.label);
+  });
 }
 
 function getSelectedDataType(catalog: CatalogResponse | undefined, selectedAsset: string, searchParams: URLSearchParams): string {
@@ -142,15 +154,15 @@ function getRefreshTargetForType(datasets: Dataset[], dataType: string, selected
   if (featureCategory) {
     return { kind: "feature", asset: selectedAsset, family: featureCategory.family };
   }
-  if (dataType !== "candles") {
+  if (dataType !== "candles" && dataType !== "open_interest") {
     return undefined;
   }
   const dataset = datasets.find((item) => item.data_origin === "raw" && item.timeframe === "5m") ?? datasets.find((item) => item.data_origin === "raw");
-  return dataset ? { kind: "candles", datasetId: dataset.dataset_id } : undefined;
+  return dataset ? { kind: dataType === "candles" ? "candles" : "dataset", datasetId: dataset.dataset_id } : undefined;
 }
 
 function datasetStatusTone(dataset: Dataset): "pass" | "warn" | "info" | "idle" {
-  if (dataset.quality_status === "updated" || dataset.quality_status === "ingested" || dataset.quality_status === "rebuilt" || dataset.quality_status === "ema_enriched") {
+  if (dataset.quality_status === "updated" || dataset.quality_status === "ingested" || dataset.quality_status === "rebuilt" || dataset.quality_status === "ema_enriched" || dataset.quality_status === "derived") {
     return "pass";
   }
   if (dataset.quality_status === "blocked" || dataset.quality_status === "failed") {
@@ -535,6 +547,34 @@ function previewColumns(selectedDataType: string, rows: Array<Record<string, unk
     return [
       { key: "timestamp", header: "Timestamp", render: (row: Record<string, unknown>) => <span className="mono">{formatTimestamp(String(row.timestamp ?? row.ts ?? ""))}</span> },
       ...featureKeys.map((key) => ({
+        key,
+        header: titleize(key),
+        align: "right" as const,
+        render: (row: Record<string, unknown>) => formatCompactValue(row[key])
+      }))
+    ];
+  }
+  if (selectedDataType === "open_interest") {
+    const sample = rows[0] ?? {};
+    const preferredKeys = [
+      "sum_open_interest",
+      "sum_open_interest_value",
+      "sum_open_interest_last",
+      "sum_open_interest_change",
+      "sum_open_interest_value_last",
+      "sum_open_interest_value_change",
+      "sum_taker_long_short_vol_ratio",
+      "sum_taker_long_short_vol_ratio_avg",
+      "count_long_short_ratio",
+      "count_long_short_ratio_avg"
+    ].filter((key) => key in sample);
+    const extraKeys = Object.keys(sample)
+      .filter((key) => key !== "timestamp" && key !== "ts" && key !== "symbol" && !preferredKeys.includes(key))
+      .slice(0, Math.max(0, 8 - preferredKeys.length));
+    return [
+      { key: "timestamp", header: "Timestamp", render: (row: Record<string, unknown>) => <span className="mono">{formatTimestamp(String(row.timestamp ?? row.ts ?? ""))}</span> },
+      { key: "symbol", header: "Symbol", render: (row: Record<string, unknown>) => <span className="mono">{String(row.symbol ?? "")}</span> },
+      ...[...preferredKeys, ...extraKeys].slice(0, 8).map((key) => ({
         key,
         header: titleize(key),
         align: "right" as const,

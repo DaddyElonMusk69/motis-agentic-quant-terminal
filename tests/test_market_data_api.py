@@ -35,6 +35,30 @@ class FakeMarketDataRepository:
             return self.list_refs()[0]
         if dataset_id == "btc-derived-5m":
             return {**self.list_refs()[0], "dataset_id": "btc-derived-5m", "data_origin": "derived"}
+        if dataset_id == "sol-binance-open_interest-raw-5m":
+            return {
+                "dataset_id": "sol-binance-open_interest-raw-5m",
+                "asset": "SOL",
+                "instrument": "SOLUSDT",
+                "data_type": "open_interest",
+                "timeframe": "5m",
+                "data_origin": "raw",
+                "start_ts": datetime(2026, 5, 1, tzinfo=UTC),
+                "end_ts": datetime(2026, 5, 31, tzinfo=UTC),
+                "row_count": 100,
+                "storage_backend": "parquet",
+                "storage_uri": ".data/market-data",
+                "schema_descriptor": {"columns": ["timestamp", "symbol", "sum_open_interest"]},
+                "quality_status": "ingested",
+                "ingestion_version": "binance-metrics-v1",
+            }
+        if dataset_id == "sol-binance-open_interest-derived-15m":
+            return {
+                **self.get_ref("sol-binance-open_interest-raw-5m"),
+                "dataset_id": "sol-binance-open_interest-derived-15m",
+                "timeframe": "15m",
+                "data_origin": "derived",
+            }
         return None
 
     def update_ref(self, registration):
@@ -161,4 +185,55 @@ def test_market_data_refresh_endpoint_blocks_derived_dataset_before_fill_service
         "dataset_id": "btc-derived-5m",
         "status": "blocked",
         "reason": "refresh_supported_for_raw_candles_only",
+    }
+
+
+def test_market_data_refresh_endpoint_fills_raw_open_interest_dataset():
+    repository = FakeMarketDataRepository()
+
+    def fake_oi_fill_service(*, registration, repository, adapter):
+        assert registration["dataset_id"] == "sol-binance-open_interest-raw-5m"
+        assert registration["data_type"] == "open_interest"
+        repository.update_ref({**registration, "row_count": 101, "quality_status": "updated"})
+        return {
+            "dataset_id": registration["dataset_id"],
+            "status": "filled",
+            "rows_added": 1,
+            "row_count": 101,
+            "end_ts": "2026-06-01T00:05:00Z",
+            "source": "binance_cli",
+        }
+
+    client = TestClient(
+        create_app(
+            market_data_repository=repository,
+            market_data_fill_service=fake_oi_fill_service,
+        )
+    )
+
+    response = client.post("/api/v1/market-data/sol-binance-open_interest-raw-5m/refresh")
+
+    assert response.status_code == 200
+    assert response.json()["dataset_id"] == "sol-binance-open_interest-raw-5m"
+    assert response.json()["status"] == "filled"
+    assert repository.updated_registration["row_count"] == 101
+
+def test_market_data_refresh_endpoint_blocks_derived_open_interest_dataset_before_fill_service():
+    def failing_fill_service(*, registration, repository, adapter):
+        raise AssertionError("fill service should not be called for derived open interest datasets")
+
+    client = TestClient(
+        create_app(
+            market_data_repository=FakeMarketDataRepository(),
+            market_data_fill_service=failing_fill_service,
+        )
+    )
+
+    response = client.post("/api/v1/market-data/sol-binance-open_interest-derived-15m/refresh")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "dataset_id": "sol-binance-open_interest-derived-15m",
+        "status": "blocked",
+        "reason": "refresh_supported_for_raw_market_data_only",
     }

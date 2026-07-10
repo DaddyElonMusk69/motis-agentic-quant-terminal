@@ -63,6 +63,20 @@ def test_required_data_rejects_unsupported_type():
         )
 
 
+def test_required_data_accepts_open_interest():
+    spec = SignalEngineSpec.from_mapping(
+        {
+            "signal_engine_id": "oi_context",
+            "version": "0.1",
+            "required_data": [{"data_type": "open_interest", "origin": "raw", "timeframe": "5m"}],
+            "output_envelope_version": "signal_packet.v2",
+            "runtime_entrypoint": "engines/oi_context/generate.py",
+            "live_scanner_entrypoint": "engines/oi_context/live_scan.py",
+        }
+    )
+
+    assert spec.required_data == [{"data_type": "open_interest", "origin": "raw", "timeframe": "5m"}]
+
 def test_signal_packet_rejects_directional_or_execution_fields():
     packet = {
         "schema_version": "signal_packet.v2",

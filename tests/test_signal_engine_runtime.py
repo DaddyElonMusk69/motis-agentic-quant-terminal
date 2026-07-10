@@ -837,6 +837,26 @@ def test_5m_cluster_v5_registry_entry_is_contract_compliant():
     validate_strategy_module(resolved.spec.code_ref["base_strategy_path"])
 
 
+def test_5m_cluster_v5_oi_registry_entry_is_contract_compliant():
+    validate_signal_engine_spec("vegas_5m_cluster_v5_oi")
+    resolved = resolve_signal_engine("vegas_5m_cluster_v5_oi", repository=_repository(), workspace_root=Path.cwd())
+    assert resolved.spec.code_ref["base_strategy_path"] == "packages/strategy_modules/src/quant_terminal_strategies/vegas_ema_5m_hft_v5_oi_base.py"
+    assert resolved.spec.configuration_schema["default_parameters"]["context_mode"] == "candles_only_integrated_forming_with_oi_features"
+    required_candle_timeframes = {
+        item["timeframe"]
+        for item in resolved.spec.required_data
+        if item["data_type"] == "candles" and item["origin"] == "derived"
+    }
+    required_oi_timeframes = {
+        item["timeframe"]
+        for item in resolved.spec.required_data
+        if item["data_type"] == "open_interest" and item["origin"] == "raw"
+    }
+    assert {"5m", "2h", "8h", "1d"}.issubset(required_candle_timeframes)
+    assert required_oi_timeframes == {"5m"}
+    validate_strategy_module(resolved.spec.code_ref["base_strategy_path"])
+
+
 def test_5m_cluster_v2_context_uses_closed_htf_candles_only(tmp_path: Path):
     root, repository = _workspace_with_5m_cluster_v2_pool(tmp_path)
     asset = "AAVE"
@@ -1395,6 +1415,187 @@ def test_5m_cluster_v5_emits_candles_only_without_legacy_completed_candles(tmp_p
     )
     assert decision["reason_code"] != "missing_required_5m_2h_8h_or_1d_context"
     assert decision["diagnostics"]["eight_hour_forming_source_candle_count"] == 3
+
+
+def test_5m_cluster_v5_oi_emits_open_interest_context(tmp_path: Path):
+    root, repository = _workspace_with_5m_cluster_v5_oi_pool(tmp_path)
+    asset = "AAVE"
+    oi_start = datetime(2026, 6, 23, 2, 5, tzinfo=UTC)
+    oi_count = 2305
+    raw_rows = [
+        _ohlcv_row(
+            (oi_start + timedelta(minutes=5 * index)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            open_=100 + index * 0.01,
+            high=101 + index * 0.01,
+            low=99 + index * 0.01,
+            close=100 + index * 0.01,
+        )
+        for index in range(oi_count)
+    ]
+    _register_candle_ref(repository, root=root, asset=asset, timeframe="5m", origin="raw", rows=raw_rows)
+    _register_open_interest_ref(
+        repository,
+        root=root,
+        asset=asset,
+        rows=[
+            _open_interest_row(
+                (oi_start + timedelta(minutes=5 * index)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                oi=1000 + index * 10,
+                oi_value=100000 + index * 1200,
+                long_short_ratio=1.0 + index * 0.0001,
+            )
+            for index in range(oi_count)
+        ],
+    )
+    _register_candle_ref(
+        repository,
+        root=root,
+        asset=asset,
+        timeframe="5m",
+        origin="derived",
+        rows=[
+            _ema_cluster_row(
+                "2026-07-01T02:05:00Z",
+                close=100,
+                ema_values={36: 100, 43: 100.1, 144: 99.9, 169: 102, 576: 102, 676: 102},
+            )
+        ],
+    )
+    for timeframe in ("2h", "8h"):
+        _register_candle_ref(
+            repository,
+            root=root,
+            asset=asset,
+            timeframe=timeframe,
+            origin="derived",
+            rows=[
+                _ema_cluster_row(
+                    "2026-06-30T17:25:00Z",
+                    close=98,
+                    ema_values={36: 98, 43: 98, 144: 98, 169: 98, 576: 98, 676: 98},
+                ),
+                _ema_cluster_row(
+                    "2026-07-01T01:25:00Z",
+                    close=106,
+                    ema_values={36: 106, 43: 106, 144: 106, 169: 106, 576: 106, 676: 106},
+                ),
+            ],
+        )
+    _register_candle_ref(
+        repository,
+        root=root,
+        asset=asset,
+        timeframe="1d",
+        origin="derived",
+        rows=[
+            _ema_cluster_row(
+                "2026-06-29T01:25:00Z",
+                close=98,
+                ema_values={36: 98, 43: 98, 144: 98, 169: 98, 576: 98, 676: 98},
+            ),
+            _ema_cluster_row(
+                "2026-06-30T01:25:00Z",
+                close=106,
+                ema_values={36: 106, 43: 106, 144: 106, 169: 106, 576: 106, 676: 106},
+            ),
+        ],
+    )
+
+    result = extend_signal_pool_from_local_candles(
+        workspace_root=root,
+        repository=repository,
+        signal_engine_id="vegas_5m_cluster_v5_oi",
+        asset=asset,
+        target_end="2026-07-01T02:05:00Z",
+    )
+
+    assert result["status"] == "extended"
+    signals = repository.list_signals(signal_set_key=build_signal_set_key("vegas_5m_cluster_v5_oi", asset, f"{asset}-vegas_5m_cluster_v5_oi-canonical"))
+    packet = signals[0]["payload"]
+    validate_signal_packet(packet)
+    assert packet["evidence"]["engine"] == "vegas_5m_cluster_v5_oi"
+    assert packet["evidence"]["parent_engine"] == "vegas_5m_cluster_v5"
+    assert packet["evidence"]["context_mode"] == "candles_only_integrated_forming_with_oi_features"
+    assert packet["evidence"]["reference_price"] == "100"
+    assert packet["evidence"]["trigger_candle_close"] == "100"
+    assert packet["evidence"]["signal_available_at"] == "2026-07-01T02:10:00Z"
+    assert set(packet["charts"]) == {"5m", "2h", "8h", "1d", "open_interest_5m", "open_interest_2h", "open_interest_8h", "open_interest_1d"}
+    oi_chart = packet["charts"]["open_interest_5m"]
+    assert oi_chart["role"] == "positioning_context"
+    assert oi_chart["columns"] == ["ts", "oi", "oi_value", "top_count_ls", "top_sum_ls", "ls", "taker_ls", "confirm"]
+    assert len(oi_chart["rows"]) == 4
+    assert oi_chart["rows"][-1] == ["2026-07-01T02:05:00Z", "24040", "2864800", "1.05", "1.02", "1.2304", "1.03", 1]
+    assert packet["evidence"]["oi_latest_timestamp"] == "2026-07-01T02:05:00Z"
+    assert packet["evidence"]["oi_change_1h_pct"] is not None
+    oi_features = packet["evidence"]["oi_features"]
+    for key in (
+        "oi_return_4h_pct",
+        "oi_return_8h_pct",
+        "oi_return_24h_pct",
+        "oi_return_3d_pct",
+        "oi_return_8h_zscore_2d",
+        "oi_return_8h_percentile_7d",
+        "oi_value_trend_slope_24h",
+        "price_oi_divergence_8h",
+        "volume_adjusted_oi_change_8h",
+        "long_short_ratio_trend_slope_24h",
+    ):
+        assert key in oi_features
+        assert oi_features[key] is not None
+    for timeframe in ("2h", "8h", "1d"):
+        aggregate_chart = packet["charts"][f"open_interest_{timeframe}"]
+        assert aggregate_chart["role"] == "positioning_context"
+        assert aggregate_chart["timeframe"] == timeframe
+        assert aggregate_chart["columns"] == [
+            "open_ts",
+            "close_ts",
+            "complete",
+            "source_row_count",
+            "oi_open",
+            "oi_high",
+            "oi_low",
+            "oi_close",
+            "oi_return_pct",
+            "oi_value_close",
+            "oi_value_return_pct",
+            "ls_avg",
+            "ls_last",
+            "top_count_ls_avg",
+            "taker_ls_avg",
+        ]
+        assert 0 < len(aggregate_chart["rows"]) <= 4
+        close_index = aggregate_chart["columns"].index("close_ts")
+        complete_index = aggregate_chart["columns"].index("complete")
+        assert all(row[complete_index] is True for row in aggregate_chart["rows"])
+        assert all(row[close_index] <= packet["evidence"]["signal_available_at"] for row in aggregate_chart["rows"])
+    assert len(json.dumps(packet)) < 120_000
+    assert "direction" not in packet
+    assert "direction" not in packet["evidence"]
+
+    from quant_terminal_strategies import vegas_ema_5m_hft_v5_oi_base as strategy
+
+    decision = strategy.decide(
+        {
+            "signal": {
+                "signal_id": "vegas_5m_cluster_v5_oi:AAVE:test:20260701T020500Z",
+                "payload": packet,
+            },
+            "runtime_mode": "stage1",
+            "parameters": {},
+        }
+    )
+    assert decision["reason_code"] != "missing_required_5m_2h_8h_or_1d_context"
+    assert decision["diagnostics"]["engine"] == "vegas_5m_cluster_v5_oi"
+    assert decision["diagnostics"]["pattern"] == "vegas_ema_5m_cluster_proximity"
+    assert decision["diagnostics"]["signal_available_at"] == packet["evidence"]["signal_available_at"]
+    assert decision["diagnostics"]["reference_price"] == packet["evidence"]["reference_price"]
+    assert decision["diagnostics"]["trigger_candle_close"] == packet["evidence"]["trigger_candle_close"]
+    assert decision["diagnostics"]["ema_context_available"] is True
+    assert decision["diagnostics"]["has_open_interest_2h"] is True
+    assert decision["diagnostics"]["has_open_interest_8h"] is True
+    assert decision["diagnostics"]["has_open_interest_1d"] is True
+    assert "oi_latest_timestamp" in decision["diagnostics"]
+    assert "oi_features" in decision["diagnostics"]
 
 
 def test_5m_cluster_v5_strategy_rejects_legacy_completed_candles_shape():
@@ -2133,6 +2334,42 @@ def _workspace_with_5m_cluster_v5_pool(tmp_path: Path) -> tuple[Path, RuntimeRep
     return root, repository
 
 
+def _workspace_with_5m_cluster_v5_oi_pool(tmp_path: Path) -> tuple[Path, RuntimeRepository]:
+    root = tmp_path / "workspace-vegas-5m-cluster-v5-oi"
+    root.mkdir()
+    repository = _repository()
+    _register_5m_cluster_v5_oi_engine(repository)
+    asset = "AAVE"
+    repository.upsert_signal_set(
+        {
+            "signal_set_key": build_signal_set_key("vegas_5m_cluster_v5_oi", asset, f"{asset}-vegas_5m_cluster_v5_oi-canonical"),
+            "signal_set_id": f"{asset}-vegas_5m_cluster_v5_oi-canonical",
+            "signal_engine_id": "vegas_5m_cluster_v5_oi",
+            "signal_engine_version": "0.1",
+            "asset": asset,
+            "instrument": f"{asset}-USDT-SWAP",
+            "start_ts": None,
+            "end_ts": None,
+            "packet_count": 0,
+            "payload_schema": "signal_packet.v2",
+            "source_path": "canonicalized:signals",
+            "manifest": {
+                "parameters": {
+                    "context_bars": 2,
+                    "oi_context_bars": 4,
+                    "oi_aggregate_context_bars": 4,
+                    "vote_threshold": 3,
+                    "proximity_threshold": "0.002",
+                    "dedupe_window_minutes": 120,
+                    "context_mode": "candles_only_integrated_forming_with_oi_features",
+                    "context_timeframes": ["2h", "8h", "1d"],
+                }
+            },
+        }
+    )
+    return root, repository
+
+
 def _workspace_with_liquidity_sweep_pool(tmp_path: Path) -> tuple[Path, RuntimeRepository]:
     root = tmp_path / "workspace-liquidity-sweep"
     root.mkdir(parents=True, exist_ok=True)
@@ -2553,6 +2790,71 @@ def _register_5m_cluster_v5_engine(repository: RuntimeRepository) -> None:
     )
 
 
+def _register_5m_cluster_v5_oi_engine(repository: RuntimeRepository) -> None:
+    repository.register_signal_engine(
+        {
+            "signal_engine_id": "vegas_5m_cluster_v5_oi",
+            "name": "Vegas 5m Cluster v5 + OI",
+            "description": "Vegas 5m Cluster v5 replica with confirmed 5m open-interest packet context and OI feature summaries.",
+            "version": "0.1",
+            "code_ref": {
+                "path": "apps/worker/src/quant_terminal_worker/signal_engines/vegas_5m_cluster_v5_oi.py",
+                "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/vegas_ema_5m_hft_v5_oi_base.py",
+            },
+            "supported_input_data_types": ["candles", "open_interest"],
+            "required_data": [
+                {"data_type": "candles", "origin": "raw", "timeframe": "5m"},
+                {"data_type": "open_interest", "origin": "raw", "timeframe": "5m"},
+                {
+                    "data_type": "candles",
+                    "origin": "derived",
+                    "timeframe": "5m",
+                    "source": {"data_type": "candles", "origin": "raw", "timeframe": "5m"},
+                    "required_columns": ["ema_36", "ema_43", "ema_144", "ema_169", "ema_576", "ema_676"],
+                },
+                {
+                    "data_type": "candles",
+                    "origin": "derived",
+                    "timeframe": "2h",
+                    "source": {"data_type": "candles", "origin": "raw", "timeframe": "5m"},
+                    "required_columns": ["ema_36", "ema_43", "ema_144", "ema_169", "ema_576", "ema_676"],
+                },
+                {
+                    "data_type": "candles",
+                    "origin": "derived",
+                    "timeframe": "8h",
+                    "source": {"data_type": "candles", "origin": "raw", "timeframe": "5m"},
+                    "required_columns": ["ema_36", "ema_43", "ema_144", "ema_169", "ema_576", "ema_676"],
+                },
+                {
+                    "data_type": "candles",
+                    "origin": "derived",
+                    "timeframe": "1d",
+                    "source": {"data_type": "candles", "origin": "raw", "timeframe": "5m"},
+                    "required_columns": ["ema_36", "ema_43", "ema_144", "ema_169", "ema_576", "ema_676"],
+                },
+            ],
+            "output_envelope_version": "signal_packet.v2",
+            "runtime_entrypoint": "quant_terminal_worker.signal_engines.vegas_5m_cluster_v5_oi:generate_training_signals",
+            "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.vegas_5m_cluster_v5_oi:scan_live_signal",
+            "configuration_schema": {
+                "default_parameters": {
+                    "context_bars": 80,
+                    "oi_context_bars": 80,
+                    "oi_aggregate_context_bars": 24,
+                    "proximity_threshold": "0.002",
+                    "vote_threshold": 3,
+                    "dedupe_window_minutes": 120,
+                    "ema_mode": "precomputed_5m_ema_cluster",
+                    "context_mode": "candles_only_integrated_forming_with_oi_features",
+                    "context_timeframes": ["2h", "8h", "1d"],
+                    "ema_columns": ["ema_36", "ema_43", "ema_144", "ema_169", "ema_576", "ema_676"],
+                }
+            },
+        }
+    )
+
+
 def _workspace_with_vegas_pool(
     tmp_path: Path,
     *,
@@ -2728,6 +3030,39 @@ def _register_candle_ref(
         )
 
 
+def _register_open_interest_ref(
+    repository: RuntimeRepository,
+    *,
+    root: Path,
+    asset: str,
+    rows: list[dict[str, object]],
+) -> None:
+    storage_uri = root / ".data" / "market-data" / "origin=raw" / "source=binance" / "type=open_interest" / f"asset={asset}" / "timeframe=5m"
+    path = storage_uri / "year=2026" / "month=06" / "data.parquet"
+    path.parent.mkdir(parents=True)
+    pq.write_table(pa.Table.from_pylist(rows), path)
+    with repository.engine.begin() as connection:
+        connection.execute(
+            insert(market_data_refs).values(
+                dataset_id=f"{asset}-binance-open-interest-raw-5m",
+                source_id="binance",
+                asset=asset,
+                instrument=f"{asset}USDT",
+                data_type="open_interest",
+                timeframe="5m",
+                data_origin="raw",
+                start_ts=datetime.fromisoformat(str(rows[0]["timestamp"]).replace("Z", "+00:00")),
+                end_ts=datetime.fromisoformat(str(rows[-1]["timestamp"]).replace("Z", "+00:00")),
+                row_count=len(rows),
+                storage_backend="parquet",
+                storage_uri=str(storage_uri),
+                schema_descriptor={},
+                quality_status="ingested",
+                ingestion_version="test",
+            )
+        )
+
+
 def _candle_row(timestamp: str, *, open_: float, close: float) -> dict[str, object]:
     return {
         "timestamp": timestamp,
@@ -2752,6 +3087,20 @@ def _ohlcv_row(timestamp: str, *, open_: float, high: float, low: float, close: 
         "volume": 1.0,
         "vol_ccy": 1.0,
         "vol_ccy_quote": 1.0,
+        "confirm": 1,
+    }
+
+
+def _open_interest_row(timestamp: str, *, oi: float, oi_value: float, long_short_ratio: float = 1.01) -> dict[str, object]:
+    return {
+        "timestamp": timestamp,
+        "symbol": "AAVEUSDT",
+        "sum_open_interest": oi,
+        "sum_open_interest_value": oi_value,
+        "count_toptrader_long_short_ratio": 1.05,
+        "sum_toptrader_long_short_ratio": 1.02,
+        "count_long_short_ratio": long_short_ratio,
+        "sum_taker_long_short_vol_ratio": 1.03,
         "confirm": 1,
     }
 

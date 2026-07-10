@@ -271,7 +271,6 @@ type Stage1FailureAudit = {
     failure_count: number;
     mismatch_count: number;
     neutral_count: number;
-    protected_count: number;
   };
 };
 

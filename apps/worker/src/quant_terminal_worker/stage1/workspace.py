@@ -1290,13 +1290,14 @@ Read:
 - {snapshot_dir}
 
 Task:
+Use the `stage1a-training-optimizer` skill as the operating procedure.
 Edit only {strategy_path} so deterministic `decide(...)` improves Stage 1A directional agreement on the training sample.
 
 Training sample:
 - sample method: {sample['sample_method']}
 - signal count: {builder_sample['signal_count']}
 - Use training-window natural_direction labels in builder_training_sample.json.
-- Inspect embedded training packet JSON in builder_training_sample.json and signal_sample.json.
+- Use embedded training packet JSON in builder_training_sample.json and signal_sample.json.
 - Treat {snapshot_dir} as read-only evidence of what this iteration started from.
 
 Rules:
@@ -1305,7 +1306,6 @@ Rules:
 - Do not use validation, walk-forward, locked OOS, live state, or future candles.
 - Do not modify signal packets, Stage 0 evidence, sample files, evaluator handoff files, or the read-only snapshot.
 - Do not claim promotion readiness from this training bundle.
-- New Stage 1 bundles automatically snapshot the current session strategy file into their own source_artifacts/strategy_module_snapshot folder.
 - After editing, the user should rerun Score on this iteration.
 
 After editing, summarize the changed deterministic rules and the training failure patterns they target in {iteration_root / "summaries" / "iteration_summary.md"}.

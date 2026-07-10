@@ -326,16 +326,21 @@ def test_generate_stage1a_failure_audit_writes_failure_ledger_and_prompt(tmp_pat
     assert result["metrics"]["failure_count"] == 2
     assert audit["schema_version"] == "0.1"
     assert audit["failure_cases"][0]["signal_id"] == "sig-miss"
-    assert audit["protected_cases"][0]["signal_id"] == "sig-win"
-    assert len(audit["protected_cases"]) == 1
-    assert "smallest possible Stage 1A direction-only update" in prompt
+    assert "protected_cases" not in audit
+    assert "protected_count" not in audit["metrics"]
+    assert "Use the `stage1a-training-optimizer` skill" in prompt
     assert "Do not add Stage 1B entry gates" in prompt
+    assert "baseline seed logic" not in prompt
+    assert "OI/volume quality" not in prompt
+    assert "Protected" not in prompt
+    assert "protected" not in prompt
+    assert "Protected" not in markdown
+    assert "protected" not in markdown
     assert str(iteration_root / "audits" / "failure_audit.json") in prompt
     assert str(iteration_root.parents[1] / "strategy_module" / "strategy.py") in prompt
-    assert "New Stage 1 bundles automatically snapshot the current session strategy file" in prompt
     assert "sig-miss" in prompt
     assert "sig-flat" in prompt
-    assert "sig-win" in prompt
+    assert "sig-win" not in prompt
     assert "sig-flat" in markdown
 
 

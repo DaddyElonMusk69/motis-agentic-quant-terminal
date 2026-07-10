@@ -7,11 +7,14 @@ from typing import Any
 
 from quant_terminal_sdk.market_data_reader import MarketDataReader
 from quant_terminal_worker.adapters.okx import OKXAdapter
+from quant_terminal_worker.adapters.binance import BinanceCLIAdapter
 from quant_terminal_worker.ingestion.ema_enrichment import enrich_derived_ema_datasets
 from quant_terminal_worker.ingestion.feature_enrichment import enrich_feature_family_datasets
 from quant_terminal_worker.ingestion.raw_candle_fill import fill_raw_candle_dataset
+from quant_terminal_worker.ingestion.binance_open_interest import fill_raw_open_interest_dataset
 from quant_terminal_worker.ingestion.signal_pool_extension import extend_signal_pool_from_local_candles
-from quant_terminal_worker.stage0.execution import execute_stage0_candidate
+from quant_terminal_worker.stage0.execution import execute_stage0_candidate, execute_stage0_information_gate
+from quant_terminal_worker.stage0.information import apply_information_q_values_to_candidates
 from quant_terminal_worker.stage0.workspace import read_parquet_candles_for_stage0
 from quant_terminal_worker.stage1.scoring import run_stage1a_canonical_full_cycle
 from quant_terminal_worker.stage1.scoring import run_stage1a_score
@@ -39,6 +42,7 @@ def execute_job(
         "market_data_feature_refresh": _execute_market_data_feature_refresh,
         "signal_pool_extend": _execute_signal_pool_extend,
         "stage0_candidate": _execute_stage0_candidate_job,
+        "stage0_information_candidate": _execute_stage0_information_candidate_job,
         "stage0_candidate_batch": _execute_stage0_candidate_batch,
         "stage1_canonical": _execute_stage1_canonical,
         "stage1_score": _execute_stage1_score,
@@ -125,6 +129,17 @@ def _execute_market_data_refresh(
     registration = market_data_repository.get_ref(dataset_id)
     if registration is None:
         raise ValueError(f"dataset not found: {dataset_id}")
+    if registration.get("data_type") == "open_interest":
+        return fill_raw_open_interest_dataset(
+            registration=registration,
+            repository=market_data_repository,
+            adapter=BinanceCLIAdapter(
+                {
+                    "cli_path": payload.get("binance_cli_path"),
+                    "profile": payload.get("binance_profile"),
+                }
+            ),
+        )
     return fill_raw_candle_dataset(
         registration=registration,
         repository=market_data_repository,
@@ -223,6 +238,37 @@ def _execute_stage0_candidate_job(
         candidate=candidate,
     )
     repository.update_stage0_universe_candidate(result["candidate"])
+    _refresh_stage0_information_q_values(repository, universe_run["universe_run_id"])
+    repository.refresh_stage0_universe_summary(universe_run["universe_run_id"])
+    return result
+
+
+def _execute_stage0_information_candidate_job(
+    *,
+    repository: Any,
+    job: dict[str, Any],
+    workspace_root: Path,
+    market_data_repository: Any | None = None,
+) -> dict[str, Any]:
+    if market_data_repository is None:
+        raise ValueError("market data repository is required for stage0_information_candidate jobs")
+    payload = job.get("payload") or {}
+    universe_run = repository.get_stage0_universe_run(str(payload["universe_run_id"]))
+    if universe_run is None:
+        raise ValueError(f"stage0 universe run not found: {payload['universe_run_id']}")
+    candidate = repository.get_stage0_universe_candidate(str(payload["candidate_id"]))
+    if candidate is None:
+        raise ValueError(f"stage0 universe candidate not found: {payload['candidate_id']}")
+    repository.heartbeat_job(job["job_id"], current_step=f"stage0_information_{candidate['asset']}")
+    result = _run_stage0_information_candidate(
+        repository=repository,
+        market_data_repository=market_data_repository,
+        workspace_root=workspace_root,
+        universe_run=universe_run,
+        candidate=candidate,
+    )
+    repository.update_stage0_universe_candidate(result["candidate"])
+    _refresh_stage0_information_q_values(repository, universe_run["universe_run_id"])
     repository.refresh_stage0_universe_summary(universe_run["universe_run_id"])
     return result
 
@@ -264,6 +310,7 @@ def _execute_stage0_candidate_batch(
                 candidate["candidate_id"],
                 {"detail": str(exc), "type": exc.__class__.__name__},
             )
+    _refresh_stage0_information_q_values(repository, universe_run_id)
     repository.refresh_stage0_universe_summary(universe_run_id)
     refreshed_run = repository.get_stage0_universe_run(universe_run_id) or universe_run
     refreshed_candidates = repository.list_stage0_universe_candidates(universe_run_id)
@@ -524,6 +571,55 @@ def _run_stage0_candidate(
         signals=signals,
         candle_rows=candle_rows,
     )
+
+
+def _run_stage0_information_candidate(
+    *,
+    repository: Any,
+    market_data_repository: Any,
+    workspace_root: Path,
+    universe_run: dict[str, Any],
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    signal_set = repository.get_signal_set(candidate["signal_set_key"])
+    if signal_set is None:
+        raise ValueError("signal set not found")
+    candle_ref = market_data_repository.get_raw_candle_ref(candidate["asset"], "5m")
+    if candle_ref is None:
+        raise ValueError("raw 5m candle data not found")
+    window_start = _iso_datetime(universe_run["window_start"])
+    window_end = _iso_datetime(universe_run["window_end"])
+    signals = repository.list_signals_for_signal_set_window(
+        signal_set_key=candidate["signal_set_key"],
+        window_start=window_start,
+        window_end=window_end,
+    )
+    candle_rows = read_parquet_candles_for_stage0(
+        storage_uri=Path(candle_ref["storage_uri"]),
+        window_start=window_start,
+        window_end=window_end,
+        forward_hours=universe_run["forward_hours"],
+    )
+    if not signals:
+        raise ValueError("candidate has no signal packets in window")
+    if not candle_rows:
+        raise ValueError("candidate has no candle rows for window")
+    return execute_stage0_information_gate(
+        workspace_root=workspace_root,
+        universe_run={**universe_run, "window_start": window_start, "window_end": window_end},
+        candidate=candidate,
+        signal_set=signal_set,
+        signals=signals,
+        candle_rows=candle_rows,
+    )
+
+
+def _refresh_stage0_information_q_values(repository: Any, universe_run_id: str) -> None:
+    candidates = repository.list_stage0_universe_candidates(universe_run_id)
+    adjusted = apply_information_q_values_to_candidates(candidates)
+    for before, after in zip(candidates, adjusted, strict=False):
+        if before != after:
+            repository.update_stage0_universe_candidate(after)
 
 
 def _stage1_full_cycle_signals(repository: Any, session: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:

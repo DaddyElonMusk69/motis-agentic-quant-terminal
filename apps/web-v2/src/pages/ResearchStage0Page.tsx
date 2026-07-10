@@ -15,6 +15,7 @@ import {
   fetchStage0UniverseCandidates,
   fetchStage0UniverseRuns,
   isJobResponse,
+  runStage0InformationGate,
   type DevelopmentQueueRow,
   type Stage0UniverseCandidate,
   type Stage0UniverseRun
@@ -22,6 +23,19 @@ import {
 import { formatNumber, formatTimestamp } from "../app/format";
 import { queryClient } from "../app/queryClient";
 import { useAppRouter } from "../app/router";
+import {
+  formatStage0Count,
+  formatStage0Months,
+  formatStage0PAndQ,
+  formatStage0PValue,
+  formatStage0Samples,
+  formatStage0SignedPct,
+  stage0InformationDecisionLabel,
+  stage0InformationFromCandidate,
+  stage0InformationFromRow,
+  stage0InformationStatusLabel,
+  stage0InformationTone
+} from "../app/stage0Information";
 import { DataTable } from "../components/DataTable";
 import { DetailSkeleton } from "../components/DetailSkeleton";
 import { FieldRow } from "../components/FieldRow";
@@ -100,6 +114,10 @@ function significanceThresholdLabel(candidate: Stage0UniverseCandidate | undefin
     return "n/a";
   }
   return `${value}%`;
+}
+
+function candidateInformation(candidate: Stage0UniverseCandidate | undefined, row: DevelopmentQueueRow | null | undefined) {
+  return stage0InformationFromCandidate(candidate) ?? stage0InformationFromRow(row);
 }
 
 function statusTone(status: string): "pass" | "warn" | "idle" | "risk" {
@@ -239,6 +257,19 @@ export function ResearchStage0Page() {
       void queryClient.invalidateQueries({ queryKey: ["stage0-universe-runs"] });
       void queryClient.invalidateQueries({ queryKey: ["development-queue", result.run.universe_run_id] });
       void queryClient.invalidateQueries({ queryKey: ["stage0-universe-candidates", result.run.universe_run_id] });
+    }
+  });
+
+  const runInformationMutation = useMutation({
+    mutationFn: runStage0InformationGate,
+    onSuccess: (result) => {
+      if (isJobResponse(result)) {
+        setActiveJobId(result.job.job_id);
+        return;
+      }
+      void queryClient.invalidateQueries({ queryKey: ["stage0-universe-runs"] });
+      void queryClient.invalidateQueries({ queryKey: ["development-queue", result.candidate.universe_run_id] });
+      void queryClient.invalidateQueries({ queryKey: ["stage0-universe-candidates", result.candidate.universe_run_id] });
     }
   });
 
@@ -484,9 +515,45 @@ export function ResearchStage0Page() {
                   columns={[
                     { key: "asset", header: "Asset", render: (row) => <strong>{row.asset}</strong> },
                     { key: "engine", header: "Engine", render: (row) => row.signal_engine_id },
-                    { key: "evaluated", header: "Evaluated", align: "right", render: (row) => formatNumber(evaluatedSignalCount(candidateById.get(row.candidate_id), row)) },
-                    { key: "trigger", header: "Trigger", align: "right", render: (row) => row.trigger_rate_pct === null ? "pending" : `${row.trigger_rate_pct}%` },
-                    { key: "branch", header: "Branch", render: (row) => row.branch_path },
+                    {
+                      key: "info",
+                      header: "Info",
+                      render: (row) => {
+                        const candidate = candidateById.get(row.candidate_id);
+                        const info = candidateInformation(candidate, row);
+                        return <StatusBadge tone={stage0InformationTone(info)}>{stage0InformationStatusLabel(info)}</StatusBadge>;
+                      }
+                    },
+                    {
+                      key: "train_lift",
+                      header: "Train Lift",
+                      align: "right",
+                      render: (row) => formatStage0SignedPct(candidateInformation(candidateById.get(row.candidate_id), row)?.train_median_lift_pct)
+                    },
+                    {
+                      key: "wf_lift",
+                      header: "WF Lift",
+                      align: "right",
+                      render: (row) => formatStage0SignedPct(candidateInformation(candidateById.get(row.candidate_id), row)?.walk_forward_median_lift_pct)
+                    },
+                    {
+                      key: "p_q",
+                      header: "p / q",
+                      align: "right",
+                      render: (row) => formatStage0PAndQ(candidateInformation(candidateById.get(row.candidate_id), row))
+                    },
+                    {
+                      key: "months",
+                      header: "Months",
+                      align: "right",
+                      render: (row) => formatStage0Months(candidateInformation(candidateById.get(row.candidate_id), row))
+                    },
+                    {
+                      key: "samples",
+                      header: "Samples",
+                      align: "right",
+                      render: (row) => formatStage0Samples(candidateInformation(candidateById.get(row.candidate_id), row))
+                    },
                     { key: "state", header: "Pool Gate", align: "right", render: (row) => <StatusBadge tone={statusTone(row.stage0_status)}>{row.stage0_status}</StatusBadge> }
                   ]}
                   getRowClassName={(row) => row.candidate_id === selectedRow?.candidate_id ? "is-selected" : undefined}
@@ -502,19 +569,67 @@ export function ResearchStage0Page() {
 
               <TerminalPanel eyebrow={selectedRow?.asset ?? "candidate"} title="Candidate Evidence">
                 {candidateEvidenceLoading ? (
-                  <DetailSkeleton fields={["Asset", "Signal engine", "Evaluated signals", "Trigger rate", "Source packets"]} label="Loading candidate evidence" />
-                ) : selectedRow ? (
-                  <div className="field-stack">
-                    <FieldRow label="Asset" value={selectedRow.asset} />
-                    <FieldRow label="Signal engine" value={selectedRow.signal_engine_id} />
-                    <FieldRow label="Evaluated signals" value={formatNumber(evaluatedSignalCount(selectedCandidate, selectedRow))} />
-                    <FieldRow label="Trigger rate" value={selectedRow.trigger_rate_pct === null ? "pending" : `${selectedRow.trigger_rate_pct}%`} />
-                    <FieldRow label="Significant travel threshold" value={significanceThresholdLabel(selectedCandidate)} />
-                    <FieldRow label="Source packets" value={formatNumber(selectedCandidate?.packet_count ?? selectedRow.packet_count)} />
-                    <FieldRow label="Development" value={selectedRow.development_status.replaceAll("_", " ")} />
-                    <FieldRow label="Next action" value={selectedRow.next_action.label} />
-                  </div>
-                ) : (
+                  <DetailSkeleton fields={["Asset", "Information gate", "Train lift", "Walk-forward lift", "Monthly stability"]} label="Loading candidate evidence" />
+                ) : selectedRow ? (() => {
+                  const info = candidateInformation(selectedCandidate, selectedRow);
+                  return (
+                    <div className="field-stack">
+                      <div className="stage0-information-card">
+                        <div className="stage0-information-card__header">
+                          <div>
+                            <span className="eyebrow">Information Gate</span>
+                            <strong>{stage0InformationDecisionLabel(info)}</strong>
+                          </div>
+                          <div className="stage0-information-card__actions">
+                            <StatusBadge tone={stage0InformationTone(info)}>{stage0InformationStatusLabel(info)}</StatusBadge>
+                            <button
+                              className="button button--secondary button--compact"
+                              disabled={!selectedRun || runInformationMutation.isPending || activeJobRunning}
+                              onClick={() => selectedRun && runInformationMutation.mutate({
+                                universe_run_id: selectedRun.universe_run_id,
+                                candidate_id: selectedRow.candidate_id
+                              })}
+                              type="button"
+                            >
+                              <RefreshCw aria-hidden="true" className={runInformationMutation.isPending ? "spin-icon" : undefined} />
+                              {runInformationMutation.isPending ? "Running" : "Run Information"}
+                            </button>
+                          </div>
+                        </div>
+                        {runInformationMutation.error ? <div className="state-line state-line--error">{runInformationMutation.error.message}</div> : null}
+                        {!info ? (
+                          <div className="state-line state-line--subtle">Information gate evidence will appear after this candidate is scored.</div>
+                        ) : (
+                          <div className="stage0-information-grid">
+                            <div>
+                              <span>Train</span>
+                              <strong>{formatStage0SignedPct(info.train_median_lift_pct)}</strong>
+                              <small>{formatStage0Count(info.train_event_count)} events · p {formatStage0PValue(info.train_empirical_p_value)} · q {formatStage0PValue(info.train_q_value)}</small>
+                            </div>
+                            <div>
+                              <span>Walk-forward</span>
+                              <strong>{formatStage0SignedPct(info.walk_forward_median_lift_pct)}</strong>
+                              <small>{formatStage0Count(info.walk_forward_event_count)} events · p {formatStage0PValue(info.walk_forward_empirical_p_value)}</small>
+                            </div>
+                            <div>
+                              <span>Monthly Stability</span>
+                              <strong>{formatStage0Months(info)}</strong>
+                              <small>positive / eligible months</small>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      <FieldRow label="Asset" value={selectedRow.asset} />
+                      <FieldRow label="Signal engine" value={selectedRow.signal_engine_id} />
+                      <FieldRow label="Evaluated signals" value={formatNumber(evaluatedSignalCount(selectedCandidate, selectedRow))} />
+                      <FieldRow label="Trigger rate" value={selectedRow.trigger_rate_pct === null ? "pending" : `${selectedRow.trigger_rate_pct}%`} />
+                      <FieldRow label="Significant travel threshold" value={significanceThresholdLabel(selectedCandidate)} />
+                      <FieldRow label="Source packets" value={formatNumber(selectedCandidate?.packet_count ?? selectedRow.packet_count)} />
+                      <FieldRow label="Development" value={selectedRow.development_status.replaceAll("_", " ")} />
+                      <FieldRow label="Next action" value={selectedRow.next_action.label} />
+                    </div>
+                  );
+                })() : (
                   <div className="state-line">Select a candidate to inspect evidence.</div>
                 )}
                 {selectedRow?.stage0_status === "accepted" ? (

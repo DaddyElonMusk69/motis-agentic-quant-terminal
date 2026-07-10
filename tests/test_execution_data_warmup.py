@@ -84,6 +84,13 @@ class FakeMarketDataRepository:
             "timeframe": "2h",
             "data_origin": "derived",
         }
+        self.open_interest_ref = {
+            **self.raw_ref,
+            "dataset_id": "aave-binance-open_interest-raw-5m",
+            "instrument": "AAVEUSDT",
+            "data_type": "open_interest",
+            "data_origin": "raw",
+        }
 
     def get_raw_candle_ref(self, asset, timeframe="5m"):
         if asset == "AAVE" and timeframe == "5m":
@@ -117,6 +124,13 @@ class FakeMarketDataRepository:
             and data_type == "feature_bollinger"
         ):
             return dict(self.feature_ref)
+        if (
+            asset == "AAVE"
+            and timeframe == "5m"
+            and origin == "raw"
+            and data_type == "open_interest"
+        ):
+            return dict(self.open_interest_ref)
         return None
 
 
@@ -319,3 +333,37 @@ def test_warm_route_data_blocks_when_latest_5m_candle_is_stale_after_retry():
     assert result["data_freshness"]["raw_5m"]["age_seconds"] == 1200
     assert fill_calls == ["aave-raw-5m", "aave-raw-5m"]
     assert runtime_repository.gate_updates == [{"data_warmed": False}]
+
+
+def test_warm_route_data_fills_raw_open_interest_requirement():
+    runtime_repository = FakeRuntimeRepository()
+    runtime_repository.engines[0]["required_data"] = [
+        {"data_type": "open_interest", "origin": "raw", "timeframe": "5m"}
+    ]
+    market_repository = FakeMarketDataRepository()
+    fill_calls = []
+
+    def fill_service(*, registration, repository, adapter):
+        fill_calls.append(registration["dataset_id"])
+        return {"dataset_id": registration["dataset_id"], "status": "current", "rows_added": 0}
+
+    result = warm_route_data(
+        route_id="aave-live",
+        runtime_repository=runtime_repository,
+        market_data_repository=market_repository,
+        fill_service=fill_service,
+        adapter=FakeAdapter(),
+    )
+
+    assert result["status"] == "warmed"
+    assert result["requirements"] == [
+        {
+            "data_type": "open_interest",
+            "origin": "raw",
+            "timeframe": "5m",
+            "status": "current",
+            "dataset_id": "aave-binance-open_interest-raw-5m",
+            "fill_result": {"dataset_id": "aave-binance-open_interest-raw-5m", "status": "current", "rows_added": 0},
+        }
+    ]
+    assert fill_calls == ["aave-binance-open_interest-raw-5m"]

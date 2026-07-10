@@ -116,6 +116,241 @@
     "signal_engine_id": "liquidity_sweep_v1",
     "version": "0.1"
   },
+  "oi_compression_v1": {
+    "code_ref": {
+      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/oi_compression_v1_base.py",
+      "path": "apps/worker/src/quant_terminal_worker/signal_engines/oi_compression_v1.py"
+    },
+    "configuration_schema": {
+      "default_parameters": {
+        "context_bars": 96,
+        "context_timeframes": [
+          "2h",
+          "8h",
+          "1d"
+        ],
+        "dedupe_window_minutes": 120,
+        "min_stats_bars": 200,
+        "oi_change_window_bars": 24,
+        "oi_z_threshold": "1.0",
+        "range_percentile_threshold": "0.50",
+        "range_window_bars": 24,
+        "stats_lookback_bars": 576
+      }
+    },
+    "description": "Open-interest expansion inside compressed 5m price range, with point-in-time-safe OI and forming HTF context.",
+    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.oi_compression_v1:scan_live_signal",
+    "name": "OI Compression v1",
+    "output_envelope_version": "signal_packet.v2",
+    "required_data": [
+      {
+        "data_type": "candles",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "open_interest",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      }
+    ],
+    "runtime_entrypoint": "quant_terminal_worker.signal_engines.oi_compression_v1:generate_training_signals",
+    "signal_engine_id": "oi_compression_v1",
+    "version": "0.1"
+  },
+  "oi_flush_exhaustion_v1": {
+    "code_ref": {
+      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/oi_flush_exhaustion_v1_base.py",
+      "path": "apps/worker/src/quant_terminal_worker/signal_engines/oi_flush_exhaustion_v1.py"
+    },
+    "configuration_schema": {
+      "default_parameters": {
+        "context_bars": 96,
+        "context_timeframes": [
+          "2h",
+          "8h",
+          "1d"
+        ],
+        "dedupe_window_minutes": 120,
+        "ema_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ],
+        "ema_context_bars": 96,
+        "ema_mode": "precomputed_ema_context",
+        "max_oi_change_30m_pct": "-0.15",
+        "min_abs_price_return_30m_pct": "0.35",
+        "min_rejection_wick_pct": "20.0",
+        "min_stats_bars": 200,
+        "min_volume_ratio": "1.1",
+        "oi_aggregate_context_bars": 24,
+        "oi_change_window_bars": 6,
+        "oi_context_bars": 96,
+        "oi_drop_z_threshold": "-1.0",
+        "price_move_window_bars": 6,
+        "range_lookback_bars": 48,
+        "range_window_bars": 48,
+        "stats_lookback_bars": 576
+      }
+    },
+    "description": "Open-interest flush exhaustion engine: detects sharp price moves with unusual OI contraction, elevated volume, rejection wick evidence, rich OI features, and EMA context.",
+    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.oi_flush_exhaustion_v1:scan_live_signal",
+    "name": "OI Flush Exhaustion v1",
+    "output_envelope_version": "signal_packet.v2",
+    "required_data": [
+      {
+        "data_type": "candles",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "open_interest",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "candles",
+        "lookback_bars": 96,
+        "origin": "derived",
+        "required_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ],
+        "source": {
+          "data_type": "candles",
+          "origin": "raw",
+          "timeframe": "5m"
+        },
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "candles",
+        "lookback_bars": 96,
+        "origin": "derived",
+        "required_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ],
+        "source": {
+          "data_type": "candles",
+          "origin": "raw",
+          "timeframe": "5m"
+        },
+        "timeframe": "2h"
+      },
+      {
+        "data_type": "candles",
+        "lookback_bars": 96,
+        "origin": "derived",
+        "required_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ],
+        "source": {
+          "data_type": "candles",
+          "origin": "raw",
+          "timeframe": "5m"
+        },
+        "timeframe": "8h"
+      },
+      {
+        "data_type": "candles",
+        "lookback_bars": 96,
+        "origin": "derived",
+        "required_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ],
+        "source": {
+          "data_type": "candles",
+          "origin": "raw",
+          "timeframe": "5m"
+        },
+        "timeframe": "1d"
+      }
+    ],
+    "runtime_entrypoint": "quant_terminal_worker.signal_engines.oi_flush_exhaustion_v1:generate_training_signals",
+    "signal_engine_id": "oi_flush_exhaustion_v1",
+    "version": "0.1"
+  },
+  "oi_trap_reversal_v1": {
+    "code_ref": {
+      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/oi_trap_reversal_v1_base.py",
+      "path": "apps/worker/src/quant_terminal_worker/signal_engines/oi_trap_reversal_v1.py"
+    },
+    "configuration_schema": {
+      "default_parameters": {
+        "breakout_threshold_pct": "0.05",
+        "context_bars": 96,
+        "context_timeframes": [
+          "2h",
+          "8h",
+          "1d"
+        ],
+        "dedupe_window_minutes": 120,
+        "min_oi_change_1h_pct": "-0.25",
+        "min_rejection_wick_pct": "15.0",
+        "min_stats_bars": 200,
+        "min_volume_ratio": "1.1",
+        "oi_change_window_bars": 6,
+        "oi_z_threshold": "0.6",
+        "range_lookback_bars": 48,
+        "range_window_bars": 48,
+        "stats_lookback_bars": 576
+      }
+    },
+    "description": "Open-interest trap reversal engine: detects failed range breakouts with unusual OI expansion, elevated volume, and rejection wick evidence.",
+    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.oi_trap_reversal_v1:scan_live_signal",
+    "name": "OI Trap Reversal v1",
+    "output_envelope_version": "signal_packet.v2",
+    "required_data": [
+      {
+        "data_type": "candles",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "open_interest",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      }
+    ],
+    "runtime_entrypoint": "quant_terminal_worker.signal_engines.oi_trap_reversal_v1:generate_training_signals",
+    "signal_engine_id": "oi_trap_reversal_v1",
+    "version": "0.1"
+  },
   "vegas_5m_cluster_v5": {
     "code_ref": {
       "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/vegas_ema_5m_hft_v5_base.py",
@@ -235,6 +470,136 @@
     ],
     "runtime_entrypoint": "quant_terminal_worker.signal_engines.vegas_5m_cluster_v5:generate_training_signals",
     "signal_engine_id": "vegas_5m_cluster_v5",
+    "version": "0.1"
+  },
+  "vegas_5m_cluster_v5_oi": {
+    "code_ref": {
+      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/vegas_ema_5m_hft_v5_oi_base.py",
+      "path": "apps/worker/src/quant_terminal_worker/signal_engines/vegas_5m_cluster_v5_oi.py"
+    },
+    "configuration_schema": {
+      "default_parameters": {
+        "context_bars": 80,
+        "context_mode": "candles_only_integrated_forming_with_oi_features",
+        "context_timeframes": [
+          "2h",
+          "8h",
+          "1d"
+        ],
+        "dedupe_window_minutes": 120,
+        "ema_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ],
+        "ema_mode": "precomputed_5m_ema_cluster",
+        "oi_aggregate_context_bars": 24,
+        "oi_context_bars": 80,
+        "proximity_threshold": "0.002",
+        "vote_threshold": 3
+      }
+    },
+    "description": "Experimental Vegas 5m Cluster v5 replica that preserves v5 EMA trigger behavior and adds confirmed 5m open-interest context, OI aggregate charts, and OI feature summaries to emitted packets.",
+    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.vegas_5m_cluster_v5_oi:scan_live_signal",
+    "name": "Vegas 5m Cluster v5 + OI",
+    "output_envelope_version": "signal_packet.v2",
+    "required_data": [
+      {
+        "data_type": "candles",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "open_interest",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "candles",
+        "lookback_bars": 80,
+        "origin": "derived",
+        "required_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ],
+        "source": {
+          "data_type": "candles",
+          "origin": "raw",
+          "timeframe": "5m"
+        },
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "candles",
+        "lookback_bars": 80,
+        "origin": "derived",
+        "required_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ],
+        "source": {
+          "data_type": "candles",
+          "origin": "raw",
+          "timeframe": "5m"
+        },
+        "timeframe": "2h"
+      },
+      {
+        "data_type": "candles",
+        "lookback_bars": 80,
+        "origin": "derived",
+        "required_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ],
+        "source": {
+          "data_type": "candles",
+          "origin": "raw",
+          "timeframe": "5m"
+        },
+        "timeframe": "8h"
+      },
+      {
+        "data_type": "candles",
+        "lookback_bars": 80,
+        "origin": "derived",
+        "required_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ],
+        "source": {
+          "data_type": "candles",
+          "origin": "raw",
+          "timeframe": "5m"
+        },
+        "timeframe": "1d"
+      }
+    ],
+    "runtime_entrypoint": "quant_terminal_worker.signal_engines.vegas_5m_cluster_v5_oi:generate_training_signals",
+    "signal_engine_id": "vegas_5m_cluster_v5_oi",
     "version": "0.1"
   },
   "vegas_ema": {

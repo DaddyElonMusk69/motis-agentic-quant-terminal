@@ -233,7 +233,6 @@ def generate_stage1a_failure_audit(*, iteration_root: Path, sample_role: str = "
     labels_by_id = _audit_labels_for_iteration(iteration_root=iteration_root, training_sample=training_sample)
     decisions_by_id = {item["signal_id"]: item for item in decisions.get("decisions", [])}
     failure_cases = []
-    protected_cases = []
     for record in scores.get("records", []):
         case = _audit_case(
             record=record,
@@ -243,15 +242,12 @@ def generate_stage1a_failure_audit(*, iteration_root: Path, sample_role: str = "
         )
         if record["agreement"] in {"MISMATCH", "NEUTRAL"}:
             failure_cases.append(case)
-        elif record["agreement"] == "MATCH":
-            protected_cases.append(case)
 
     metrics = {
         "total": scores.get("metrics", {}).get("total", len(scores.get("records", []))),
         "failure_count": len(failure_cases),
         "mismatch_count": sum(1 for case in failure_cases if case["agreement"] == "MISMATCH"),
         "neutral_count": sum(1 for case in failure_cases if case["agreement"] == "NEUTRAL"),
-        "protected_count": len(protected_cases),
     }
     created_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     audit = {
@@ -267,12 +263,11 @@ def generate_stage1a_failure_audit(*, iteration_root: Path, sample_role: str = "
         "metrics": metrics,
         "failure_cluster": _failure_cluster(metrics),
         "failure_cases": failure_cases,
-        "protected_cases": protected_cases[:10],
         "required_update_shape": {
             "layer": "Stage 1A directional classification only",
-            "proposed_skill_change": "Identify recurring packet evidence that should reclassify direction or turn neutral reads into LONG/SHORT calls.",
-            "regression_risk": "Do not break protected MATCH cases while correcting failures.",
-            "retest_plan": "Rerun Stage 1A training score, then run the walk-forward test before promotion.",
+            "proposed_skill_change": "Use the stage1a-training-optimizer skill to make a training-only directional update from the failure evidence.",
+            "regression_risk": "Do not overfit exact timestamps, signal ids, or narrow date clusters while correcting failures.",
+            "retest_plan": "Follow the skill verification steps. The user should rerun Stage 1A Score, then walk-forward before promotion.",
         },
     }
     audit_json_path = iteration_root / "audits" / "failure_audit.json"
@@ -367,10 +362,6 @@ def _render_failure_audit_md(audit: dict[str, Any]) -> str:
         f"- {case['signal_id']}: {case['agreement']} truth={case['ground_truth_direction']} decision={case['decision_direction']} reason={case.get('reason_code')}"
         for case in audit["failure_cases"]
     ) or "- None"
-    protected_lines = "\n".join(
-        f"- {case['signal_id']}: truth={case['ground_truth_direction']} decision={case['decision_direction']} reason={case.get('reason_code')}"
-        for case in audit["protected_cases"]
-    ) or "- None"
     metrics = audit["metrics"]
     return f"""# Stage 1A Failure Audit
 
@@ -382,15 +373,10 @@ Failure cluster: {audit['failure_cluster']}
 - Failures: {metrics['failure_count']}
 - Mismatches: {metrics['mismatch_count']}
 - Neutral: {metrics['neutral_count']}
-- Protected matches: {metrics['protected_count']}
 
 ## Failure Ledger
 
 {failure_lines}
-
-## Protected Cases
-
-{protected_lines}
 
 ## Required Update Shape
 
@@ -403,7 +389,6 @@ Failure cluster: {audit['failure_cluster']}
 
 def _render_failure_audit_prompt(audit: dict[str, Any]) -> str:
     failure_ids = ", ".join(case["signal_id"] for case in audit["failure_cases"]) or "none"
-    protected_ids = ", ".join(case["signal_id"] for case in audit["protected_cases"][:10]) or "none"
     iteration_root = Path(audit["iteration_root"])
     strategy_path = audit["session_strategy_path"]
     policy = audit.get("agent_handoff_policy")
@@ -417,7 +402,6 @@ Read:
 
 Current failure cluster: {audit['failure_cluster']}
 Failure cases: {failure_ids}
-Protected cases: {protected_ids}
 
 Task:
 Write a postmortem only. Explain the failure modes and whether the strategy should be rejected, retrained in a fresh cycle, or held for review.
@@ -445,18 +429,16 @@ Session strategy file to edit:
 
 Current failure cluster: {audit['failure_cluster']}
 Failure cases: {failure_ids}
-Protected cases that should not regress: {protected_ids}
 
 Task:
-Make the smallest possible Stage 1A direction-only update to {strategy_path} that addresses repeated failure evidence in the audit.
+Use the `stage1a-training-optimizer` skill as the operating procedure.
+Edit only {strategy_path} to address repeated Stage 1A training failure evidence in the audit.
 
 Rules:
 - Stage 1A is directional agreement only: choose LONG or SHORT when the signal is scoreable.
 - Do not add Stage 1B entry gates, expected-travel filters, trade-management logic, live execution, randomness, or exchange calls.
 - Do not encode exact training timestamps or signal ids as strategy rules.
-- Preserve protected MATCH cases unless the audit evidence proves the old read was wrong.
 - Do not edit the read-only strategy snapshot; it is only evidence of what failed.
-- New Stage 1 bundles automatically snapshot the current session strategy file into their own source_artifacts/strategy_module_snapshot folder.
 - After editing, the user should rerun Score on this iteration before creating a walk-forward test bundle.
 """
 

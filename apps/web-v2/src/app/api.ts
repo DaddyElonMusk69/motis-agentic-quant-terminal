@@ -210,6 +210,21 @@ export type Stage0UniverseRun = {
   };
 };
 
+export type Stage0InformationSummary = {
+  schema_version?: string | null;
+  status?: string | null;
+  decision_reason?: string | null;
+  train_event_count?: number | null;
+  walk_forward_event_count?: number | null;
+  train_median_lift_pct?: number | null;
+  walk_forward_median_lift_pct?: number | null;
+  train_empirical_p_value?: number | null;
+  walk_forward_empirical_p_value?: number | null;
+  train_q_value?: number | null;
+  monthly_positive_lift_months?: number | null;
+  monthly_eligible_months?: number | null;
+};
+
 export type Stage0UniverseCandidate = {
   candidate_id: string;
   universe_run_id: string;
@@ -225,7 +240,9 @@ export type Stage0UniverseCandidate = {
   duplicate_status: string;
   existing_strategy_id: string | null;
   last_error?: Record<string, unknown>;
-  metrics: Record<string, unknown>;
+  metrics: Record<string, unknown> & {
+    stage0_information?: Stage0InformationSummary | null;
+  };
 };
 
 export type Stage0UniverseResponse = {
@@ -294,6 +311,7 @@ export type DevelopmentQueueRow = {
   };
   packet_count?: number;
   stage0_evaluated_signal_count?: number | null;
+  stage0_information?: Stage0InformationSummary | null;
 };
 
 export type Stage1SampleRole = "training" | "walk_forward_test";
@@ -366,7 +384,6 @@ export type Stage1FailureAudit = {
     failure_count: number;
     mismatch_count: number;
     neutral_count: number;
-    protected_count: number;
   };
 };
 
@@ -1482,6 +1499,14 @@ export function executeStage0CandidateBatch(request: { universe_run_id: string; 
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ limit: request.limit })
+  });
+}
+
+export function runStage0InformationGate(request: { universe_run_id: string; candidate_id: string }): Promise<Stage0ExecutionResponse | AsyncJobResponse> {
+  return requestJson<Stage0ExecutionResponse | AsyncJobResponse>(`/api/v1/research/stage0-universe-runs/${request.universe_run_id}/candidates/information`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ candidate_id: request.candidate_id })
   });
 }
 

@@ -80,7 +80,6 @@ def test_build_refresh_plan_only_allows_raw_candle_datasets():
         "source": "okx_cli",
     }
 
-
 def test_read_parquet_candles_returns_limited_rows(tmp_path: Path):
     partition = tmp_path / "year=2026" / "month=06"
     partition.mkdir(parents=True)

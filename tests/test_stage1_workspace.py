@@ -336,9 +336,11 @@ def test_create_stage1_iteration_workspace_writes_builder_bundle_with_training_l
     assert builder_sample["signals"][0]["ground_truth"]["natural_direction"] == "LONG"
     assert builder_sample["signals"][1]["ground_truth"]["natural_direction"] == "SHORT"
     assert f"Edit only {artifact_root / 'strategy_module' / 'strategy.py'}" in prompt
-    assert "New Stage 1 bundles automatically snapshot the current session strategy file" in prompt
+    assert "Use the `stage1a-training-optimizer` skill" in prompt
     assert str(iteration_root / "builder_training_sample.json") in prompt
     assert "embedded training packet JSON" in prompt
+    assert "baseline seed logic" not in prompt
+    assert "OI/volume quality" not in prompt
     assert "training packet paths" not in prompt
     assert "walk-forward" in prompt.lower()
     assert "walk-forward" in prompt
@@ -387,6 +389,7 @@ def test_create_stage1_iteration_workspace_writes_training_builder_prompt(tmp_pa
 
     assert "training-window natural_direction labels" in prompt
     assert "Do not use validation, walk-forward, locked OOS, live state, or future candles" in prompt
+    assert "Use the `stage1a-training-optimizer` skill" in prompt
     assert "rerun Score on this iteration" in prompt
 
 
@@ -415,7 +418,7 @@ def test_list_stage1_iterations_reports_bundle_score_and_audit_state(tmp_path: P
         json.dumps({"metrics": {"directional_agreement": 1.0, "matches": 3, "mismatches": 0, "neutral": 0}})
     )
     (iteration_root / "audits/failure_audit.json").write_text(
-        json.dumps({"metrics": {"failure_count": 0, "protected_count": 3}})
+        json.dumps({"metrics": {"failure_count": 0, "mismatch_count": 0, "neutral_count": 0}})
     )
     session = {"artifact_root": str(artifact_root)}
 
@@ -427,7 +430,7 @@ def test_list_stage1_iterations_reports_bundle_score_and_audit_state(tmp_path: P
     assert iterations[0]["has_training_score"] is True
     assert iterations[0]["has_failure_audit"] is True
     assert iterations[0]["training_score"]["metrics"]["matches"] == 3
-    assert iterations[0]["failure_audit"]["metrics"]["protected_count"] == 3
+    assert "protected_count" not in iterations[0]["failure_audit"]["metrics"]
 
 
 def test_build_stage1_gate_summary_blocks_until_all_slice_scores_pass(tmp_path: Path):

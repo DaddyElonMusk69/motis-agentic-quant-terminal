@@ -31,19 +31,22 @@ from quant_terminal_sdk.engine_contracts import (
 )
 from quant_terminal_sdk.market_data_reader import MarketDataReader
 from quant_terminal_worker.adapters.exchange import ExchangeAdapterError, build_exchange_adapter
+from quant_terminal_worker.adapters.binance import BinanceCLIAdapter
 from quant_terminal_worker.adapters.okx import OKXAdapter
 from quant_terminal_worker.backtests.stage1 import run_stage1_backtest
 from quant_terminal_worker.ingestion.ema_enrichment import enrich_derived_ema_datasets
 from quant_terminal_worker.ingestion.feature_enrichment import enrich_feature_family_datasets
+from quant_terminal_worker.ingestion.binance_open_interest import fill_raw_open_interest_dataset
 from quant_terminal_worker.ingestion.raw_candle_fill import fill_raw_candle_dataset
 from quant_terminal_worker.ingestion.legacy_signals import import_legacy_signal_sets
 from quant_terminal_worker.ingestion.signal_pool_extension import extend_signal_pool_from_local_candles
 from quant_terminal_worker.execution.lifecycle import next_wake_at, run_route_lifecycle_cycle
 from quant_terminal_worker.execution.order_submission import submit_wake_order_intents
 from quant_terminal_worker.execution.scheduler import RouteLifecycleScheduler
+from quant_terminal_worker.stage0.information import apply_information_q_values_to_candidates
 from quant_terminal_worker.stage0.workspace import build_stage0_commands
 from quant_terminal_worker.stage0.workspace import read_parquet_candles_for_stage0
-from quant_terminal_worker.stage0.execution import execute_stage0_candidate
+from quant_terminal_worker.stage0.execution import execute_stage0_candidate, execute_stage0_information_gate
 from quant_terminal_worker.stage0.universe import (
     build_stage0_universe,
     build_stage0_universe_config_hash,
@@ -280,6 +283,7 @@ def create_app(
     market_data_fill_service: Any | None = None,
     runtime_repository: Any | None = None,
     stage0_executor: Any | None = None,
+    stage0_information_executor: Any | None = None,
     signal_pool_extension_service: Any | None = None,
     live_signal_scan_service: Any | None = None,
 ) -> FastAPI:
@@ -295,6 +299,7 @@ def create_app(
     fill_service = market_data_fill_service
     runtime_repo = runtime_repository
     injected_stage0_executor = stage0_executor
+    injected_stage0_information_executor = stage0_information_executor
     signal_pool_extender = signal_pool_extension_service
     live_signal_scanner = live_signal_scan_service
 
@@ -406,6 +411,43 @@ def create_app(
         if not candle_rows:
             raise HTTPException(status_code=400, detail="candidate has no candle rows for window")
         return execute_stage0_candidate(
+            workspace_root=Path.cwd(),
+            universe_run={
+                **universe_run,
+                "window_start": _iso_datetime(universe_run["window_start"]),
+                "window_end": _iso_datetime(universe_run["window_end"]),
+            },
+            candidate=candidate,
+            signal_set=signal_set,
+            signals=signals,
+            candle_rows=candle_rows,
+        )
+
+    def run_stage0_information_candidate(universe_run: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+        if injected_stage0_information_executor is not None:
+            return injected_stage0_information_executor(universe_run, candidate)
+        signal_set = get_runtime_repository().get_signal_set(candidate["signal_set_key"])
+        if signal_set is None:
+            raise HTTPException(status_code=404, detail="signal set not found")
+        candle_ref = get_market_data_repository().get_raw_candle_ref(candidate["asset"], "5m")
+        if candle_ref is None:
+            raise HTTPException(status_code=404, detail="raw 5m candle data not found")
+        signals = get_runtime_repository().list_signals_for_signal_set_window(
+            signal_set_key=candidate["signal_set_key"],
+            window_start=_iso_datetime(universe_run["window_start"]),
+            window_end=_iso_datetime(universe_run["window_end"]),
+        )
+        candle_rows = read_parquet_candles_for_stage0(
+            storage_uri=Path(candle_ref["storage_uri"]),
+            window_start=_iso_datetime(universe_run["window_start"]),
+            window_end=_iso_datetime(universe_run["window_end"]),
+            forward_hours=universe_run["forward_hours"],
+        )
+        if not signals:
+            raise HTTPException(status_code=400, detail="candidate has no signal packets in window")
+        if not candle_rows:
+            raise HTTPException(status_code=400, detail="candidate has no candle rows for window")
+        return execute_stage0_information_gate(
             workspace_root=Path.cwd(),
             universe_run={
                 **universe_run,
@@ -2060,6 +2102,36 @@ def create_app(
 
         result = run_stage0_candidate(universe_run, candidate)
         get_runtime_repository().update_stage0_universe_candidate(result["candidate"])
+        _refresh_stage0_information_q_values(get_runtime_repository(), universe_run_id)
+        get_runtime_repository().refresh_stage0_universe_summary(universe_run_id)
+        return result
+
+    @app.post("/api/v1/research/stage0-universe-runs/{universe_run_id}/candidates/information")
+    def execute_stage0_universe_candidate_information(
+        universe_run_id: str,
+        request: ExecuteStage0CandidateRequest,
+    ) -> dict[str, Any]:
+        universe_run = get_runtime_repository().get_stage0_universe_run(universe_run_id)
+        if universe_run is None:
+            raise HTTPException(status_code=404, detail="stage0 universe run not found")
+        candidate = get_runtime_repository().get_stage0_universe_candidate(request.candidate_id)
+        if candidate is None:
+            raise HTTPException(status_code=404, detail="stage0 universe candidate not found")
+        queued = None
+        if injected_stage0_information_executor is None:
+            queued = enqueue_runtime_job(
+                get_runtime_repository(),
+                job_type="stage0_information_candidate",
+                scope_key=f"stage0:{universe_run_id}",
+                payload={"universe_run_id": universe_run_id, "candidate_id": request.candidate_id},
+                current_step="queued",
+            )
+        if queued:
+            return queued
+
+        result = run_stage0_information_candidate(universe_run, candidate)
+        get_runtime_repository().update_stage0_universe_candidate(result["candidate"])
+        _refresh_stage0_information_q_values(get_runtime_repository(), universe_run_id)
         get_runtime_repository().refresh_stage0_universe_summary(universe_run_id)
         return result
 
@@ -2127,6 +2199,7 @@ def create_app(
                     },
                 )
 
+        _refresh_stage0_information_q_values(get_runtime_repository(), universe_run_id)
         get_runtime_repository().refresh_stage0_universe_summary(universe_run_id)
         refreshed_run = get_runtime_repository().get_stage0_universe_run(universe_run_id) or universe_run
         refreshed_candidates = get_runtime_repository().list_stage0_universe_candidates(universe_run_id)
@@ -2260,17 +2333,29 @@ def create_app(
                     "dataset_id": dataset_id,
                     "okx_mode": os.environ.get("OKX_MODE", "demo"),
                     "market_mode": "live",
+                    "binance_cli_path": os.environ.get("BINANCE_CLI_PATH"),
+                    "binance_profile": os.environ.get("BINANCE_PROFILE"),
                 },
                 current_step="queued",
             )
             if queued:
                 return queued
-        service = fill_service or fill_raw_candle_dataset
+        if fill_service is not None:
+            service = fill_service
+        elif registration.get("data_type") == "open_interest":
+            service = fill_raw_open_interest_dataset
+        else:
+            service = fill_raw_candle_dataset
+        adapter = (
+            BinanceCLIAdapter({"cli_path": os.environ.get("BINANCE_CLI_PATH"), "profile": os.environ.get("BINANCE_PROFILE")})
+            if registration.get("data_type") == "open_interest"
+            else OKXAdapter({"backend": "okx_cli", "mode": os.environ.get("OKX_MODE", "demo"), "market_mode": "live"})
+        )
         try:
             return service(
                 registration=registration,
                 repository=get_market_data_repository(),
-                adapter=OKXAdapter({"backend": "okx_cli", "mode": os.environ.get("OKX_MODE", "demo"), "market_mode": "live"}),
+                adapter=adapter,
             )
         except ExchangeAdapterError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -3379,6 +3464,14 @@ def _build_development_queue(
     ]
 
 
+def _refresh_stage0_information_q_values(repository: Any, universe_run_id: str) -> None:
+    candidates = repository.list_stage0_universe_candidates(universe_run_id)
+    adjusted = apply_information_q_values_to_candidates(candidates)
+    for before, after in zip(candidates, adjusted, strict=False):
+        if before != after:
+            repository.update_stage0_universe_candidate(after)
+
+
 def _development_queue_row(
     *,
     workspace_root: Path,
@@ -3398,6 +3491,7 @@ def _development_queue_row(
         "stage0_status": candidate["acceptance_status"],
         "packet_count": candidate.get("packet_count"),
         "stage0_evaluated_signal_count": _stage0_evaluated_signal_count(candidate),
+        "stage0_information": _stage0_information_summary(candidate),
         "trigger_rate_pct": candidate.get("trigger_rate_pct"),
         "branch_path": candidate.get("branch_path"),
         "stage1_session_id": session.get("session_id") if session else None,
@@ -3426,6 +3520,12 @@ def _stage0_evaluated_signal_count(candidate: dict[str, Any]) -> int | None:
     if isinstance(packet_count, int):
         return packet_count
     return None
+
+
+def _stage0_information_summary(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    metrics = candidate.get("metrics") if isinstance(candidate.get("metrics"), dict) else {}
+    information = metrics.get("stage0_information") if isinstance(metrics.get("stage0_information"), dict) else None
+    return information
 
 
 def _portfolio_stage4_complete_sessions(

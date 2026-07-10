@@ -44,11 +44,17 @@ def build_refresh_plan(
     *,
     as_of: datetime | None = None,
 ) -> dict[str, Any]:
-    if registration["data_type"] != "candles" or registration["data_origin"] != "raw":
+    if registration["data_type"] == "candles" and registration["data_origin"] != "raw":
         return {
             "dataset_id": registration["dataset_id"],
             "status": "blocked",
             "reason": "refresh_supported_for_raw_candles_only",
+        }
+    if registration["data_origin"] != "raw" or registration["data_type"] not in {"candles", "open_interest"}:
+        return {
+            "dataset_id": registration["dataset_id"],
+            "status": "blocked",
+            "reason": "refresh_supported_for_raw_market_data_only",
         }
 
     end_ts = _coerce_datetime(registration["end_ts"])

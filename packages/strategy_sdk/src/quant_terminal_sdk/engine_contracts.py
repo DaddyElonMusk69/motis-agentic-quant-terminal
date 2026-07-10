@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 SUPPORTED_REQUIRED_DATA_TYPES = {
     "candles",
+    "open_interest",
     "feature_base_candle",
     "feature_volatility_range",
     "feature_volume",

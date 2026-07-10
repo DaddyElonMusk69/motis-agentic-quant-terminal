@@ -1404,6 +1404,79 @@ def test_execute_stage0_candidate_endpoint_updates_candidate():
     assert repository.updated_candidate["trigger_rate_pct"] == 90
 
 
+def test_execute_stage0_information_endpoint_updates_only_information_metrics():
+    repository = StubRuntimeRepository()
+    repository.universe_run = {
+        "universe_run_id": "universe-march-may-vegas",
+        "window_start": "2026-03-01T00:00:00Z",
+        "window_end": "2026-05-30T23:59:59Z",
+        "forward_hours": 36,
+        "trigger_rate_threshold_pct": 85,
+        "config_hash": "hash",
+        "engine_filter": ["vegas_ema"],
+        "status": "created",
+        "summary": {},
+    }
+    repository.universe_candidates = [
+        {
+            "candidate_id": "candidate-1",
+            "universe_run_id": "universe-march-may-vegas",
+            "signal_set_key": "vegas_ema:BTC:2026-BTC-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "BTC",
+            "signal_set_id": "2026-BTC-2h-dedupe-vote2",
+            "packet_count": 100,
+            "trigger_rate_pct": 90,
+            "branch_path": "path_a",
+            "acceptance_status": "accepted",
+            "duplicate_status": "new",
+            "existing_strategy_id": None,
+            "last_error": {},
+            "metrics": {"trigger_rate_pct": 90},
+        }
+    ]
+
+    def fake_information_executor(universe_run, candidate):
+        return {
+            "candidate": {
+                **candidate,
+                "metrics": {
+                    **candidate["metrics"],
+                    "stage0_information": {
+                        "status": "fail",
+                        "decision_reason": "train_information_not_significant",
+                        "train_median_lift_pct": 1.0,
+                    },
+                },
+            },
+            "artifact_root": "/tmp/stage0",
+            "commands": {},
+            "information_gate": {"status": "fail"},
+        }
+
+    client = TestClient(
+        create_app(
+            runtime_repository=repository,
+            stage0_information_executor=fake_information_executor,
+        )
+    )
+
+    response = client.post(
+        "/api/v1/research/stage0-universe-runs/universe-march-may-vegas/candidates/information",
+        json={"candidate_id": "candidate-1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["candidate"]["acceptance_status"] == "accepted"
+    assert payload["candidate"]["branch_path"] == "path_a"
+    assert payload["candidate"]["trigger_rate_pct"] == 90
+    assert payload["candidate"]["metrics"]["stage0_information"]["status"] == "fail"
+    assert repository.updated_candidate["acceptance_status"] == "accepted"
+    assert repository.summary_refreshed is True
+
+
 def test_execute_stage0_candidate_batch_runs_pending_only_and_reports_partial_failures():
     repository = StubRuntimeRepository()
     repository.universe_run = {

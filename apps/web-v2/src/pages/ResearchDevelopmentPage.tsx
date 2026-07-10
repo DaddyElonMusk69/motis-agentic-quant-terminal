@@ -62,6 +62,7 @@ import { formatNumber } from "../app/format";
 import { queryClient } from "../app/queryClient";
 import { useAppRouter } from "../app/router";
 import { buildStage1Consistency, type Stage1ConsistencyMonth, type Stage1ConsistencySide } from "../app/stage1Consistency";
+import { formatStage0CompactLine, formatStage0StatsLine, stage0InformationFromRow } from "../app/stage0Information";
 import { DataTable } from "../components/DataTable";
 import { DetailSkeleton } from "../components/DetailSkeleton";
 import { FieldRow } from "../components/FieldRow";
@@ -554,6 +555,14 @@ function formatRate(value: number | undefined | null, digits = 1): string {
     return "-";
   }
   return `${(value * 100).toFixed(digits)}%`;
+}
+
+function stage0InformationLine(row: DevelopmentQueueRow | null | undefined): string {
+  return formatStage0CompactLine(stage0InformationFromRow(row));
+}
+
+function stage0InformationStatsLine(row: DevelopmentQueueRow | null | undefined): string {
+  return formatStage0StatsLine(stage0InformationFromRow(row));
 }
 
 function formatSignedPp(value: number | undefined | null): string {
@@ -1650,6 +1659,8 @@ export function ResearchDevelopmentPage() {
                     </div>
                     <span>{candidate.signal_engine_id} · {candidate.strategy_id ?? "base strategy"}</span>
                     <small>Trigger {candidate.trigger_rate_pct === null ? "n/a" : `${candidate.trigger_rate_pct}%`} · {formatNumber(candidate.stage0_evaluated_signal_count ?? candidate.packet_count)} signals</small>
+                    <small>{stage0InformationLine(candidate)}</small>
+                    <small>{stage0InformationStatsLine(candidate)}</small>
                     <small>{candidate.next_action.label}</small>
                   </button>
                 );
@@ -1728,6 +1739,10 @@ export function ResearchDevelopmentPage() {
               <div>
                 <span>Blocker</span>
                 <strong className={gate?.blockers.length ? "tone-risk" : "tone-pass"}>{gate?.blockers[0] ?? (session ? "none" : "Stage 1 not started")}</strong>
+              </div>
+              <div>
+                <span>Information</span>
+                <strong>{row ? stage0InformationLine(row) : "n/a"}</strong>
               </div>
             </div>
 
@@ -2092,9 +2107,6 @@ function ConsistencyFlagList({ flags }: { flags: string[] }) {
 
 function Stage1ConsistencyPanel({ detail, iteration }: { detail: Stage1IterationDetail; iteration: Stage1IterationSummary }) {
   const consistency = useMemo(() => buildStage1Consistency(detail), [detail]);
-  const protectedCount = iteration.failure_audit?.metrics.protected_count;
-  const protectedValue = typeof protectedCount === "number" ? formatNumber(protectedCount) : "not audited";
-  const protectedMeta = typeof protectedCount === "number" ? "from failure audit" : "generate audit to show protected cases";
 
   return (
     <TerminalPanel eyebrow="stage 1a" title="Consistency Gates">
@@ -2129,12 +2141,6 @@ function Stage1ConsistencyPanel({ detail, iteration }: { detail: Stage1Iteration
             meta="abs(LONG calls - SHORT calls) / called"
             tone={consistencyImbalanceTone(consistency.summary.sideImbalance)}
             value={formatRate(consistency.summary.sideImbalance)}
-          />
-          <ConsistencyMetricCard
-            label="Protected Cases"
-            meta={protectedMeta}
-            tone={typeof protectedCount === "number" ? "pass" : "idle"}
-            value={protectedValue}
           />
         </div>
 

@@ -9,6 +9,7 @@ JOB_QUEUE_BY_TYPE = {
     "market_data_feature_refresh": "market_data",
     "signal_pool_extend": "signal_generation",
     "stage0_candidate": "research",
+    "stage0_information_candidate": "research",
     "stage0_candidate_batch": "research",
     "stage1_canonical": "research",
     "stage1_score": "research",
