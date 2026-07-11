@@ -55,7 +55,7 @@
 - Create: `apps/worker/src/quant_terminal_worker/signal_discovery/atlas.py`
 - Test: `tests/test_signal_discovery_atlas.py`
 
-- [ ] **Step 1: Write failing first-touch tests**
+- [x] **Step 1: Write failing first-touch tests**
 
 Cover LONG target-first, LONG stop-first despite later MFE, SHORT target-first, NEUTRAL timeout, and same-candle AMBIGUOUS. Use this public interface:
 
@@ -75,23 +75,23 @@ assert result["short"]["outcome"] == "SL"
 assert result["entry_semantics"] == "next_5m_open"
 ```
 
-- [ ] **Step 2: Run tests and confirm the missing module failure**
+- [x] **Step 2: Run tests and confirm the missing module failure**
 
 Run: `pytest -q tests/test_signal_discovery_atlas.py`
 
 Expected: collection fails because `quant_terminal_worker.signal_discovery.atlas` does not exist.
 
-- [ ] **Step 3: Implement causal entry and barrier ordering**
+- [x] **Step 3: Implement causal entry and barrier ordering**
 
 Add frozen dataclasses `DiscoveryConfig` and `FixedRLabel`, normalize UTC timestamps, choose the first candle whose open timestamp is at or after `decision_ts + entry_delay`, enter at that candle open, and scan only subsequent candle ranges through the configured cutoff. Return direction-specific TP/SL/timeout records, first-touch timestamps, MFE, MAE, terminal return, and one aggregate label. If both a direction's TP and SL occur in one 5m candle before either was previously touched, mark that direction and the aggregate label `AMBIGUOUS`.
 
-- [ ] **Step 4: Verify focused tests**
+- [x] **Step 4: Verify focused tests**
 
 Run: `pytest -q tests/test_signal_discovery_atlas.py`
 
 Expected: all fixed-R labeling tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/worker/src/quant_terminal_worker/signal_discovery tests/test_signal_discovery_atlas.py
