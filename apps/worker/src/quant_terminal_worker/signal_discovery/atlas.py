@@ -230,6 +230,39 @@ def label_fixed_r_timestamp(
     )
 
 
+def label_fixed_r_timestamps(
+    *,
+    candles: Sequence[MarketDataCandle],
+    decision_timestamps: Sequence[datetime],
+    selected_target: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    risk_pct = float(selected_target["selected_risk_pct"])
+    reward_multiple = float(selected_target["reward_multiple"])
+    stop_multiple = float(selected_target["stop_multiple"])
+    horizon_hours = float(selected_target["horizon_hours"])
+    entry_delay_minutes = int(selected_target["entry_delay_minutes"])
+    _validate_label_parameters(
+        risk_pct=risk_pct,
+        reward_multiple=reward_multiple,
+        stop_multiple=stop_multiple,
+        horizon_hours=horizon_hours,
+        entry_delay_minutes=entry_delay_minutes,
+    )
+    index = _CandleIndex(candles)
+    return [
+        _label_fixed_r_from_index(
+            index=index,
+            decision_ts=decision_ts,
+            entry_delay_minutes=entry_delay_minutes,
+            risk_pct=risk_pct,
+            reward_multiple=reward_multiple,
+            stop_multiple=stop_multiple,
+            horizon_hours=horizon_hours,
+        )
+        for decision_ts in decision_timestamps
+    ]
+
+
 def _label_fixed_r_from_index(
     *,
     index: _CandleIndex,

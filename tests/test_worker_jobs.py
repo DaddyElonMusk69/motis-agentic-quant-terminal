@@ -147,6 +147,72 @@ def test_signal_discovery_jobs_route_to_research_queue():
     assert queue_for_job("signal_discovery_handoff") == "research"
 
 
+def test_signal_discovery_engine_evaluation_job_persists_accepted_result(
+    tmp_path,
+    monkeypatch,
+):
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    repository.create_signal_discovery_session(
+        {
+            "session_id": "discovery-evaluation",
+            "name": "BTC Evaluation",
+            "asset": "BTC",
+            "instrument": "BTC-USDT-SWAP",
+            "dataset_id": "btc-raw-5m",
+            "research_start": "2026-01-01T00:00:00Z",
+            "research_end": "2026-01-31T00:00:00Z",
+            "walk_forward_start": "2026-02-01T00:00:00Z",
+            "walk_forward_end": "2026-02-28T00:00:00Z",
+            "artifact_root": str(tmp_path / "dev/signal_discovery_sessions/discovery-evaluation"),
+            "config": {},
+        }
+    )
+    repository.update_signal_discovery_session(
+        "discovery-evaluation",
+        status="atlas_ready",
+    )
+    repository.update_signal_discovery_session(
+        "discovery-evaluation",
+        status="target_frozen",
+        frozen_target={"config_hash": "abc", "selected_target": {}},
+        target_version=1,
+    )
+    repository.update_signal_discovery_session(
+        "discovery-evaluation",
+        status="candidate_attached",
+        candidate_engine_id="fixture-engine",
+        candidate_signal_set_key="fixture-engine:BTC:BTC-fixture-engine-canonical",
+    )
+    evaluation = {
+        "schema_version": "signal_discovery_engine_evaluation.v1",
+        "accepted": True,
+        "slices": {"training": {"net_r_after_costs": 3.0}, "walk_forward": {"net_r_after_costs": 1.0}},
+    }
+    monkeypatch.setattr(
+        worker_jobs,
+        "evaluate_registered_engine",
+        lambda **_: evaluation,
+    )
+    repository.enqueue_job(
+        job_type="signal_discovery_engine_evaluation",
+        scope_key="signal_discovery:discovery-evaluation",
+        payload={"session_id": "discovery-evaluation"},
+    )
+
+    completed = run_claimed_job(
+        repository=repository,
+        job=repository.claim_next_job(worker_id="worker-discovery"),
+        workspace_root=tmp_path,
+    )
+
+    assert completed["status"] == "completed"
+    session = repository.get_signal_discovery_session("discovery-evaluation")
+    assert session["status"] == "accepted"
+    assert session["evaluation"] == evaluation
+
+
 def test_signal_discovery_atlas_write_failure_never_marks_session_ready(
     tmp_path,
     monkeypatch,

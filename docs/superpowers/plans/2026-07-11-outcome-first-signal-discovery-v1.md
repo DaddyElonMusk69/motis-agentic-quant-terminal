@@ -369,27 +369,27 @@ Do not copy to the installed skill until the complete workspace test suite passe
 - Test: `tests/test_signal_discovery_evaluation.py`
 - Test: `tests/test_worker_jobs.py`
 
-- [ ] **Step 1: Write failing evaluator tests**
+- [x] **Step 1: Write failing evaluator tests**
 
 Use a deterministic fixture engine with known packet timestamps and a paired strategy. Assert opportunity precision, episode recall, LONG/SHORT/NEUTRAL counts, directional accuracy, net R after costs, train/WF slices, packet neutrality, strategy wrapper compatibility, and training/live cadence metadata parity.
 
-- [ ] **Step 2: Run evaluator tests**
+- [x] **Step 2: Run evaluator tests**
 
 Run: `pytest -q tests/test_signal_discovery_evaluation.py tests/test_worker_jobs.py -k signal_discovery_engine`
 
 Expected: missing evaluator failure.
 
-- [ ] **Step 3: Implement candidate evaluation**
+- [x] **Step 3: Implement candidate evaluation**
 
 Resolve the registered engine through `resolve_signal_engine`, ensure its canonical signal set exists, generate/fill packets through the shared training runtime, load the paired base strategy from `code_ref.base_strategy_path`, wrap each packet canonically, and score each emitted timestamp directly from candles with the frozen target. Episode recall uses interval membership only as a diagnostic; primary precision and net R come from each emitted timestamp's own path.
 
-- [ ] **Step 4: Verify candidate metrics**
+- [x] **Step 4: Verify candidate metrics**
 
 Run: `pytest -q tests/test_signal_discovery_evaluation.py tests/test_worker_jobs.py -k signal_discovery_engine`
 
 Expected: evaluator and queued job tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/worker/src/quant_terminal_worker/signal_discovery/evaluation.py apps/worker/src/quant_terminal_worker/jobs.py tests/test_signal_discovery_evaluation.py tests/test_worker_jobs.py
