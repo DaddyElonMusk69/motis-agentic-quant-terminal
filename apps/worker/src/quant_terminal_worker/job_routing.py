@@ -18,6 +18,10 @@ JOB_QUEUE_BY_TYPE = {
     "stage3_pyramid": "research",
     "stage4_realized_expectancy": "research",
     "stage4b_timing_replay": "research",
+    "signal_discovery_atlas": "research",
+    "signal_discovery_walk_forward": "research",
+    "signal_discovery_engine_evaluation": "research",
+    "signal_discovery_handoff": "research",
 }
 
 

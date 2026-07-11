@@ -5,7 +5,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from quant_terminal_sdk.market_data_reader import MarketDataReader
+from quant_terminal_sdk.market_data_reader import (
+    MarketDataReader,
+    read_candles_from_ref,
+    read_rows_from_ref,
+)
 from quant_terminal_worker.adapters.okx import OKXAdapter
 from quant_terminal_worker.adapters.binance import BinanceCLIAdapter
 from quant_terminal_worker.ingestion.ema_enrichment import enrich_derived_ema_datasets
@@ -13,6 +17,20 @@ from quant_terminal_worker.ingestion.feature_enrichment import enrich_feature_fa
 from quant_terminal_worker.ingestion.raw_candle_fill import fill_raw_candle_dataset
 from quant_terminal_worker.ingestion.binance_open_interest import fill_raw_open_interest_dataset
 from quant_terminal_worker.ingestion.signal_pool_extension import extend_signal_pool_from_local_candles
+from quant_terminal_worker.signal_discovery.atlas import (
+    DiscoveryConfig,
+    run_fixed_target_window,
+    run_training_atlas,
+)
+from quant_terminal_worker.signal_discovery.features import (
+    build_causal_feature_rows,
+    select_hard_negatives,
+)
+from quant_terminal_worker.signal_discovery.workspace import (
+    materialize_training_atlas,
+    materialize_walk_forward_atlas,
+    write_session_manifest,
+)
 from quant_terminal_worker.stage0.execution import execute_stage0_candidate, execute_stage0_information_gate
 from quant_terminal_worker.stage0.information import apply_information_q_values_to_candidates
 from quant_terminal_worker.stage0.workspace import read_parquet_candles_for_stage0
@@ -52,6 +70,8 @@ def execute_job(
         "stage4_realized_expectancy": _execute_stage4_realized_expectancy,
         "stage4b_timing_replay": _execute_stage4b_timing_replay,
         "portfolio_backtest": _execute_portfolio_backtest,
+        "signal_discovery_atlas": _execute_signal_discovery_atlas,
+        "signal_discovery_walk_forward": _execute_signal_discovery_walk_forward,
     }
     handler = handlers.get(job["job_type"])
     if handler is None:
@@ -211,6 +231,238 @@ def _execute_signal_pool_extend(
         target_end=payload.get("target_end"),
         progress_callback=report_progress,
     )
+
+
+def _execute_signal_discovery_atlas(
+    *,
+    repository: Any,
+    job: dict[str, Any],
+    workspace_root: Path,
+    market_data_repository: Any | None = None,
+) -> dict[str, Any]:
+    if market_data_repository is None:
+        raise ValueError("market data repository is required for signal discovery atlas jobs")
+    payload = job.get("payload") or {}
+    session = _signal_discovery_session(repository, str(payload["session_id"]))
+    repository.heartbeat_job(job["job_id"], current_step="signal_discovery_atlas")
+    session = repository.update_signal_discovery_session(
+        session["session_id"],
+        status="atlas_running",
+    )
+    try:
+        ref = _signal_discovery_data_ref(market_data_repository, session)
+        config_value = session.get("config") or {}
+        horizons = tuple(float(value) for value in config_value.get("horizon_hours", (36, 48)))
+        delays = tuple(
+            int(value) for value in config_value.get("entry_delays_minutes", (5,))
+        )
+        config = DiscoveryConfig(
+            risk_values=tuple(float(value) for value in config_value["risk_values"]),
+            research_start=session["research_start"],
+            research_end=session["research_end"],
+            walk_forward_start=session["walk_forward_start"],
+            reward_multiple=float(config_value.get("reward_multiple") or 2.0),
+            stop_multiple=float(config_value.get("stop_multiple") or 1.0),
+            horizon_hours=horizons,
+            entry_delays_minutes=delays,
+            fee_bps_per_side=float(config_value.get("fee_bps_per_side") or 0.0),
+            slippage_bps_per_side=float(config_value.get("slippage_bps_per_side") or 0.0),
+        )
+        read_start = session["research_start"] - timedelta(days=7)
+        outcome_end = session["research_end"] + timedelta(
+            hours=max(horizons),
+            minutes=max(delays),
+        )
+        read_end = min(
+            outcome_end,
+            session["walk_forward_start"] - timedelta(microseconds=1),
+        )
+        candles = read_candles_from_ref(
+            ref,
+            workspace_root=workspace_root,
+            start=read_start,
+            end=read_end,
+        )
+        atlas = run_training_atlas(candles=candles, config=config)
+        primary_delay = min(config.entry_delays_minutes)
+        primary_horizon = min(config.horizon_hours)
+        unique_decisions = sorted(
+            {row["decision_ts"] for row in atlas["timestamp_labels"]}
+        )
+        oi_rows = _signal_discovery_oi_rows(
+            market_data_repository=market_data_repository,
+            workspace_root=workspace_root,
+            config=config_value,
+            start=read_start,
+            end=session["research_end"],
+        )
+        features_with_labels = build_causal_feature_rows(
+            candles=candles,
+            decision_rows=[
+                {"decision_ts": timestamp, "label": "UNLABELED"}
+                for timestamp in unique_decisions
+            ],
+            walk_forward_start=session["walk_forward_start"],
+            oi_rows=oi_rows,
+        )
+        features_by_timestamp = {
+            row["decision_ts"]: {key: value for key, value in row.items() if key != "label"}
+            for row in features_with_labels
+        }
+        hard_negatives: list[dict[str, Any]] = []
+        for risk_pct in config.risk_values:
+            labels = [
+                row
+                for row in atlas["timestamp_labels"]
+                if row["risk_pct"] == risk_pct
+                and row["scenario_entry_delay_minutes"] == primary_delay
+                and row["scenario_horizon_hours"] == primary_horizon
+            ]
+            episodes = [
+                row
+                for row in atlas["episodes"]
+                if row["risk_pct"] == risk_pct
+                and row["entry_delay_minutes"] == primary_delay
+                and row["horizon_hours"] == primary_horizon
+            ]
+            scenario_features = [
+                {
+                    **features_by_timestamp[row["decision_ts"]],
+                    "label": row["label"],
+                }
+                for row in labels
+                if row["decision_ts"] in features_by_timestamp
+            ]
+            for negative in select_hard_negatives(
+                feature_rows=scenario_features,
+                episodes=episodes,
+            ):
+                hard_negatives.append(
+                    {
+                        **negative,
+                        "risk_pct": risk_pct,
+                        "entry_delay_minutes": primary_delay,
+                        "horizon_hours": primary_horizon,
+                    }
+                )
+
+        feasibility = {
+            "schema_version": "signal_discovery_r_feasibility.v1",
+            "r_summaries": atlas["r_summaries"],
+            "neighboring_r_diagnostics": atlas["neighboring_r_diagnostics"],
+            "purged_decision_count": atlas["purged_decision_count"],
+        }
+        artifact_root = _signal_discovery_artifact_root(session, workspace_root=workspace_root)
+        artifact_paths = materialize_training_atlas(
+            artifact_root=artifact_root,
+            timestamp_labels=atlas["timestamp_labels"],
+            episodes=atlas["episodes"],
+            features=list(features_by_timestamp.values()),
+            hard_negatives=hard_negatives,
+            r_feasibility=feasibility,
+        )
+        summary = {
+            **feasibility,
+            "training_timestamp_label_count": len(atlas["timestamp_labels"]),
+            "training_episode_count": len(atlas["episodes"]),
+            "training_feature_count": len(features_by_timestamp),
+            "training_hard_negative_count": len(hard_negatives),
+            "artifacts": {key: str(path) for key, path in artifact_paths.items()},
+        }
+        write_session_manifest(
+            artifact_root=artifact_root,
+            manifest={
+                "session_id": session["session_id"],
+                "status": "atlas_ready",
+                "dataset_id": session["dataset_id"],
+                "training_artifacts": summary["artifacts"],
+            },
+        )
+        updated = repository.update_signal_discovery_session(
+            session["session_id"],
+            status="atlas_ready",
+            summary=summary,
+        )
+        return {"session": updated, "summary": summary}
+    except Exception as exc:
+        _fail_signal_discovery_session(repository, session=session, exc=exc)
+        raise
+
+
+def _execute_signal_discovery_walk_forward(
+    *,
+    repository: Any,
+    job: dict[str, Any],
+    workspace_root: Path,
+    market_data_repository: Any | None = None,
+) -> dict[str, Any]:
+    if market_data_repository is None:
+        raise ValueError("market data repository is required for signal discovery WF jobs")
+    payload = job.get("payload") or {}
+    session = _signal_discovery_session(repository, str(payload["session_id"]))
+    if not session.get("frozen_target") or session.get("target_version") is None:
+        raise ValueError("signal discovery target must be frozen before WF evaluation")
+    repository.heartbeat_job(job["job_id"], current_step="signal_discovery_walk_forward")
+    session = repository.update_signal_discovery_session(
+        session["session_id"],
+        status="walk_forward_running",
+    )
+    try:
+        ref = _signal_discovery_data_ref(market_data_repository, session)
+        contract = session["frozen_target"]
+        if contract.get("source_data", {}).get("dataset_id") != session["dataset_id"]:
+            raise ValueError("frozen target dataset does not match the discovery session")
+        selected_target = contract["selected_target"]
+        read_end = session["walk_forward_end"] + timedelta(
+            hours=float(selected_target["horizon_hours"]),
+            minutes=int(selected_target["entry_delay_minutes"]),
+        )
+        candles = read_candles_from_ref(
+            ref,
+            workspace_root=workspace_root,
+            start=session["walk_forward_start"],
+            end=read_end,
+        )
+        result = run_fixed_target_window(
+            candles=candles,
+            window_start=session["walk_forward_start"],
+            window_end=session["walk_forward_end"],
+            selected_target=selected_target,
+        )
+        artifact_root = _signal_discovery_artifact_root(session, workspace_root=workspace_root)
+        artifact_paths = materialize_walk_forward_atlas(
+            artifact_root=artifact_root,
+            timestamp_labels=result["timestamp_labels"],
+            episodes=result["episodes"],
+            summary=result["summary"],
+        )
+        summary = {
+            **(session.get("summary") or {}),
+            "walk_forward": result["summary"],
+            "walk_forward_artifacts": {
+                key: str(path) for key, path in artifact_paths.items()
+            },
+        }
+        write_session_manifest(
+            artifact_root=artifact_root,
+            manifest={
+                "session_id": session["session_id"],
+                "status": "walk_forward_ready",
+                "dataset_id": session["dataset_id"],
+                "training_artifacts": summary.get("artifacts", {}),
+                "walk_forward_artifacts": summary["walk_forward_artifacts"],
+                "target_config_hash": contract["config_hash"],
+            },
+        )
+        updated = repository.update_signal_discovery_session(
+            session["session_id"],
+            status="walk_forward_ready",
+            summary=summary,
+        )
+        return {"session": updated, "walk_forward": result["summary"]}
+    except Exception as exc:
+        _fail_signal_discovery_session(repository, session=session, exc=exc)
+        raise
 
 
 def _execute_stage0_candidate_job(
@@ -532,6 +784,84 @@ def _stage1_session(repository: Any, session_id: str) -> dict[str, Any]:
     if session is None:
         raise ValueError(f"Stage 1 session not found: {session_id}")
     return session
+
+
+def _signal_discovery_session(repository: Any, session_id: str) -> dict[str, Any]:
+    session = repository.get_signal_discovery_session(session_id)
+    if session is None:
+        raise ValueError(f"Signal discovery session not found: {session_id}")
+    return session
+
+
+def _signal_discovery_data_ref(
+    market_data_repository: Any,
+    session: dict[str, Any],
+) -> dict[str, Any]:
+    getter = getattr(market_data_repository, "get_ref", None)
+    ref = getter(session["dataset_id"]) if callable(getter) else None
+    if ref is None:
+        raise ValueError(f"signal discovery dataset not found: {session['dataset_id']}")
+    if ref.get("storage_backend") != "parquet":
+        raise ValueError("signal discovery requires canonical Parquet data")
+    if str(ref.get("asset") or "").upper() != str(session["asset"]).upper():
+        raise ValueError("signal discovery dataset asset does not match the session")
+    if ref.get("data_type") != "candles" or ref.get("timeframe") != "5m":
+        raise ValueError("signal discovery requires canonical 5m candles")
+    return ref
+
+
+def _signal_discovery_oi_rows(
+    *,
+    market_data_repository: Any,
+    workspace_root: Path,
+    config: dict[str, Any],
+    start: datetime,
+    end: datetime,
+) -> list[dict[str, Any]]:
+    dataset_id = config.get("oi_dataset_id")
+    if not dataset_id:
+        return []
+    getter = getattr(market_data_repository, "get_ref", None)
+    ref = getter(str(dataset_id)) if callable(getter) else None
+    if ref is None:
+        raise ValueError(f"configured OI dataset not found: {dataset_id}")
+    return read_rows_from_ref(
+        ref,
+        workspace_root=workspace_root,
+        start=start,
+        end=end,
+    )
+
+
+def _signal_discovery_artifact_root(
+    session: dict[str, Any],
+    *,
+    workspace_root: Path,
+) -> Path:
+    root = Path(session["artifact_root"])
+    return root if root.is_absolute() else workspace_root / root
+
+
+def _fail_signal_discovery_session(
+    repository: Any,
+    *,
+    session: dict[str, Any],
+    exc: Exception,
+) -> None:
+    try:
+        repository.update_signal_discovery_session(
+            session["session_id"],
+            status="failed",
+            summary={
+                **(session.get("summary") or {}),
+                "last_error": {
+                    "message": str(exc),
+                    "type": exc.__class__.__name__,
+                },
+            },
+        )
+    except Exception:
+        pass
 
 
 def _run_stage0_candidate(

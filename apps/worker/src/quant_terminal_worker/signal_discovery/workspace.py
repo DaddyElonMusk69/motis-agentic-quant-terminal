@@ -59,6 +59,25 @@ def write_session_manifest(
     return payload
 
 
+def materialize_walk_forward_atlas(
+    *,
+    artifact_root: str | Path,
+    timestamp_labels: Sequence[Mapping[str, Any]],
+    episodes: Sequence[Mapping[str, Any]],
+    summary: Mapping[str, Any],
+) -> dict[str, Path]:
+    root = Path(artifact_root) / "walk_forward"
+    paths = {
+        "walk_forward_timestamp_labels": root / "walk_forward_timestamp_labels.parquet",
+        "walk_forward_episodes": root / "walk_forward_episodes.parquet",
+        "walk_forward_summary": root / "walk_forward_summary.json",
+    }
+    _atomic_write_parquet(paths["walk_forward_timestamp_labels"], timestamp_labels)
+    _atomic_write_parquet(paths["walk_forward_episodes"], episodes)
+    _atomic_write_json(paths["walk_forward_summary"], summary)
+    return paths
+
+
 def freeze_target_contract(
     *,
     artifact_root: str | Path,

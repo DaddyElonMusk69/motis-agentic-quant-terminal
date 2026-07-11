@@ -263,29 +263,29 @@ git commit -m "feat: persist signal discovery sessions"
 - Modify: `apps/worker/src/quant_terminal_worker/job_routing.py`
 - Test: `tests/test_worker_jobs.py`
 
-- [ ] **Step 1: Add failing worker-job tests**
+- [x] **Step 1: Add failing worker-job tests**
 
 Register a raw 5m Parquet ref, create a discovery session, execute `signal_discovery_atlas`, and assert training artifacts exist while no WF labels exist. Freeze a target, execute `signal_discovery_walk_forward`, and assert WF artifacts use only the frozen risk percentage.
 
-- [ ] **Step 2: Run focused tests**
+- [x] **Step 2: Run focused tests**
 
 Run: `pytest -q tests/test_worker_jobs.py -k signal_discovery`
 
 Expected: unsupported job type failures.
 
-- [ ] **Step 3: Implement job handlers**
+- [x] **Step 3: Implement job handlers**
 
 Add research-queue routes for `signal_discovery_atlas`, `signal_discovery_walk_forward`, `signal_discovery_engine_evaluation`, and `signal_discovery_handoff`. Atlas jobs read canonical candles through `MarketDataReader`, extend the read end by the maximum horizon only for forward outcome availability, call the domain functions, write artifacts, and update session status. The WF handler must require `target_frozen` and use exactly one frozen `risk_pct`.
 
 The atlas job must materialize all training-only evidence in one successful lifecycle transition: `training_timestamp_labels.parquet`, `training_episodes.parquet`, `training_features.parquet`, `training_hard_negatives.parquet`, and `r_feasibility.json`. If any artifact write fails, do not mark the session `atlas_ready`.
 
-- [ ] **Step 4: Verify job lifecycle**
+- [x] **Step 4: Verify job lifecycle**
 
 Run: `pytest -q tests/test_worker_jobs.py -k signal_discovery`
 
 Expected: training/WF jobs complete and enforce sealed split ordering.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/worker/src/quant_terminal_worker/jobs.py apps/worker/src/quant_terminal_worker/job_routing.py tests/test_worker_jobs.py

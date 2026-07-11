@@ -487,6 +487,53 @@ def run_training_atlas(
     }
 
 
+def run_fixed_target_window(
+    *,
+    candles: Sequence[MarketDataCandle],
+    window_start: datetime,
+    window_end: datetime,
+    selected_target: Mapping[str, Any],
+) -> dict[str, Any]:
+    start = _as_utc(window_start)
+    end = _as_utc(window_end)
+    if start > end:
+        raise ValueError("fixed-target window_start must not follow window_end")
+    risk_pct = float(selected_target["selected_risk_pct"])
+    reward_multiple = float(selected_target["reward_multiple"])
+    stop_multiple = float(selected_target["stop_multiple"])
+    horizon_hours = float(selected_target["horizon_hours"])
+    entry_delay_minutes = int(selected_target["entry_delay_minutes"])
+    index = _CandleIndex(candles)
+    decisions = [timestamp for timestamp in index.timestamps if start <= timestamp <= end]
+    labels = [
+        _label_fixed_r_from_index(
+            index=index,
+            decision_ts=decision_ts,
+            entry_delay_minutes=entry_delay_minutes,
+            risk_pct=risk_pct,
+            reward_multiple=reward_multiple,
+            stop_multiple=stop_multiple,
+            horizon_hours=horizon_hours,
+        )
+        for decision_ts in decisions
+    ]
+    episodes = build_opportunity_episodes(labels)
+    summary = summarize_r_candidate(
+        scenario_results={(entry_delay_minutes, horizon_hours): labels},
+        risk_pct=risk_pct,
+        reward_multiple=reward_multiple,
+        stop_multiple=stop_multiple,
+        fee_bps_per_side=float(selected_target.get("fee_bps_per_side") or 0.0),
+        slippage_bps_per_side=float(selected_target.get("slippage_bps_per_side") or 0.0),
+        primary_scenario=(entry_delay_minutes, horizon_hours),
+    )
+    return {
+        "timestamp_labels": labels,
+        "episodes": episodes,
+        "summary": summary,
+    }
+
+
 def _label_indexed_direction(
     *,
     direction: Direction,
