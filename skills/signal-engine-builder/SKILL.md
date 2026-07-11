@@ -89,6 +89,19 @@ Use Stage 0A as an engine-quality feedback loop, not as a strategy-profitability
 - Do not bake Stage 0A labels, future excursion, or random-baseline results into emitted signal packets. Stage 0A is an evaluation artifact only.
 - Keep Stage 0A separate from legacy Stage 0 scoring: information can guide whether to continue, while threshold calibration and ground-truth labeling remain downstream compatibility artifacts.
 
+## Outcome-First Discovery
+
+Use this workflow when the task is driven by a frozen fixed-R opportunity target rather than an existing event hypothesis.
+
+- Treat only the prompt-listed training-only target, timestamp labels, episodes, causal features, and matched hard negatives as discovery evidence. Never inspect walk-forward, validation, locked OOS, live-result, or future-outcome artifacts while researching or building the engine.
+- Start from episode-level evidence. Determine whether opportunity episodes differ from matched neutral timestamps through a plausible, point-in-time market mechanism that recurs across broad periods and regimes. Timestamp-level row count alone is not independent evidence because adjacent labels belong to the same opportunity episode.
+- Compare competing causal hypotheses and record their evidence, stability, failure cases, and rejection criteria in the requested `engine_research_rationale.md` before choosing thresholds or event rules.
+- Score a candidate directly against the frozen fixed-R target using training labels. Report episode precision/recall, timestamp coverage, matched-hard-negative false-positive rate, monthly stability, cadence, and overlap behavior; do not substitute Stage 0A information lift or aggregate directional accuracy for direct target evaluation.
+- Keep outcome rows out of packets and implementation fixtures. Do not encode exact opportunity timestamps, episode ids, signal ids, exact dates, or date-specific branches in engine rules, tests, or rationale.
+- Build only a neutral engine; any directional inference learned from causal packet evidence belongs in the paired base strategy. The frozen target defines evaluation and must not be copied into live packet fields.
+- Reject the candidate when there is no recurring causal mechanism, when evidence depends on a narrow calendar slice, or when causal features cannot separate episodes from hard negatives. Rejection is a successful research result and is preferable to manufacturing a permissive trigger.
+- The agent may use only training evidence to propose and fit the engine. Held-out walk-forward scoring is owned by the terminal after the registered engine id is attached.
+
 ## Build Workflow
 
 1. Pick the engine id, display name, version, default parameters, and required Parquet data.

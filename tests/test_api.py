@@ -112,9 +112,14 @@ def test_signal_discovery_api_lifecycle_and_validation(tmp_path, monkeypatch):
     assert (artifact_root / "target/frozen_target.json").is_file()
     assert not (artifact_root / "walk_forward").exists()
 
+    generate_prompt_response = client.post(
+        "/api/v1/research/signal-discovery-sessions/discovery-btc-api/engine-builder-prompt"
+    )
+    assert generate_prompt_response.status_code == 200
+    assert generate_prompt_response.json()["prompt_type"] == "signal_discovery_engine_builder"
+    assert "$signal-engine-builder" in generate_prompt_response.json()["prompt"]
     prompt_path = artifact_root / "prompt/engine_builder_prompt.md"
-    prompt_path.parent.mkdir(parents=True)
-    prompt_path.write_text("Use $signal-engine-builder with training-only evidence.\n")
+    assert prompt_path.is_file()
     prompt_response = client.get(
         "/api/v1/research/signal-discovery-sessions/discovery-btc-api/engine-builder-prompt"
     )

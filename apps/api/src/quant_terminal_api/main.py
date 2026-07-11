@@ -56,6 +56,7 @@ from quant_terminal_worker.signal_discovery.workspace import (
     freeze_target_contract,
     write_session_manifest,
 )
+from quant_terminal_worker.signal_discovery.prompt import generate_engine_builder_prompt
 from quant_terminal_worker.stage1.workspace import materialize_stage1_session_workspace
 from quant_terminal_worker.stage1.workspace import create_stage1_iteration_workspace
 from quant_terminal_worker.stage1.workspace import build_stage1_gate_summary
@@ -1024,6 +1025,24 @@ def create_app(
         if not prompt_path.is_file():
             raise HTTPException(status_code=409, detail="Engine builder prompt has not been generated")
         return {"session_id": session_id, "prompt": prompt_path.read_text(), "path": str(prompt_path)}
+
+    @app.post(
+        "/api/v1/research/signal-discovery-sessions/{session_id}/engine-builder-prompt"
+    )
+    def generate_signal_discovery_engine_builder_prompt(session_id: str) -> dict[str, Any]:
+        session = _signal_discovery_api_session(get_runtime_repository(), session_id)
+        if session.get("target_version") is None or not session.get("frozen_target"):
+            raise HTTPException(
+                status_code=409,
+                detail="Target must be frozen before prompt generation",
+            )
+        try:
+            return generate_engine_builder_prompt(
+                workspace_root=Path.cwd(),
+                artifact_root=_signal_discovery_api_artifact_root(session),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/v1/research/signal-discovery-sessions/{session_id}/walk-forward")
     def run_signal_discovery_walk_forward(session_id: str) -> dict[str, Any]:

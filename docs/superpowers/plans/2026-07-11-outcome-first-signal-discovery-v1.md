@@ -332,27 +332,27 @@ git commit -m "feat: expose signal discovery sessions api"
 - Modify: `skills/signal-engine-builder/SKILL.md`
 - Test: `tests/test_signal_discovery_prompt.py`
 
-- [ ] **Step 1: Write failing prompt tests**
+- [x] **Step 1: Write failing prompt tests**
 
 Assert the prompt names `$signal-engine-builder`, the frozen target, training label/episode/feature/hard-negative paths, the engine registry and paired strategy destinations, and required evaluation. Assert it does not contain WF label paths, exact opportunity timestamps, or embedded outcome rows.
 
-- [ ] **Step 2: Run prompt tests**
+- [x] **Step 2: Run prompt tests**
 
 Run: `pytest -q tests/test_signal_discovery_prompt.py`
 
 Expected: missing prompt module failure.
 
-- [ ] **Step 3: Implement deterministic prompt generation**
+- [x] **Step 3: Implement deterministic prompt generation**
 
 Render a prompt that authorizes one agent to research, reject or implement, persist `engine_research_rationale.md`, build a neutral engine and paired strategy, run contract/parity tests, and identify its engine id for evaluation. Add an Outcome-First Discovery section to the workspace skill requiring train-only artifacts, episode-level evidence, direct target scoring, and rejection when no causal mechanism recurs.
 
-- [ ] **Step 4: Verify prompt and skill content**
+- [x] **Step 4: Verify prompt and skill content**
 
 Run: `pytest -q tests/test_signal_discovery_prompt.py`
 
 Expected: prompt allowlist and leakage tests pass.
 
-- [ ] **Step 5: Commit the workspace version**
+- [x] **Step 5: Commit the workspace version**
 
 ```bash
 git add apps/worker/src/quant_terminal_worker/signal_discovery/prompt.py skills/signal-engine-builder/SKILL.md tests/test_signal_discovery_prompt.py
