@@ -145,27 +145,27 @@ git commit -m "feat: summarize fixed-r opportunity episodes"
 - Create: `apps/worker/src/quant_terminal_worker/signal_discovery/features.py`
 - Test: `tests/test_signal_discovery_features.py`
 
-- [ ] **Step 1: Write failing causal-feature tests**
+- [x] **Step 1: Write failing causal-feature tests**
 
 Build fixture candles where future rows contain extreme values. Assert an episode-onset feature row includes only prior/available returns, ranges, realized volatility, volume z-score, and trend values. Add optional OI rows and assert 1h/4h/12h changes never use a row after the decision timestamp. Test deterministic hard negatives matched by month, UTC-hour block, and prior-volatility quintile.
 
-- [ ] **Step 2: Run focused tests**
+- [x] **Step 2: Run focused tests**
 
 Run: `pytest -q tests/test_signal_discovery_features.py`
 
 Expected: missing feature module failure.
 
-- [ ] **Step 3: Implement causal snapshots and matching**
+- [x] **Step 3: Implement causal snapshots and matching**
 
 Implement `build_causal_feature_rows` with bounded prior windows for 1h/4h/12h/24h returns, 4h/24h realized volatility, 4h/24h high-low range, prior 7-day volume z-score, and optional 1h/4h/12h OI changes. Implement `select_hard_negatives` that deterministically chooses NEUTRAL timestamps from the same calendar month, six-hour UTC block, and prior-volatility quintile as episode timestamps. Exclude WF rows and all post-event outcomes from both artifacts.
 
-- [ ] **Step 4: Verify feature evidence**
+- [x] **Step 4: Verify feature evidence**
 
 Run: `pytest -q tests/test_signal_discovery_features.py`
 
 Expected: point-in-time and deterministic matching tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/worker/src/quant_terminal_worker/signal_discovery/features.py tests/test_signal_discovery_features.py
