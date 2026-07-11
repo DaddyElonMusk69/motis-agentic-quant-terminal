@@ -21,6 +21,7 @@ from quant_terminal_api.db.models import (
     market_data_refs,
     owner_states,
     score_summaries,
+    signal_discovery_sessions,
     signal_engine_versions,
     signal_engines,
     signal_sets,
@@ -35,6 +36,33 @@ from quant_terminal_api.db.models import (
     wake_runs,
     worker_heartbeats,
 )
+
+_SIGNAL_DISCOVERY_TRANSITIONS = {
+    "draft": {"atlas_running", "atlas_ready", "failed"},
+    "atlas_running": {"atlas_ready", "failed"},
+    "atlas_ready": {"atlas_running", "target_frozen", "failed"},
+    "target_frozen": {"walk_forward_running", "candidate_attached", "failed"},
+    "walk_forward_running": {"walk_forward_ready", "failed"},
+    "walk_forward_ready": {"candidate_attached", "evaluation_running", "failed"},
+    "candidate_attached": {"evaluation_running", "failed"},
+    "evaluation_running": {"evaluated", "failed"},
+    "evaluated": {"candidate_attached", "accepted", "failed"},
+    "accepted": {"handoff_running", "failed"},
+    "handoff_running": {"handed_off", "failed"},
+    "handed_off": set(),
+    "failed": {"atlas_running", "walk_forward_running", "evaluation_running", "handoff_running"},
+}
+_SIGNAL_DISCOVERY_FROZEN_STATUSES = {
+    "target_frozen",
+    "walk_forward_running",
+    "walk_forward_ready",
+    "candidate_attached",
+    "evaluation_running",
+    "evaluated",
+    "accepted",
+    "handoff_running",
+    "handed_off",
+}
 
 
 class RuntimeRepository:
@@ -1164,6 +1192,158 @@ class RuntimeRepository:
         }
         with self.engine.begin() as connection:
             connection.execute(self._insert_stage1_research_session_ignore_conflict(values))
+
+    def create_signal_discovery_session(self, session: dict[str, Any]) -> dict[str, Any]:
+        required = {
+            "session_id",
+            "name",
+            "asset",
+            "instrument",
+            "dataset_id",
+            "research_start",
+            "research_end",
+            "walk_forward_start",
+            "walk_forward_end",
+            "artifact_root",
+            "config",
+        }
+        missing = sorted(required - session.keys())
+        if missing:
+            raise ValueError(f"signal discovery session is missing fields: {', '.join(missing)}")
+        now = datetime.now(UTC)
+        values = {
+            **session,
+            "asset": str(session["asset"]).upper(),
+            "research_start": _coerce_datetime(session["research_start"]),
+            "research_end": _coerce_datetime(session["research_end"]),
+            "walk_forward_start": _coerce_datetime(session["walk_forward_start"]),
+            "walk_forward_end": _coerce_datetime(session["walk_forward_end"]),
+            "status": str(session.get("status") or "draft"),
+            "config": _json_safe(session.get("config") or {}),
+            "summary": _json_safe(session.get("summary") or {}),
+            "frozen_target": _json_safe(session.get("frozen_target") or {}),
+            "target_version": session.get("target_version"),
+            "candidate_engine_id": session.get("candidate_engine_id"),
+            "candidate_signal_set_key": session.get("candidate_signal_set_key"),
+            "evaluation": _json_safe(session.get("evaluation") or {}),
+            "handoff": _json_safe(session.get("handoff") or {}),
+            "created_at": now,
+            "updated_at": now,
+        }
+        if values["status"] != "draft":
+            raise ValueError("new signal discovery sessions must start in draft status")
+        with self.engine.begin() as connection:
+            connection.execute(insert(signal_discovery_sessions).values(values))
+        stored = self.get_signal_discovery_session(str(session["session_id"]))
+        if stored is None:
+            raise RuntimeError("signal discovery session was not persisted")
+        return stored
+
+    def list_signal_discovery_sessions(self) -> list[dict[str, Any]]:
+        statement = select(signal_discovery_sessions).order_by(
+            signal_discovery_sessions.c.created_at.desc(),
+            signal_discovery_sessions.c.session_id,
+        )
+        with self.engine.connect() as connection:
+            return [
+                _normalize_signal_discovery_session_row(dict(row))
+                for row in connection.execute(statement).mappings()
+            ]
+
+    def get_signal_discovery_session(self, session_id: str) -> dict[str, Any] | None:
+        statement = select(signal_discovery_sessions).where(
+            signal_discovery_sessions.c.session_id == session_id
+        )
+        with self.engine.connect() as connection:
+            row = connection.execute(statement).mappings().first()
+            return _normalize_signal_discovery_session_row(dict(row)) if row else None
+
+    def update_signal_discovery_session(
+        self,
+        session_id: str,
+        **changes: Any,
+    ) -> dict[str, Any]:
+        allowed_fields = {
+            "status",
+            "config",
+            "summary",
+            "frozen_target",
+            "target_version",
+            "candidate_engine_id",
+            "candidate_signal_set_key",
+            "evaluation",
+            "handoff",
+        }
+        unsupported = sorted(set(changes) - allowed_fields)
+        if unsupported:
+            raise ValueError(f"unsupported signal discovery updates: {', '.join(unsupported)}")
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                select(signal_discovery_sessions).where(
+                    signal_discovery_sessions.c.session_id == session_id
+                )
+            ).mappings().first()
+            if row is None:
+                raise ValueError(f"signal discovery session not found: {session_id}")
+            current = _normalize_signal_discovery_session_row(dict(row))
+            current_status = str(current["status"])
+            next_status = str(changes.get("status") or current_status)
+            if next_status != current_status and next_status not in _SIGNAL_DISCOVERY_TRANSITIONS.get(
+                current_status, set()
+            ):
+                raise ValueError(
+                    f"illegal signal discovery status transition: {current_status} -> {next_status}"
+                )
+            if (
+                current_status in _SIGNAL_DISCOVERY_FROZEN_STATUSES
+                or current.get("target_version") is not None
+                or bool(current.get("frozen_target"))
+            ):
+                if "config" in changes and changes["config"] != current["config"]:
+                    raise ValueError("signal discovery config is immutable after target freeze")
+                if (
+                    "frozen_target" in changes
+                    and changes["frozen_target"] != current["frozen_target"]
+                ):
+                    raise ValueError("signal discovery target is immutable after target freeze")
+                if (
+                    "target_version" in changes
+                    and changes["target_version"] != current["target_version"]
+                ):
+                    raise ValueError("signal discovery target is immutable after target freeze")
+            if next_status == "target_frozen":
+                target = changes.get("frozen_target") or current.get("frozen_target")
+                version = changes.get("target_version") or current.get("target_version")
+                if not target or version is None:
+                    raise ValueError("target_frozen status requires frozen_target and target_version")
+
+            values = {
+                key: _json_safe(value)
+                if key in {"config", "summary", "frozen_target", "evaluation", "handoff"}
+                else value
+                for key, value in changes.items()
+            }
+            values["updated_at"] = datetime.now(UTC)
+            connection.execute(
+                signal_discovery_sessions.update()
+                .where(signal_discovery_sessions.c.session_id == session_id)
+                .values(**values)
+            )
+            updated = connection.execute(
+                select(signal_discovery_sessions).where(
+                    signal_discovery_sessions.c.session_id == session_id
+                )
+            ).mappings().one()
+            return _normalize_signal_discovery_session_row(dict(updated))
+
+    def delete_signal_discovery_session(self, session_id: str) -> bool:
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                signal_discovery_sessions.delete().where(
+                    signal_discovery_sessions.c.session_id == session_id
+                )
+            )
+            return bool(result.rowcount)
 
     def list_stage1_research_sessions(self) -> list[dict[str, Any]]:
         statement = select(stage1_research_sessions).order_by(stage1_research_sessions.c.created_at.desc())
@@ -2425,6 +2605,23 @@ def _normalize_signal_set_row(row: dict[str, Any]) -> dict[str, Any]:
         "packet_end_ts": _coerce_optional_datetime(row.get("end_ts")),
         "coverage_start_ts": _coerce_optional_datetime(coverage_start) or _coerce_optional_datetime(row.get("start_ts")),
         "coverage_end_ts": _coerce_optional_datetime(coverage_end) or _coerce_optional_datetime(row.get("end_ts")),
+    }
+
+
+def _normalize_signal_discovery_session_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **row,
+        "research_start": _coerce_datetime(row["research_start"]),
+        "research_end": _coerce_datetime(row["research_end"]),
+        "walk_forward_start": _coerce_datetime(row["walk_forward_start"]),
+        "walk_forward_end": _coerce_datetime(row["walk_forward_end"]),
+        "config": row.get("config") or {},
+        "summary": row.get("summary") or {},
+        "frozen_target": row.get("frozen_target") or {},
+        "evaluation": row.get("evaluation") or {},
+        "handoff": row.get("handoff") or {},
+        "created_at": _coerce_datetime(row["created_at"]),
+        "updated_at": _coerce_datetime(row["updated_at"]),
     }
 
 

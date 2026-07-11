@@ -295,6 +295,38 @@ stage1_research_sessions = Table(
     UniqueConstraint("source_candidate_id", "strategy_id", "strategy_version"),
 )
 
+signal_discovery_sessions = Table(
+    "signal_discovery_sessions",
+    metadata,
+    Column("session_id", String, primary_key=True),
+    Column("name", String, nullable=False),
+    Column("asset", String, nullable=False),
+    Column("instrument", String, nullable=False),
+    Column("dataset_id", String, nullable=False),
+    Column("research_start", DateTime(timezone=True), nullable=False),
+    Column("research_end", DateTime(timezone=True), nullable=False),
+    Column("walk_forward_start", DateTime(timezone=True), nullable=False),
+    Column("walk_forward_end", DateTime(timezone=True), nullable=False),
+    Column("artifact_root", Text, nullable=False),
+    Column("status", String, nullable=False),
+    Column("config", JSON_DOCUMENT, nullable=False, default=dict),
+    Column("summary", JSON_DOCUMENT, nullable=False, default=dict),
+    Column("frozen_target", JSON_DOCUMENT, nullable=False, default=dict),
+    Column("target_version", Integer, nullable=True),
+    Column("candidate_engine_id", String, nullable=True),
+    Column("candidate_signal_set_key", String, nullable=True),
+    Column("evaluation", JSON_DOCUMENT, nullable=False, default=dict),
+    Column("handoff", JSON_DOCUMENT, nullable=False, default=dict),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+Index(
+    "ix_signal_discovery_sessions_status_created",
+    signal_discovery_sessions.c.status,
+    signal_discovery_sessions.c.created_at,
+)
+
 strategy_development_runs = Table(
     "strategy_development_runs",
     metadata,

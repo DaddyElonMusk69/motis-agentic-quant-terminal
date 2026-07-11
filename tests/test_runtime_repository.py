@@ -1,9 +1,109 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import create_engine, insert, select, update
 
 from quant_terminal_api.db.models import decisions, deployment_routes, execution_bundles, metadata, owner_states, signal_sets, signals, stage1_research_sessions, wake_runs
 from quant_terminal_api.repositories.runtime import RuntimeRepository
+
+
+def test_runtime_repository_persists_and_freezes_signal_discovery_session():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    session = {
+        "session_id": "discovery-btc-fixed-r-v1",
+        "name": "BTC Fixed-R Daily Opportunity",
+        "asset": "btc",
+        "instrument": "BTC-USDT-SWAP",
+        "dataset_id": "okx-btc-raw-5m-v7",
+        "research_start": "2025-03-01T00:00:00Z",
+        "research_end": "2026-03-29T23:55:00Z",
+        "walk_forward_start": "2026-04-01T00:00:00Z",
+        "walk_forward_end": "2026-05-30T23:55:00Z",
+        "artifact_root": "dev/signal_discovery_sessions/discovery-btc-fixed-r-v1",
+        "status": "draft",
+        "config": {
+            "risk_values": [0.75, 1.0, 1.25],
+            "reward_multiple": 2.0,
+            "stop_multiple": 1.0,
+            "horizon_hours": [36, 48],
+        },
+    }
+
+    created = repository.create_signal_discovery_session(session)
+    atlas_ready = repository.update_signal_discovery_session(
+        session["session_id"],
+        status="atlas_ready",
+        summary={"r_summaries": [{"risk_pct": 1.0, "episode_count": 120}]},
+    )
+    frozen_target = {
+        "schema_version": "signal_discovery_target.v1",
+        "target_version": 1,
+        "selected_target": {"selected_risk_pct": 1.0},
+        "config_hash": "a" * 64,
+    }
+    frozen = repository.update_signal_discovery_session(
+        session["session_id"],
+        status="target_frozen",
+        frozen_target=frozen_target,
+        target_version=1,
+    )
+
+    assert created["asset"] == "BTC"
+    assert created["research_start"].tzinfo is not None
+    assert atlas_ready["summary"]["r_summaries"][0]["episode_count"] == 120
+    assert frozen["status"] == "target_frozen"
+    assert frozen["frozen_target"] == frozen_target
+    assert frozen["target_version"] == 1
+    assert repository.list_signal_discovery_sessions()[0]["session_id"] == session["session_id"]
+    assert repository.get_signal_discovery_session(session["session_id"])["config"] == session[
+        "config"
+    ]
+
+    with pytest.raises(ValueError, match="config is immutable"):
+        repository.update_signal_discovery_session(
+            session["session_id"],
+            config={**session["config"], "risk_values": [2.0]},
+        )
+    with pytest.raises(ValueError, match="target is immutable"):
+        repository.update_signal_discovery_session(
+            session["session_id"],
+            frozen_target={**frozen_target, "config_hash": "b" * 64},
+        )
+
+    assert repository.delete_signal_discovery_session(session["session_id"]) is True
+    assert repository.get_signal_discovery_session(session["session_id"]) is None
+
+
+def test_runtime_repository_rejects_illegal_signal_discovery_transition():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    repository.create_signal_discovery_session(
+        {
+            "session_id": "discovery-btc-invalid-transition",
+            "name": "BTC",
+            "asset": "BTC",
+            "instrument": "BTC-USDT-SWAP",
+            "dataset_id": "okx-btc-raw-5m-v7",
+            "research_start": "2025-03-01T00:00:00Z",
+            "research_end": "2026-03-29T23:55:00Z",
+            "walk_forward_start": "2026-04-01T00:00:00Z",
+            "walk_forward_end": "2026-05-30T23:55:00Z",
+            "artifact_root": "dev/signal_discovery_sessions/discovery-btc-invalid-transition",
+            "status": "draft",
+            "config": {"risk_values": [1.0]},
+        }
+    )
+
+    with pytest.raises(ValueError, match="illegal signal discovery status transition"):
+        repository.update_signal_discovery_session(
+            "discovery-btc-invalid-transition",
+            status="target_frozen",
+            frozen_target={"target_version": 1},
+            target_version=1,
+        )
 
 
 def test_runtime_repository_persists_signal_engine_required_data():

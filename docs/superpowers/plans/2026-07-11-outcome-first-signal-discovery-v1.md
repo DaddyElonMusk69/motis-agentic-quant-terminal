@@ -226,29 +226,30 @@ git commit -m "feat: persist signal discovery artifacts"
 **Files:**
 - Modify: `apps/api/src/quant_terminal_api/db/models.py`
 - Modify: `apps/api/src/quant_terminal_api/repositories/runtime.py`
+- Create: `db/migrations/versions/0029_signal_discovery_sessions.py`
 - Test: `tests/test_runtime_repository.py`
 
-- [ ] **Step 1: Add failing repository tests**
+- [x] **Step 1: Add failing repository tests**
 
 Create a SQLite test session, list it, transition `draft -> atlas_ready -> target_frozen`, and reject changes to `config` or `frozen_target` after freeze. Test deletion and lookup by id.
 
-- [ ] **Step 2: Run repository tests**
+- [x] **Step 2: Run repository tests**
 
 Run: `pytest -q tests/test_runtime_repository.py -k signal_discovery`
 
 Expected: failures because the table and repository methods are absent.
 
-- [ ] **Step 3: Add the table and repository API**
+- [x] **Step 3: Add the table and repository API**
 
 Add `signal_discovery_sessions` with columns: `session_id`, `name`, `asset`, `instrument`, `dataset_id`, `research_start`, `research_end`, `walk_forward_start`, `walk_forward_end`, `artifact_root`, `status`, `config`, `summary`, `frozen_target`, `target_version`, `candidate_engine_id`, `candidate_signal_set_key`, `evaluation`, `handoff`, `created_at`, and `updated_at`. Add repository methods `create_signal_discovery_session`, `list_signal_discovery_sessions`, `get_signal_discovery_session`, `update_signal_discovery_session`, and `delete_signal_discovery_session`.
 
-- [ ] **Step 4: Verify repository behavior**
+- [x] **Step 4: Verify repository behavior**
 
 Run: `pytest -q tests/test_runtime_repository.py -k signal_discovery`
 
 Expected: all discovery repository tests pass on SQLite.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/api/src/quant_terminal_api/db/models.py apps/api/src/quant_terminal_api/repositories/runtime.py tests/test_runtime_repository.py
