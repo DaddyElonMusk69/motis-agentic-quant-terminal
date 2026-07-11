@@ -513,6 +513,7 @@ Run:
 
 ```bash
 pytest -q \
+  tests/test_signal_discovery_end_to_end.py \
   tests/test_signal_discovery_atlas.py \
   tests/test_signal_discovery_features.py \
   tests/test_signal_discovery_workspace.py \
@@ -569,5 +570,7 @@ Before marking the goal complete, collect authoritative evidence for every Defin
 - Prompt test and rendered prompt prove training-only context plus the required skill contract.
 - Candidate evaluation artifact proves precision, coverage, direct R outcomes, direction, parity, and WF slices.
 - Handoff artifact, accepted Stage 0 candidate, and successfully created Stage 1 session prove no manual artifact surgery.
+- `tests/test_signal_discovery_end_to_end.py` proves one fresh session traverses the complete Parquet-to-Stage-1 lifecycle through public APIs and real queued job handlers without direct session or artifact mutation.
 - Stage 2/3 tests prove the frozen target is not recalibrated downstream.
-- Focused tests, regression comparison, static checks, and the frontend production build prove automated coverage. Interactive UX quality remains unverified under the explicit waiver.
+- The final focused suite passed `213` tests. The repository-wide suite passed `629` tests and reproduced the same 10 checkpoint failures in legacy registry/bundle fixtures and the pre-existing `pgrep` script check; no Signal Discovery regression was added.
+- Static checks and the frontend production build prove automated coverage. Interactive UX quality remains unverified under the explicit waiver.

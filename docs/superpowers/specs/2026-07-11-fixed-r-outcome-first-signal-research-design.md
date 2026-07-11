@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented on `codex/outcome-first-signal-discovery-v1`. Backend contracts, queued jobs, API lifecycle, engine prompt, candidate evaluation, Stage handoff, downstream fixed-target preservation, and the v2 workspace are covered by focused tests. The user waived interactive browser and frontend end-to-end acceptance on 2026-07-11; automated frontend build verification passed before that waiver.
+Implemented on `codex/outcome-first-signal-discovery-v1`. Backend contracts, queued jobs, API lifecycle, engine prompt, candidate evaluation, Stage handoff, downstream fixed-target preservation, and the v2 workspace are covered by focused tests. A continuous integration test proves a fresh canonical Parquet session can reach Stage 1 without direct session or artifact mutation. The user waived interactive browser and frontend end-to-end acceptance on 2026-07-11; automated frontend build verification passed before that waiver.
 
 ## Objective
 
