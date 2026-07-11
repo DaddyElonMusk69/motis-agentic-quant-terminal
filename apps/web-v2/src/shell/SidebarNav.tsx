@@ -19,6 +19,7 @@ const primaryItems: Array<{
 ];
 
 const researchItems: Array<{ label: string; route: AppRoute }> = [
+  { label: "Signal Discovery", route: "/research/discovery" },
   { label: "Training Pools", route: "/research/stage0" },
   { label: "Development", route: "/research/development" }
 ];

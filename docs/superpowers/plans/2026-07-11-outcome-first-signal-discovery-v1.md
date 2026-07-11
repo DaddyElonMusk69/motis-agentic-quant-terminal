@@ -475,25 +475,25 @@ git commit -m "feat: preserve discovery targets downstream"
 - Modify: `apps/web-v2/src/shell/TerminalShell.tsx`
 - Modify: `apps/web-v2/src/styles/shell.css`
 
-- [ ] **Step 1: Add typed discovery API contracts**
+- [x] **Step 1: Add typed discovery API contracts**
 
 Define `SignalDiscoverySession`, `SignalDiscoveryConfig`, `SignalDiscoveryRResult`, `SignalDiscoveryTarget`, and lifecycle functions for create/list/get/delete/run-atlas/freeze/get-prompt/attach-candidate/evaluate/handoff. Use the existing `requestJson` and async job response types.
 
-- [ ] **Step 2: Add the route and workspace shell**
+- [x] **Step 2: Add the route and workspace shell**
 
 Register `/research/discovery`, add `Signal Discovery` under R&D, and render `ResearchSignalDiscoveryPage`. Keep existing `/research/stage0` and `/research/development` behavior unchanged.
 
-- [ ] **Step 3: Implement the dense operational workflow**
+- [x] **Step 3: Implement the dense operational workflow**
 
 Build a split-pane page using existing `TerminalWorkbench`, `TerminalPanel`, `DataTable`, `StatusBadge`, `FieldRow`, modal, and job polling patterns. The left pane lists sessions. The right pane presents lifecycle actions and four unframed bands: Setup, R Feasibility, Frozen Target, and Engine Candidate. Use one `Generate Engine Builder Prompt` action after freeze; do not add a proposal prompt or automatic agent orchestration.
 
-- [ ] **Step 4: Add responsive styling and build**
+- [x] **Step 4: Add responsive styling and build**
 
 Add stable grid tracks, compact metric tables, non-overlapping modal fields, and mobile stacking under existing breakpoints. Run: `npm --workspace apps/web-v2 run build`.
 
 Expected: TypeScript and Vite build pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/web-v2/src/app/api.ts apps/web-v2/src/app/router.tsx apps/web-v2/src/shell/SidebarNav.tsx apps/web-v2/src/shell/TerminalShell.tsx apps/web-v2/src/pages/ResearchSignalDiscoveryPage.tsx apps/web-v2/src/styles/shell.css

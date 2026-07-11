@@ -4,6 +4,7 @@ import { DashboardPage } from "../pages/DashboardPage";
 import { DataPage } from "../pages/DataPage";
 import { EnginesPage } from "../pages/EnginesPage";
 import { ResearchDevelopmentPage } from "../pages/ResearchDevelopmentPage";
+import { ResearchSignalDiscoveryPage } from "../pages/ResearchSignalDiscoveryPage";
 import { ResearchStage0Page } from "../pages/ResearchStage0Page";
 import { TradingPage } from "../pages/TradingPage";
 import { SidebarNav } from "./SidebarNav";
@@ -18,6 +19,8 @@ export function TerminalShell() {
         return <EnginesPage />;
       case "/research/stage0":
         return <ResearchStage0Page />;
+      case "/research/discovery":
+        return <ResearchSignalDiscoveryPage />;
       case "/research/development":
         return <ResearchDevelopmentPage />;
       case "/trading":

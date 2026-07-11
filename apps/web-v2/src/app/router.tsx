@@ -4,6 +4,7 @@ export type AppRoute =
   | "/dashboard"
   | "/data"
   | "/engines"
+  | "/research/discovery"
   | "/research/stage0"
   | "/research/development"
   | "/trading";
@@ -12,6 +13,7 @@ const routes: AppRoute[] = [
   "/dashboard",
   "/data",
   "/engines",
+  "/research/discovery",
   "/research/stage0",
   "/research/development",
   "/trading"

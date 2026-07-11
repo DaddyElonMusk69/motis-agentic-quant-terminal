@@ -137,6 +137,128 @@ export type SignalSet = {
   manifest: Record<string, unknown>;
 };
 
+export type SignalDiscoveryConfig = {
+  risk_values: number[];
+  reward_multiple: number;
+  stop_multiple: number;
+  horizon_hours: number[];
+  entry_delays_minutes: number[];
+  fee_bps_per_side: number;
+  slippage_bps_per_side: number;
+  oi_dataset_id?: string | null;
+};
+
+export type SignalDiscoveryRResult = {
+  risk_pct: number;
+  primary?: {
+    timestamp_count?: number;
+    qualifying_timestamp_count?: number;
+    episode_count?: number;
+    neutral_count?: number;
+    ambiguous_count?: number;
+    direction_counts?: Record<string, number>;
+    monthly_episode_counts?: Record<string, number>;
+  };
+  primary_scenario?: {
+    entry_delay_minutes?: number;
+    horizon_hours?: number;
+  };
+  cost?: {
+    cost_in_r?: number;
+    net_reward_r?: number;
+    net_stop_r?: number;
+  };
+};
+
+export type SignalDiscoveryTarget = {
+  schema_version: string;
+  target_version: number;
+  session_id: string;
+  config_hash: string;
+  selected_target: {
+    selected_risk_pct: number;
+    reward_multiple: number;
+    stop_multiple: number;
+    horizon_hours: number;
+    entry_delay_minutes: number;
+    entry_semantics: string;
+    fee_bps_per_side?: number;
+    slippage_bps_per_side?: number;
+  };
+  source_data: Record<string, unknown>;
+  splits: Record<string, string>;
+};
+
+export type SignalDiscoverySliceMetrics = {
+  emitted_timestamp_count?: number;
+  opportunity_precision?: number;
+  episode_count?: number;
+  recalled_episode_count?: number;
+  episode_recall?: number;
+  directional_accuracy?: number;
+  entered_count?: number;
+  net_r_after_costs?: number;
+  expected_net_r_per_emitted_timestamp?: number;
+  target_label_counts?: Record<string, number>;
+};
+
+export type SignalDiscoveryEvaluation = {
+  schema_version?: string;
+  accepted?: boolean;
+  acceptance_rule?: string;
+  signal_engine_id?: string;
+  signal_set_key?: string;
+  evaluation_path?: string;
+  contracts?: Record<string, boolean>;
+  slices?: Record<"training" | "walk_forward", SignalDiscoverySliceMetrics>;
+};
+
+export type SignalDiscoverySession = {
+  session_id: string;
+  name: string;
+  asset: string;
+  instrument: string;
+  dataset_id: string;
+  research_start: string;
+  research_end: string;
+  walk_forward_start: string;
+  walk_forward_end: string;
+  artifact_root: string;
+  status: string;
+  config: SignalDiscoveryConfig;
+  summary: {
+    r_summaries?: SignalDiscoveryRResult[];
+    training_timestamp_label_count?: number;
+    training_episode_count?: number;
+    training_feature_count?: number;
+    training_hard_negative_count?: number;
+    walk_forward?: Record<string, unknown>;
+    last_error?: { message?: string; type?: string };
+  };
+  frozen_target: SignalDiscoveryTarget | Record<string, never>;
+  target_version?: number | null;
+  candidate_engine_id?: string | null;
+  candidate_signal_set_key?: string | null;
+  evaluation: SignalDiscoveryEvaluation;
+  handoff: {
+    universe_run_id?: string;
+    candidate_id?: string;
+    stage0_artifact_root?: string;
+  };
+  created_at: string;
+  updated_at: string;
+};
+
+export type SignalDiscoveryPrompt = {
+  prompt_type?: string;
+  session_id: string;
+  target_config_hash?: string;
+  prompt: string;
+  prompt_path?: string;
+  path?: string;
+  rationale_path?: string;
+};
+
 export type LiveSignalObservation = {
   observation_id: string;
   signal_engine_id: string;
@@ -1317,6 +1439,106 @@ export function fetchSignalEngines(): Promise<{ engines: SignalEngine[] }> {
 
 export function fetchSignalSets(signalEngineId: string): Promise<{ signal_sets: SignalSet[] }> {
   return requestJson<{ signal_sets: SignalSet[] }>(`/api/v1/signal-engines/${signalEngineId}/signal-sets`);
+}
+
+export function fetchSignalDiscoverySessions(): Promise<{ sessions: SignalDiscoverySession[] }> {
+  return requestJson<{ sessions: SignalDiscoverySession[] }>("/api/v1/research/signal-discovery-sessions");
+}
+
+export function fetchSignalDiscoverySession(sessionId: string): Promise<{ session: SignalDiscoverySession }> {
+  return requestJson<{ session: SignalDiscoverySession }>(`/api/v1/research/signal-discovery-sessions/${sessionId}`);
+}
+
+export function createSignalDiscoverySession(request: {
+  name: string;
+  asset: string;
+  instrument: string;
+  dataset_id: string;
+  research_start: string;
+  research_end: string;
+  walk_forward_start: string;
+  walk_forward_end: string;
+  risk_values: number[];
+  reward_multiple: number;
+  stop_multiple: number;
+  horizon_hours: number[];
+  entry_delays_minutes: number[];
+  fee_bps_per_side: number;
+  slippage_bps_per_side: number;
+  oi_dataset_id?: string | null;
+}): Promise<{ session: SignalDiscoverySession }> {
+  const sessionId = [
+    "discovery",
+    request.asset.toLowerCase(),
+    request.research_start.slice(0, 10),
+    request.walk_forward_end.slice(0, 10),
+    Date.now().toString(36)
+  ].join("-");
+  return requestJson<{ session: SignalDiscoverySession }>("/api/v1/research/signal-discovery-sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, ...request })
+  });
+}
+
+export function deleteSignalDiscoverySession(sessionId: string): Promise<{ status: string; session_id: string }> {
+  return requestJson(`/api/v1/research/signal-discovery-sessions/${sessionId}`, { method: "DELETE" });
+}
+
+export function runSignalDiscoveryAtlas(sessionId: string): Promise<AsyncJobResponse> {
+  return requestJson(`/api/v1/research/signal-discovery-sessions/${sessionId}/atlas`, { method: "POST" });
+}
+
+export function freezeSignalDiscoveryTarget(request: {
+  session_id: string;
+  selected_risk_pct: number;
+  horizon_hours: number;
+  entry_delay_minutes: number;
+}): Promise<{ session: SignalDiscoverySession; target: SignalDiscoveryTarget }> {
+  return requestJson(`/api/v1/research/signal-discovery-sessions/${request.session_id}/freeze`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      selected_risk_pct: request.selected_risk_pct,
+      horizon_hours: request.horizon_hours,
+      entry_delay_minutes: request.entry_delay_minutes
+    })
+  });
+}
+
+export function generateSignalDiscoveryPrompt(sessionId: string): Promise<SignalDiscoveryPrompt> {
+  return requestJson(`/api/v1/research/signal-discovery-sessions/${sessionId}/engine-builder-prompt`, { method: "POST" });
+}
+
+export function fetchSignalDiscoveryPrompt(sessionId: string): Promise<SignalDiscoveryPrompt> {
+  return requestJson(`/api/v1/research/signal-discovery-sessions/${sessionId}/engine-builder-prompt`);
+}
+
+export function runSignalDiscoveryWalkForward(sessionId: string): Promise<AsyncJobResponse> {
+  return requestJson(`/api/v1/research/signal-discovery-sessions/${sessionId}/walk-forward`, { method: "POST" });
+}
+
+export function attachSignalDiscoveryCandidate(request: {
+  session_id: string;
+  signal_engine_id: string;
+  signal_set_key: string;
+}): Promise<{ session: SignalDiscoverySession }> {
+  return requestJson(`/api/v1/research/signal-discovery-sessions/${request.session_id}/candidate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      signal_engine_id: request.signal_engine_id,
+      signal_set_key: request.signal_set_key
+    })
+  });
+}
+
+export function evaluateSignalDiscoveryCandidate(sessionId: string): Promise<AsyncJobResponse> {
+  return requestJson(`/api/v1/research/signal-discovery-sessions/${sessionId}/evaluate`, { method: "POST" });
+}
+
+export function handoffSignalDiscoveryCandidate(sessionId: string): Promise<AsyncJobResponse> {
+  return requestJson(`/api/v1/research/signal-discovery-sessions/${sessionId}/handoff`, { method: "POST" });
 }
 
 export function updateSignalEngine(signalEngineId: string, request: { name: string }): Promise<{ engine: SignalEngine }> {
