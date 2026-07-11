@@ -173,12 +173,18 @@ def run_stage3_local_variants(
     exact_result = (existing.get("exact_protection_result") or existing.get("exact_policy_result")) if existing else None
     if not exact_result:
         raise ValueError("Stage 3C local variants requires completed Stage 3B exact protection.")
-    local_configs = _local_variant_configs(
-        stage2_policy=context["stage2_policy"],
-        base_initial_sl_pct=context["risk_policy"]["initial_sl_pct"],
-        tp_levels=context["tp_levels"],
-        hard_exit_hours=context["hard_exit_hours"],
-    )
+    if context["fixed_target"] is not None:
+        local_configs = _fixed_target_protection_configs(
+            fixed_target=context["fixed_target"],
+            hard_exit_hours=context["hard_exit_hours"],
+        )
+    else:
+        local_configs = _local_variant_configs(
+            stage2_policy=context["stage2_policy"],
+            base_initial_sl_pct=context["risk_policy"]["initial_sl_pct"],
+            tp_levels=context["tp_levels"],
+            hard_exit_hours=context["hard_exit_hours"],
+        )
     local_results = [
         _score_policy_config(
             config=config,
@@ -243,14 +249,27 @@ def _prepare_stage3_context(
 
     stage2_policy = _load_stage2_exit_policy(promotion_root / "stage2_exit_policy.json")
     stage0_risk = _load_stage0_risk_policy(workspace_root=workspace_root, session=session)
-    hard_exit_hours = int(forward_hours or stage0_risk["hard_exit_hours"])
+    fixed_target = (
+        _validate_fixed_target_policy(stage2_policy=stage2_policy, stage0_risk=stage0_risk)
+        if stage2_policy.get("policy_source") == "signal_discovery_fixed_target"
+        else None
+    )
+    hard_exit_hours = int(
+        stage0_risk["hard_exit_hours"]
+        if fixed_target is not None
+        else forward_hours or stage0_risk["hard_exit_hours"]
+    )
     policy_values = stage2_policy["policy"]
     risk_policy = {
         "initial_sl_pct": float(policy_values["initial_sl_pct"]),
         "stage0_meaningful_move_threshold_pct": float(stage0_risk["initial_sl_pct"]),
         "hard_exit_hours": hard_exit_hours,
     }
-    tp_levels = tp_values or _load_stage2_tp_levels(promotion_root / "stage2_capture_curve.json")
+    tp_levels = (
+        [float(fixed_target["target_pct"])]
+        if fixed_target is not None
+        else tp_values or _load_stage2_tp_levels(promotion_root / "stage2_capture_curve.json")
+    )
     if not tp_levels:
         raise ValueError("Stage 3 requires Stage 2 TP levels from promotion/stage2_capture_curve.json.")
 
@@ -269,6 +288,7 @@ def _prepare_stage3_context(
         "trade_inputs": trade_inputs,
         "stage2_policy": stage2_policy,
         "risk_policy": risk_policy,
+        "fixed_target": fixed_target,
         "hard_exit_hours": hard_exit_hours,
         "tp_levels": tp_levels,
         "candle_rows": candle_rows,
@@ -341,9 +361,28 @@ def _base_stage3_artifact(context: dict[str, Any]) -> dict[str, Any]:
         "forward_hours": context["hard_exit_hours"],
         "leverage": context["leverage"],
         "fees_bps_per_side": context["fees_bps_per_side"],
-        "tp_range_source": "stage2_exit_policy_adjacent_levels",
+        "policy_source": (
+            "signal_discovery_fixed_target"
+            if context["fixed_target"] is not None
+            else "stage2_exit_policy"
+        ),
+        "fixed_target": context["fixed_target"],
+        "tp_range_source": (
+            "signal_discovery_fixed_target"
+            if context["fixed_target"] is not None
+            else "stage2_exit_policy_adjacent_levels"
+        ),
         "tp_values": context["tp_levels"],
-        "sl_values": sorted({round(risk_policy["initial_sl_pct"] * multiplier, 4) for multiplier in DEFAULT_SL_MULTIPLIERS}),
+        "sl_values": (
+            [float(context["fixed_target"]["stop_pct"])]
+            if context["fixed_target"] is not None
+            else sorted(
+                {
+                    round(risk_policy["initial_sl_pct"] * multiplier, 4)
+                    for multiplier in DEFAULT_SL_MULTIPLIERS
+                }
+            )
+        ),
         "stage2_exit_policy": context["stage2_policy"],
         "stage0_risk_policy": risk_policy,
         "fixed_sl_complete": False,
@@ -704,6 +743,45 @@ def _local_variant_configs(
     return configs
 
 
+def _fixed_target_protection_configs(
+    *,
+    fixed_target: dict[str, Any],
+    hard_exit_hours: int,
+) -> list[dict[str, Any]]:
+    target_pct = float(fixed_target["target_pct"])
+    stop_pct = float(fixed_target["stop_pct"])
+    protect_values = sorted(
+        {
+            round(target_pct * 0.25, 4),
+            round(target_pct * 0.5, 4),
+            round(target_pct * 0.75, 4),
+        }
+    )
+    trail_values = sorted({0.0, round(stop_pct * 0.5, 4), round(stop_pct, 4)})
+    exact_key = (round(stop_pct, 4), round(stop_pct, 4))
+    configs = []
+    for protect, trail in itertools.product(protect_values, trail_values):
+        if trail > protect or (protect, trail) == exact_key:
+            continue
+        configs.append(
+            _policy_config(
+                config_id=(
+                    f"fixed_target_protection_trigger_{_id_pct(protect)}_"
+                    f"trail_{_id_pct(trail)}"
+                ),
+                stage3_step="fixed_target_protection_variant",
+                protection_enabled=True,
+                final_tp_pct=target_pct,
+                protect_trigger_pct=protect,
+                trail_sl_pct=trail,
+                initial_sl_pct=stop_pct,
+                initial_sl_multiplier=1.0,
+                hard_exit_hours=hard_exit_hours,
+            )
+        )
+    return configs
+
+
 def _paired_side_specific_variant_configs(
     *,
     stage2_policy: dict[str, Any],
@@ -997,7 +1075,46 @@ def _load_stage2_exit_policy(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _load_stage0_risk_policy(*, workspace_root: Path, session: dict[str, Any]) -> dict[str, float | int]:
+def _validate_fixed_target_policy(
+    *,
+    stage2_policy: dict[str, Any],
+    stage0_risk: dict[str, Any],
+) -> dict[str, Any]:
+    if stage0_risk.get("policy_source") != "signal_discovery_fixed_target":
+        raise ValueError("Stage 2 fixed-target policy requires a Stage 0 frozen target contract.")
+    fixed_target = stage2_policy.get("fixed_target")
+    if not isinstance(fixed_target, dict):
+        raise ValueError("Stage 2 fixed-target policy is missing fixed_target metadata.")
+    missing = sorted(
+        {"target_pct", "stop_pct", "forward_hours"} - fixed_target.keys()
+    )
+    if missing:
+        raise ValueError(
+            f"Stage 2 fixed-target policy is missing fields: {', '.join(missing)}"
+        )
+    policy = stage2_policy["policy"]
+    expected_target = float(stage0_risk["target_pct"])
+    expected_stop = float(stage0_risk["initial_sl_pct"])
+    expected_hours = int(stage0_risk["hard_exit_hours"])
+    if float(policy["lock_profit_pct"]) != expected_target:
+        raise ValueError("Stage 2 fixed-target TP does not match the frozen Stage 0 contract.")
+    if float(policy["initial_sl_pct"]) != expected_stop:
+        raise ValueError("Stage 2 fixed-target SL does not match the frozen Stage 0 contract.")
+    if float(fixed_target.get("target_pct")) != expected_target:
+        raise ValueError("Stage 2 fixed_target target_pct does not match Stage 0.")
+    if float(fixed_target.get("stop_pct")) != expected_stop:
+        raise ValueError("Stage 2 fixed_target stop_pct does not match Stage 0.")
+    if int(fixed_target.get("forward_hours")) != expected_hours:
+        raise ValueError("Stage 2 fixed_target horizon does not match Stage 0.")
+    return {
+        "config_hash": str(stage0_risk.get("config_hash") or ""),
+        "target_pct": expected_target,
+        "stop_pct": expected_stop,
+        "forward_hours": expected_hours,
+    }
+
+
+def _load_stage0_risk_policy(*, workspace_root: Path, session: dict[str, Any]) -> dict[str, Any]:
     root_value = session.get("stage0_artifact_root") or (session.get("manifest") or {}).get("stage0_artifact_root")
     if not root_value:
         raise ValueError("Stage 3 requires Stage 0 artifact root to read risk policy.")
@@ -1008,6 +1125,30 @@ def _load_stage0_risk_policy(*, workspace_root: Path, session: dict[str, Any]) -
     if not summary_path.is_file():
         raise ValueError(f"Stage 0 ground truth summary not found: {summary_path}")
     summary = json.loads(summary_path.read_text())
+    if summary.get("label_contract") == "fixed_r_first_touch.v1":
+        contract_path_value = summary.get("fixed_target_contract_path")
+        contract_path = (
+            Path(str(contract_path_value))
+            if contract_path_value
+            else stage0_root / "scores" / "fixed_target_contract.json"
+        )
+        if not contract_path.is_absolute():
+            contract_path = stage0_root / contract_path
+        if not contract_path.is_file():
+            raise ValueError(f"Fixed target contract not found: {contract_path}")
+        contract = json.loads(contract_path.read_text())
+        selected = contract.get("selected_target") if isinstance(contract, dict) else None
+        if not isinstance(selected, dict):
+            raise ValueError("Fixed target contract is missing selected_target.")
+        risk_pct = float(selected["selected_risk_pct"])
+        return {
+            "initial_sl_pct": risk_pct * float(selected["stop_multiple"]),
+            "target_pct": risk_pct * float(selected["reward_multiple"]),
+            "hard_exit_hours": int(float(selected["horizon_hours"])),
+            "policy_source": "signal_discovery_fixed_target",
+            "config_hash": str(contract.get("config_hash") or ""),
+            "contract_path": str(contract_path),
+        }
     metrics = summary.get("metrics") if isinstance(summary.get("metrics"), dict) else summary
     threshold = metrics.get("significance_threshold_pct")
     forward_hours = metrics.get("forward_hours")

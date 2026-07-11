@@ -94,6 +94,135 @@ def test_stage3_local_variants_requires_exact_protection_substep(tmp_path: Path)
         run_stage3_local_variants(workspace_root=tmp_path, session=_session(artifact_root, stage0_root), candles=[])
 
 
+def test_stage3_fixed_target_preserves_tp_sl_across_protection_variants(
+    tmp_path: Path,
+):
+    artifact_root, stage0_root = _stage3_workspace(tmp_path)
+    promotion_root = artifact_root / "promotion"
+    fixed_target_path = stage0_root / "scores/fixed_target_contract.json"
+    fixed_target_path.parent.mkdir(parents=True, exist_ok=True)
+    fixed_target_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "signal_discovery_target.v1",
+                "config_hash": "frozen-btc-target",
+                "selected_target": {
+                    "selected_risk_pct": 1.0,
+                    "reward_multiple": 2.0,
+                    "stop_multiple": 1.0,
+                    "horizon_hours": 36,
+                    "entry_delay_minutes": 5,
+                    "entry_semantics": "next_5m_open",
+                },
+            }
+        )
+    )
+    (stage0_root / "scores/ground_truth_summary.json").write_text(
+        json.dumps(
+            {
+                "label_contract": "fixed_r_first_touch.v1",
+                "fixed_target_contract_path": str(fixed_target_path),
+                "metrics": {"total_records": 2},
+            }
+        )
+    )
+    _write_stage2_capture(promotion_root, tp_levels=[0.5, 1.0, 1.5, 2.0, 2.5])
+    fixed_policy = {
+        "lock_profit_pct": 2.0,
+        "initial_sl_pct": 1.0,
+        "protect_trigger_pct": 1.0,
+        "trail_sl_pct": 1.0,
+    }
+    (promotion_root / "stage2_exit_policy.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "0.1",
+                "artifact_role": "stage2_exit_policy",
+                "policy_source": "signal_discovery_fixed_target",
+                "policy_mode": "shared",
+                "policy": fixed_policy,
+                "side_policies": {"LONG": fixed_policy, "SHORT": fixed_policy},
+                "fixed_target": {
+                    "config_hash": "frozen-btc-target",
+                    "target_pct": 2.0,
+                    "stop_pct": 1.0,
+                    "forward_hours": 36,
+                },
+            }
+        )
+    )
+    _write_trade_inputs(
+        promotion_root,
+        [
+            {
+                "signal_id": "train-fixed",
+                "sample_role": "training",
+                "decision_direction": "LONG",
+                "direction": "LONG",
+                "agreement": "MATCH",
+                "signal_ts": "2026-05-01T00:00:00Z",
+                "reference_price": 100,
+            },
+            {
+                "signal_id": "wf-fixed",
+                "sample_role": "walk_forward_test",
+                "decision_direction": "SHORT",
+                "direction": "SHORT",
+                "agreement": "MATCH",
+                "signal_ts": "2026-05-03T00:00:00Z",
+                "reference_price": 100,
+            },
+        ],
+    )
+    candles = [
+        {
+            "timestamp": "2026-05-01T00:05:00Z",
+            "open": 100,
+            "high": 102.1,
+            "low": 99.5,
+            "close": 101.8,
+        },
+        {
+            "timestamp": "2026-05-03T00:05:00Z",
+            "open": 100,
+            "high": 100.5,
+            "low": 97.9,
+            "close": 98.2,
+        },
+    ]
+
+    result = run_stage3_grid_search(
+        workspace_root=tmp_path,
+        session=_session(artifact_root, stage0_root),
+        candles=candles,
+        tp_values=[0.5, 1.0, 1.5, 2.0, 2.5],
+        forward_hours=1,
+        shortlist_size=20,
+        leverage=1,
+        fees_bps_per_side=0,
+    )
+
+    assert result["policy_source"] == "signal_discovery_fixed_target"
+    assert result["forward_hours"] == 36
+    assert result["tp_values"] == [2.0]
+    assert result["sl_values"] == [1.0]
+    assert result["fixed_sl_baseline_result"]["final_tp_pct"] == 2.0
+    assert result["fixed_sl_baseline_result"]["initial_sl_pct"] == 1.0
+    assert result["local_variant_results"]
+    assert all(row["protection_enabled"] for row in result["local_variant_results"])
+    assert {row["final_tp_pct"] for row in result["results"]} == {2.0}
+    assert {row["initial_sl_pct"] for row in result["results"]} == {1.0}
+    assert {row["initial_sl_multiplier"] for row in result["results"]} == {1.0}
+    assert {
+        candidate["setup"]["tp_pct"]
+        for candidate in result["stage4_candidates"]["candidates"]
+    } == {2.0}
+    assert {
+        candidate["setup"]["sl_pct"]
+        for candidate in result["stage4_candidates"]["candidates"]
+    } == {1.0}
+
+
 def test_run_stage3_policy_test_scores_fixed_baseline_exact_policy_and_shortlists_stage4_candidates(tmp_path: Path):
     artifact_root, stage0_root = _stage3_workspace(tmp_path)
     promotion_root = artifact_root / "promotion"

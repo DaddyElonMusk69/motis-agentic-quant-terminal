@@ -4,6 +4,116 @@ from pathlib import Path
 from quant_terminal_worker.stage2.capture_curve import run_stage2_capture_curve
 
 
+def test_stage2_fixed_target_preserves_frozen_policy_and_writes_exit_handoff(
+    tmp_path: Path,
+):
+    artifact_root = tmp_path / "dev/training_sessions/btc-outcome-first/stage1-btc"
+    promotion_root = artifact_root / "promotion"
+    stage0_root = tmp_path / "dev/signal_discovery_sessions/btc/handoff/stage0"
+    promotion_root.mkdir(parents=True)
+    (stage0_root / "scores").mkdir(parents=True)
+    (stage0_root / "scores/ground_truth_summary.json").write_text(
+        json.dumps(
+            {
+                "label_contract": "fixed_r_first_touch.v1",
+                "fixed_target_contract_path": str(
+                    stage0_root / "scores/fixed_target_contract.json"
+                ),
+                "metrics": {"total_records": 2},
+            }
+        )
+    )
+    (stage0_root / "scores/fixed_target_contract.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "signal_discovery_target.v1",
+                "config_hash": "frozen-btc-target",
+                "selected_target": {
+                    "selected_risk_pct": 1.0,
+                    "reward_multiple": 2.0,
+                    "stop_multiple": 1.0,
+                    "horizon_hours": 36,
+                    "entry_delay_minutes": 5,
+                    "entry_semantics": "next_5m_open",
+                },
+            }
+        )
+    )
+    (promotion_root / "stage1a_canonical_full_cycle_scores.json").write_text(
+        json.dumps(
+            {
+                "records": [
+                    {
+                        "signal_id": "sig-fixed",
+                        "sample_role": "training",
+                        "decision_direction": "LONG",
+                        "agreement": "MATCH",
+                    }
+                ]
+            }
+        )
+    )
+    session = {
+        "session_id": "stage1-btc-fixed",
+        "artifact_root": str(artifact_root),
+        "stage0_artifact_root": str(stage0_root),
+        "asset": "BTC",
+        "strategy_id": "btc-outcome-first",
+        "strategy_version": "v0.1",
+        "signal_engine_id": "fixture-engine",
+        "signal_set_id": "BTC-fixture-engine-canonical",
+    }
+
+    result = run_stage2_capture_curve(
+        workspace_root=tmp_path,
+        session=session,
+        signal_rows=[
+            {
+                "signal_id": "sig-fixed",
+                "timestamp": "2026-05-01T00:00:00Z",
+                "payload": {
+                    "timestamp": "2026-05-01T00:00:00Z",
+                    "evidence": {"reference_price": 100.0},
+                },
+            }
+        ],
+        candles=[
+            {
+                "timestamp": "2026-05-01T00:05:00Z",
+                "open": 100,
+                "high": 101.2,
+                "low": 99.5,
+                "close": 101.0,
+            }
+        ],
+        tp_levels=[0.5, 1.0, 1.5, 2.0, 2.5],
+        forward_hours=1,
+    )
+
+    assert result["policy_source"] == "signal_discovery_fixed_target"
+    assert result["forward_hours"] == 36
+    assert result["fixed_target"] == {
+        "config_hash": "frozen-btc-target",
+        "target_pct": 2.0,
+        "stop_pct": 1.0,
+        "forward_hours": 36,
+        "entry_delay_minutes": 5,
+        "entry_semantics": "next_5m_open",
+    }
+    assert result["stage3_input"]["recommended_tp_min_pct"] == 2.0
+    assert result["stage3_input"]["recommended_tp_max_pct"] == 2.0
+    assert result["stage3_input"]["recommended_sl_min_pct"] == 1.0
+    assert result["stage3_input"]["recommended_sl_max_pct"] == 1.0
+    policy = json.loads((promotion_root / "stage2_exit_policy.json").read_text())
+    assert policy["policy_source"] == "signal_discovery_fixed_target"
+    assert policy["policy_mode"] == "shared"
+    assert policy["policy"]["lock_profit_pct"] == 2.0
+    assert policy["policy"]["initial_sl_pct"] == 1.0
+    assert policy["source"]["fixed_target_contract_path"] == str(
+        stage0_root / "scores/fixed_target_contract.json"
+    )
+
+
 def test_run_stage2_capture_curve_reads_liquidity_sweep_reference_price(tmp_path: Path):
     artifact_root = tmp_path / "dev/training_sessions/aave-lse/stage1-aave"
     promotion_root = artifact_root / "promotion"

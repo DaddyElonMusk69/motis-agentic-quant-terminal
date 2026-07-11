@@ -30,6 +30,13 @@ def run_stage2_capture_curve(
 ) -> dict[str, Any]:
     artifact_root = _session_artifact_root(workspace_root=workspace_root, session=session)
     promotion_root = artifact_root / "promotion"
+    fixed_target = _load_fixed_target_contract(
+        workspace_root=workspace_root,
+        session=session,
+    )
+    effective_forward_hours = (
+        int(fixed_target["forward_hours"]) if fixed_target is not None else forward_hours
+    )
     canonical_scores_path = promotion_root / "stage1a_canonical_full_cycle_scores.json"
     canonical_scores = _read_json(canonical_scores_path)
     trade_decisions = _trade_decisions(canonical_scores)
@@ -66,7 +73,7 @@ def run_stage2_capture_curve(
             signal_timestamp=_coerce_datetime(packet.get("timestamp") or signal["timestamp"]),
             candles=candle_rows,
             tp_levels=levels,
-            forward_hours=forward_hours,
+            forward_hours=effective_forward_hours,
         )
         per_signal.append(capture)
 
@@ -77,7 +84,8 @@ def run_stage2_capture_curve(
         per_signal=per_signal,
         trade_decisions=trade_decisions,
         tp_levels=levels,
-        forward_hours=forward_hours,
+        forward_hours=effective_forward_hours,
+        fixed_target=fixed_target,
     )
     promotion_root.mkdir(parents=True, exist_ok=True)
     _clear_stage2_downstream_artifacts(promotion_root)
@@ -89,12 +97,27 @@ def run_stage2_capture_curve(
     per_signal_path.write_text(json.dumps(per_signal, indent=2) + "\n")
     stage3_inputs_path.write_text(json.dumps(stage3_trade_inputs, indent=2) + "\n")
     summary_path.write_text(_render_summary(result))
+    exit_policy_path = None
+    if fixed_target is not None:
+        exit_policy_path = promotion_root / "stage2_exit_policy.json"
+        exit_policy_path.write_text(
+            json.dumps(
+                _fixed_target_exit_policy(
+                    session=session,
+                    capture_path=capture_path,
+                    fixed_target=fixed_target,
+                ),
+                indent=2,
+            )
+            + "\n"
+        )
     return {
         **result,
         "capture_curve_path": str(capture_path),
         "per_signal_path": str(per_signal_path),
         "stage3_trade_inputs_path": str(stage3_inputs_path),
         "summary_path": str(summary_path),
+        "exit_policy_path": str(exit_policy_path) if exit_policy_path is not None else None,
     }
 
 
@@ -208,6 +231,7 @@ def _build_result(
     trade_decisions: list[dict[str, Any]],
     tp_levels: list[float],
     forward_hours: int,
+    fixed_target: dict[str, Any] | None,
 ) -> dict[str, Any]:
     results: dict[str, dict[str, dict[str, float | int]]] = {}
     roles = sorted({str(item["sample_role"]) for item in per_signal})
@@ -230,12 +254,39 @@ def _build_result(
         )
         for cohort in ("MATCH", "MISMATCH", "full_cycle")
     }
-    recommended_tp_max = _recommended_tp_max_from_training(tp_levels=tp_levels, results=results)
+    travel_recommended_tp_max = _recommended_tp_max_from_training(
+        tp_levels=tp_levels,
+        results=results,
+    )
     tp_guardrail = _walk_forward_guardrail(tp_levels=tp_levels, results=results)
     stage0_threshold = _load_stage0_meaningful_move_threshold(workspace_root=workspace_root, session=session)
     sl_levels = _sl_levels_from_threshold(stage0_threshold)
     sl_results = _sl_hit_rates(per_signal=per_signal, sl_levels=sl_levels)
     side_splits = _side_splits(per_signal=per_signal, tp_levels=tp_levels, sl_levels=sl_levels)
+    if fixed_target is not None:
+        recommended_tp_min = float(fixed_target["target_pct"])
+        recommended_tp_max = float(fixed_target["target_pct"])
+        recommended_sl_min = float(fixed_target["stop_pct"])
+        recommended_sl_max = float(fixed_target["stop_pct"])
+        policy_source = "signal_discovery_fixed_target"
+        fixed_target_public = {
+            key: fixed_target[key]
+            for key in (
+                "config_hash",
+                "target_pct",
+                "stop_pct",
+                "forward_hours",
+                "entry_delay_minutes",
+                "entry_semantics",
+            )
+        }
+    else:
+        recommended_tp_min = 0.1
+        recommended_tp_max = travel_recommended_tp_max
+        recommended_sl_min = min(sl_levels) if sl_levels else None
+        recommended_sl_max = max(sl_levels) if sl_levels else None
+        policy_source = "stage2_capture_curve"
+        fixed_target_public = None
 
     return {
         "schema_version": "0.1",
@@ -249,6 +300,8 @@ def _build_result(
         "signal_engine_id": session.get("signal_engine_id"),
         "signal_set_id": session.get("signal_set_id"),
         "canonical_stage1_scores_path": str(canonical_scores_path),
+        "policy_source": policy_source,
+        "fixed_target": fixed_target_public,
         "forward_hours": forward_hours,
         "tp_levels": tp_levels,
         "sl_levels": sl_levels,
@@ -268,12 +321,20 @@ def _build_result(
         "stage3_input": {
             "role": "tp_range_evidence",
             "description": "Use training MATCH travel to propose TP/SL bands, with walk-forward and full-cycle capture retained as guardrails.",
-            "tp_range_source": "stage2_training_match_profile_with_walk_forward_guardrail",
-            "recommended_tp_min_pct": 0.1,
+            "tp_range_source": (
+                "signal_discovery_fixed_target"
+                if fixed_target is not None
+                else "stage2_training_match_profile_with_walk_forward_guardrail"
+            ),
+            "recommended_tp_min_pct": recommended_tp_min,
             "recommended_tp_max_pct": recommended_tp_max,
-            "sl_range_source": "stage2_matched_adverse_profile",
-            "recommended_sl_min_pct": min(sl_levels) if sl_levels else None,
-            "recommended_sl_max_pct": max(sl_levels) if sl_levels else None,
+            "sl_range_source": (
+                "signal_discovery_fixed_target"
+                if fixed_target is not None
+                else "stage2_matched_adverse_profile"
+            ),
+            "recommended_sl_min_pct": recommended_sl_min,
+            "recommended_sl_max_pct": recommended_sl_max,
             "min_match_capture_pct": DEFAULT_STAGE3_MIN_MATCH_CAPTURE_PCT,
             "walk_forward_guardrail": tp_guardrail,
             "selection_notes": {
@@ -281,7 +342,52 @@ def _build_result(
                 "validation_source": "walk_forward_test",
                 "robustness_source": "full_cycle",
                 "walk_forward_policy": "guardrail_not_primary_optimizer",
+                "policy_source": policy_source,
             },
+        },
+    }
+
+
+def _fixed_target_exit_policy(
+    *,
+    session: dict[str, Any],
+    capture_path: Path,
+    fixed_target: dict[str, Any],
+) -> dict[str, Any]:
+    policy = {
+        "lock_profit_pct": float(fixed_target["target_pct"]),
+        "initial_sl_pct": float(fixed_target["stop_pct"]),
+        "protect_trigger_pct": float(fixed_target["stop_pct"]),
+        "trail_sl_pct": float(fixed_target["stop_pct"]),
+    }
+    public_target = {
+        key: fixed_target[key]
+        for key in (
+            "config_hash",
+            "target_pct",
+            "stop_pct",
+            "forward_hours",
+            "entry_delay_minutes",
+            "entry_semantics",
+        )
+    }
+    return {
+        "schema_version": "0.1",
+        "stage": "stage2_exit_policy_handoff",
+        "artifact_role": "stage2_exit_policy",
+        "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "session_id": session["session_id"],
+        "asset": session.get("asset"),
+        "strategy_id": session.get("strategy_id"),
+        "policy_source": "signal_discovery_fixed_target",
+        "policy_mode": "shared",
+        "policy": policy,
+        "side_policies": {"LONG": policy, "SHORT": policy},
+        "fixed_target": public_target,
+        "source": {
+            "capture_curve_path": str(capture_path),
+            "selection_source": "signal_discovery_fixed_target",
+            "fixed_target_contract_path": str(fixed_target["contract_path"]),
         },
     }
 
@@ -552,6 +658,12 @@ def _tp_hit_rates(*, per_signal: list[dict[str, Any]], tp_levels: list[float]) -
 
 
 def _load_stage0_meaningful_move_threshold(*, workspace_root: Path, session: dict[str, Any]) -> float:
+    fixed_target = _load_fixed_target_contract(
+        workspace_root=workspace_root,
+        session=session,
+    )
+    if fixed_target is not None:
+        return float(fixed_target["stop_pct"])
     root_value = session.get("stage0_artifact_root") or (session.get("manifest") or {}).get("stage0_artifact_root")
     if not root_value:
         return 1.0
@@ -565,6 +677,62 @@ def _load_stage0_meaningful_move_threshold(*, workspace_root: Path, session: dic
     metrics = summary.get("metrics") if isinstance(summary.get("metrics"), dict) else summary
     value = metrics.get("meaningful_move_threshold_pct", metrics.get("significance_threshold_pct"))
     return round(float(value), 1) if value is not None else 1.0
+
+
+def _load_fixed_target_contract(
+    *,
+    workspace_root: Path,
+    session: dict[str, Any],
+) -> dict[str, Any] | None:
+    root_value = session.get("stage0_artifact_root") or (session.get("manifest") or {}).get(
+        "stage0_artifact_root"
+    )
+    if not root_value:
+        return None
+    stage0_root = Path(str(root_value))
+    if not stage0_root.is_absolute():
+        stage0_root = workspace_root / stage0_root
+    summary_path = stage0_root / "scores" / "ground_truth_summary.json"
+    if not summary_path.is_file():
+        return None
+    summary = json.loads(summary_path.read_text())
+    if summary.get("label_contract") != "fixed_r_first_touch.v1":
+        return None
+    contract_path_value = summary.get("fixed_target_contract_path")
+    contract_path = (
+        Path(str(contract_path_value))
+        if contract_path_value
+        else stage0_root / "scores" / "fixed_target_contract.json"
+    )
+    if not contract_path.is_absolute():
+        contract_path = stage0_root / contract_path
+    if not contract_path.is_file():
+        raise ValueError(f"Fixed target contract not found: {contract_path}")
+    contract = json.loads(contract_path.read_text())
+    selected = contract.get("selected_target") if isinstance(contract, dict) else None
+    if not isinstance(selected, dict):
+        raise ValueError("Fixed target contract is missing selected_target")
+    required = {
+        "selected_risk_pct",
+        "reward_multiple",
+        "stop_multiple",
+        "horizon_hours",
+        "entry_delay_minutes",
+        "entry_semantics",
+    }
+    missing = sorted(required - selected.keys())
+    if missing:
+        raise ValueError(f"Fixed target contract is missing fields: {', '.join(missing)}")
+    risk_pct = float(selected["selected_risk_pct"])
+    return {
+        "contract_path": str(contract_path),
+        "config_hash": str(contract.get("config_hash") or ""),
+        "target_pct": risk_pct * float(selected["reward_multiple"]),
+        "stop_pct": risk_pct * float(selected["stop_multiple"]),
+        "forward_hours": int(float(selected["horizon_hours"])),
+        "entry_delay_minutes": int(selected["entry_delay_minutes"]),
+        "entry_semantics": str(selected["entry_semantics"]),
+    }
 
 
 def _excursions(candle: dict[str, Any], *, reference_price: float, direction: str) -> tuple[float, float]:

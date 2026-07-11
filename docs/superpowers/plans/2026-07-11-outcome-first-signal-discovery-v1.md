@@ -438,27 +438,27 @@ git commit -m "feat: hand discovery engines into stage1"
 - Test: `tests/test_stage2_capture.py`
 - Test: `tests/test_stage3_grid.py`
 
-- [ ] **Step 1: Add failing fixed-target compatibility tests**
+- [x] **Step 1: Add failing fixed-target compatibility tests**
 
 Test that Stage 2 reads `label_contract: fixed_r_first_touch.v1`, reports the frozen target and stop percentages, and emits a fixed shared exit policy instead of selecting a different base TP/SL. Test that Stage 3 includes the frozen configuration as its baseline and does not create TP/SL candidates outside the frozen target unless explicitly running protection-only variants.
 
-- [ ] **Step 2: Run focused downstream tests**
+- [x] **Step 2: Run focused downstream tests**
 
 Run: `pytest -q tests/test_stage2_capture.py tests/test_stage3_grid.py -k fixed_target`
 
 Expected: current travel-derived policies fail the assertions.
 
-- [ ] **Step 3: Implement fixed-target compatibility branches**
+- [x] **Step 3: Implement fixed-target compatibility branches**
 
 Add `_load_fixed_target_contract` to Stage 2 and reuse its target/stop/horizon. Mark artifacts with `policy_source: signal_discovery_fixed_target`; retain capture diagnostics without using them to replace the frozen policy. In Stage 3, seed the exact fixed TP/SL baseline and constrain local variants to protection behavior while preserving base target and stop.
 
-- [ ] **Step 4: Verify downstream compatibility and regressions**
+- [x] **Step 4: Verify downstream compatibility and regressions**
 
 Run: `pytest -q tests/test_stage2_capture.py tests/test_stage3_grid.py`
 
 Expected: fixed-target and legacy Stage 0 paths both pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/worker/src/quant_terminal_worker/stage2/capture_curve.py apps/worker/src/quant_terminal_worker/stage3/grid_search.py tests/test_stage2_capture.py tests/test_stage3_grid.py
