@@ -566,7 +566,7 @@ Before marking the goal complete, collect authoritative evidence for every Defin
 - API response and DB row prove session creation and immutable freeze.
 - Training artifact listing proves executable labels, episodes, neighboring-R, delay, and cost metrics.
 - Absence of WF label artifacts before freeze proves the leakage boundary.
-- Frontend screenshot evidence is intentionally absent under the user's 2026-07-11 interactive acceptance waiver.
+- The compiled discovery workspace exposes R feasibility, episode counts and concentration, LONG/SHORT distribution, monthly recurrence, costs, delay sensitivity, and 36h/48h scenario comparison. Screenshot evidence is intentionally absent under the user's 2026-07-11 interactive acceptance waiver.
 - Prompt test and rendered prompt prove training-only context plus the required skill contract.
 - Candidate evaluation artifact proves precision, coverage, direct R outcomes, direction, parity, and WF slices.
 - Handoff artifact, accepted Stage 0 candidate, and successfully created Stage 1 session prove no manual artifact surgery.

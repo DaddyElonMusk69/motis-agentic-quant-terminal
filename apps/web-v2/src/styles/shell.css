@@ -5246,6 +5246,45 @@
   max-height: 250px;
 }
 
+.discovery-atlas-detail {
+  border-top: 1px solid var(--line-subtle);
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+}
+
+.discovery-atlas-detail__header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: var(--space-3);
+}
+
+.discovery-atlas-detail__header h3,
+.discovery-atlas-table h3 {
+  font-size: 12px;
+  margin: 3px 0 0;
+}
+
+.discovery-atlas-detail__header > span {
+  color: var(--ink-muted);
+  font-size: 11px;
+}
+
+.discovery-atlas-tables {
+  display: grid;
+  gap: var(--space-4);
+  grid-template-columns: minmax(0, 1.35fr) minmax(240px, 0.65fr);
+  margin-top: var(--space-4);
+}
+
+.discovery-atlas-table {
+  min-width: 0;
+}
+
+.discovery-atlas-table h3 {
+  margin-bottom: var(--space-2);
+}
+
 .discovery-create-modal {
   max-width: 1120px;
   width: min(1120px, calc(100vw - 48px));
@@ -5283,6 +5322,10 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .discovery-atlas-tables {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .discovery-freeze-controls,
   .discovery-candidate-controls {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -5306,7 +5349,8 @@
   }
 
   .discovery-workbench-header,
-  .discovery-band > header {
+  .discovery-band > header,
+  .discovery-atlas-detail__header {
     align-items: flex-start;
     flex-direction: column;
   }

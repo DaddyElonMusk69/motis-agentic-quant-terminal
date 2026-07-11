@@ -142,6 +142,24 @@ function primaryEpisodes(row: SignalDiscoveryRResult): number {
   return row.primary?.episode_count ?? 0;
 }
 
+function directionSummary(row: SignalDiscoveryRResult, direction: "LONG" | "SHORT"): string {
+  const count = row.primary?.direction_counts?.[direction] ?? 0;
+  const total = row.primary?.qualifying_timestamp_count ?? 0;
+  return total > 0 ? `${formatNumber(count)} · ${pct(count / total)}` : formatNumber(count);
+}
+
+function largestMonthlyConcentration(row: SignalDiscoveryRResult): string {
+  const monthly = Object.entries(row.primary?.monthly_episode_counts ?? {});
+  const total = row.primary?.episode_count ?? 0;
+  if (monthly.length === 0 || total === 0) {
+    return "n/a";
+  }
+  const [month, count] = monthly.reduce((largest, current) => (
+    current[1] > largest[1] ? current : largest
+  ));
+  return `${month} · ${pct(count / total)}`;
+}
+
 export function ResearchSignalDiscoveryPage() {
   const { searchParams, navigate } = useAppRouter();
   const [createOpen, setCreateOpen] = useState(false);
@@ -338,6 +356,13 @@ export function ResearchSignalDiscoveryPage() {
     handoffMutation.error
   ].find(Boolean);
   const rSummaries = session?.summary.r_summaries ?? [];
+  const selectedRResult = rSummaries.find((row) => row.risk_pct === selectedRisk) ?? rSummaries[0];
+  const monthlyRecurrenceRows = Object.entries(
+    selectedRResult?.primary?.monthly_episode_counts ?? {}
+  )
+    .map(([month, episodeCount]) => ({ month, episodeCount }))
+    .sort((left, right) => left.month.localeCompare(right.month));
+  const scenarioRows = selectedRResult?.scenarios ?? [];
   const target = session && "selected_target" in session.frozen_target
     ? session.frozen_target
     : null;
@@ -518,8 +543,62 @@ export function ResearchSignalDiscoveryPage() {
                   ]}
                   rows={rSummaries}
                   getRowKey={(row) => String(row.risk_pct)}
+                  getRowClassName={(row) => row.risk_pct === selectedRResult?.risk_pct ? "is-selected" : undefined}
+                  onRowClick={(row) => setSelectedRisk(row.risk_pct)}
                   emptyLabel="Run the atlas to compare fixed R candidates."
                 />
+                {selectedRResult ? (
+                  <div className="discovery-atlas-detail">
+                    <div className="discovery-atlas-detail__header">
+                      <div>
+                        <span className="eyebrow">Selected R</span>
+                        <h3>{selectedRResult.risk_pct}% Opportunity Profile</h3>
+                      </div>
+                      <span>{formatNumber(scenarioRows.length)} scenarios</span>
+                    </div>
+                    <div className="discovery-field-grid">
+                      <FieldRow label="Independent episodes" value={formatNumber(selectedRResult.primary?.episode_count)} />
+                      <FieldRow label="Qualifying timestamps" value={formatNumber(selectedRResult.primary?.qualifying_timestamp_count)} />
+                      <FieldRow label="LONG distribution" value={directionSummary(selectedRResult, "LONG")} />
+                      <FieldRow label="SHORT distribution" value={directionSummary(selectedRResult, "SHORT")} />
+                      <FieldRow label="Largest month share" value={largestMonthlyConcentration(selectedRResult)} />
+                      <FieldRow label="Neutral / ambiguous" value={`${formatNumber(selectedRResult.primary?.neutral_count)} / ${formatNumber(selectedRResult.primary?.ambiguous_count)}`} />
+                      <FieldRow label="Net reward" value={`${decimal(selectedRResult.cost?.net_reward_r)}R`} />
+                      <FieldRow label="Net stop" value={`${decimal(selectedRResult.cost?.net_stop_r)}R`} />
+                    </div>
+                    <div className="discovery-atlas-tables">
+                      <div className="discovery-atlas-table">
+                        <h3>Delay & Horizon Sensitivity</h3>
+                        <DataTable
+                          columns={[
+                            { key: "delay", header: "Delay", render: (row) => `${row.entry_delay_minutes}m` },
+                            { key: "horizon", header: "Horizon", render: (row) => `${row.horizon_hours}h` },
+                            { key: "episodes", header: "Episodes", align: "right", render: (row) => formatNumber(row.episode_count) },
+                            { key: "qualifying", header: "Qualifying", align: "right", render: (row) => formatNumber(row.qualifying_timestamp_count) },
+                            { key: "long", header: "Long", align: "right", render: (row) => formatNumber(row.direction_counts?.LONG) },
+                            { key: "short", header: "Short", align: "right", render: (row) => formatNumber(row.direction_counts?.SHORT) }
+                          ]}
+                          rows={scenarioRows}
+                          getRowKey={(row) => `${row.entry_delay_minutes}-${row.horizon_hours}`}
+                          emptyLabel="No scenario sensitivity results."
+                        />
+                      </div>
+                      <div className="discovery-atlas-table">
+                        <h3>Monthly Episode Recurrence</h3>
+                        <DataTable
+                          columns={[
+                            { key: "month", header: "Month", render: (row) => row.month },
+                            { key: "episodes", header: "Episodes", align: "right", render: (row) => formatNumber(row.episodeCount) },
+                            { key: "share", header: "Share", align: "right", render: (row) => pct(row.episodeCount / Math.max(1, selectedRResult.primary?.episode_count ?? 0)) }
+                          ]}
+                          rows={monthlyRecurrenceRows}
+                          getRowKey={(row) => row.month}
+                          emptyLabel="No recurring opportunity months."
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
               </section>
 
               <section className="discovery-band">

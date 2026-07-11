@@ -150,7 +150,25 @@ export type SignalDiscoveryConfig = {
 
 export type SignalDiscoveryRResult = {
   risk_pct: number;
-  primary?: {
+  primary?: SignalDiscoveryScenarioMetrics;
+  primary_scenario?: {
+    entry_delay_minutes?: number;
+    horizon_hours?: number;
+  };
+  scenarios?: SignalDiscoveryScenarioResult[];
+  delay_sensitivity?: SignalDiscoveryScenarioResult[];
+  horizon_sensitivity?: SignalDiscoveryScenarioResult[];
+  cost?: {
+    fee_bps_per_side?: number;
+    slippage_bps_per_side?: number;
+    round_trip_cost_pct?: number;
+    cost_in_r?: number;
+    net_reward_r?: number;
+    net_stop_r?: number;
+  };
+};
+
+export type SignalDiscoveryScenarioMetrics = {
     timestamp_count?: number;
     qualifying_timestamp_count?: number;
     episode_count?: number;
@@ -158,16 +176,13 @@ export type SignalDiscoveryRResult = {
     ambiguous_count?: number;
     direction_counts?: Record<string, number>;
     monthly_episode_counts?: Record<string, number>;
-  };
-  primary_scenario?: {
-    entry_delay_minutes?: number;
-    horizon_hours?: number;
-  };
-  cost?: {
-    cost_in_r?: number;
-    net_reward_r?: number;
-    net_stop_r?: number;
-  };
+};
+
+export type SignalDiscoveryScenarioResult = SignalDiscoveryScenarioMetrics & {
+  entry_delay_minutes: number;
+  horizon_hours: number;
+  qualifying_timestamp_retention?: number | null;
+  episode_retention?: number | null;
 };
 
 export type SignalDiscoveryTarget = {
