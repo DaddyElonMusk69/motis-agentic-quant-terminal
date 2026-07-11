@@ -4,6 +4,7 @@
 .ruff_cache/
 .run/
 .workbuddy/
+.worktrees/
 __pycache__/
 *.pyc
 node_modules/
