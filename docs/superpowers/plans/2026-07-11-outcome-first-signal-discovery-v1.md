@@ -104,17 +104,17 @@ git commit -m "feat: add executable fixed-r opportunity labels"
 - Modify: `apps/worker/src/quant_terminal_worker/signal_discovery/atlas.py`
 - Test: `tests/test_signal_discovery_atlas.py`
 
-- [ ] **Step 1: Add failing episode and summary tests**
+- [x] **Step 1: Add failing episode and summary tests**
 
 Test that consecutive 5m LONG labels form one episode, a NEUTRAL row closes it, the next LONG component gets a new episode id, and SHORT never joins LONG. Test that summaries report raw timestamps, independent episodes, direction counts, monthly recurrence, delay robustness, 36h/48h sensitivity, and cost-to-R.
 
-- [ ] **Step 2: Run the focused test**
+- [x] **Step 2: Run the focused test**
 
 Run: `pytest -q tests/test_signal_discovery_atlas.py -k 'episode or feasibility'`
 
 Expected: failures for missing `build_opportunity_episodes` and `summarize_r_candidate`.
 
-- [ ] **Step 3: Implement episode and feasibility functions**
+- [x] **Step 3: Implement episode and feasibility functions**
 
 Implement stable public functions named `build_opportunity_episodes`,
 `summarize_r_candidate`, and `run_training_atlas`. The episode builder groups only
@@ -126,13 +126,13 @@ and one summary for every configured R value.
 
 Only training timestamps may enter `run_training_atlas`; reject a timestamp on or after `walk_forward_start`. Select no winning `R` in this function: return the complete frontier and contiguous neighboring feasibility diagnostics.
 
-- [ ] **Step 4: Verify domain tests**
+- [x] **Step 4: Verify domain tests**
 
 Run: `pytest -q tests/test_signal_discovery_atlas.py`
 
 Expected: all label, episode, summary, and split-boundary tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/worker/src/quant_terminal_worker/signal_discovery/atlas.py tests/test_signal_discovery_atlas.py
