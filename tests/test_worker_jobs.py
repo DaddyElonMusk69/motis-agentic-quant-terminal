@@ -15,6 +15,41 @@ from quant_terminal_worker.jobs import run_claimed_job
 from quant_terminal_worker.signal_discovery.workspace import freeze_target_contract
 
 
+def test_worker_stage2_raw_candles_uses_source_universe_forward_hours(
+    tmp_path,
+    monkeypatch,
+):
+    calls = {}
+
+    class Reader:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_candles(self, **kwargs):
+            calls.update(kwargs)
+            return []
+
+    monkeypatch.setattr(worker_jobs, "MarketDataReader", Reader)
+
+    class Repository:
+        @staticmethod
+        def get_stage0_universe_run(run_id):
+            return {"forward_hours": 72} if run_id == "stage0-discovery-v1" else None
+
+    worker_jobs._stage2_raw_candles(
+        Repository(),
+        {
+            "asset": "BTC",
+            "train_start": "2026-01-01",
+            "walk_forward_end": "2026-01-31",
+            "source_universe_run_id": "stage0-discovery-v1",
+        },
+        workspace_root=tmp_path,
+    )
+
+    assert calls["end"] == "2026-02-03T23:59:59Z"
+
+
 def test_worker_runs_training_and_frozen_walk_forward_signal_discovery(tmp_path):
     engine = create_engine("sqlite+pysqlite:///:memory:")
     metadata.create_all(engine)

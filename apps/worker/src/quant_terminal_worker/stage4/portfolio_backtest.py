@@ -442,7 +442,15 @@ def _load_candles(
     train_start = _date_string(session["train_start"])
     walk_forward_end = _date_string(session["walk_forward_end"])
     start = f"{train_start}T00:00:00Z"
-    end = _add_hours(f"{walk_forward_end}T23:59:59Z", 36)
+    get_source_run = getattr(repository, "get_stage0_universe_run", None)
+    source_run_id = session.get("source_universe_run_id")
+    source_run = (
+        get_source_run(source_run_id)
+        if callable(get_source_run) and source_run_id
+        else None
+    )
+    forward_hours = int(source_run["forward_hours"]) if source_run is not None else 36
+    end = _add_hours(f"{walk_forward_end}T23:59:59Z", forward_hours)
     reader = MarketDataReader(repository=repository, workspace_root=workspace_root)
     raw_candles = reader.get_candles(
         asset=session["asset"],

@@ -37,6 +37,7 @@ import {
 import { formatNumber, formatTimestamp } from "../app/format";
 import { queryClient } from "../app/queryClient";
 import { useAppRouter } from "../app/router";
+import { buildRiskGrid, formatRiskGrid } from "../app/signalDiscovery";
 import { DataTable } from "../components/DataTable";
 import { FieldRow } from "../components/FieldRow";
 import { ListSkeleton } from "../components/ListSkeleton";
@@ -52,7 +53,8 @@ type CreateState = {
   researchEnd: string;
   walkForwardStart: string;
   walkForwardEnd: string;
-  riskValues: string;
+  riskMinimum: number;
+  riskMaximum: number;
   maxHoldHours: number;
   entryDelays: string;
   feeBps: number;
@@ -67,7 +69,8 @@ const INITIAL_CREATE_STATE: CreateState = {
   researchEnd: "2026-03-31",
   walkForwardStart: "2026-04-01",
   walkForwardEnd: "2026-05-30",
-  riskValues: "0.75, 1.0, 1.25",
+  riskMinimum: 0.6,
+  riskMaximum: 1.4,
   maxHoldHours: 48,
   entryDelays: "5, 10",
   feeBps: 5,
@@ -168,7 +171,7 @@ export function ResearchSignalDiscoveryPage() {
   const [prompt, setPrompt] = useState<SignalDiscoveryPrompt | null>(null);
   const [copiedPrompt, setCopiedPrompt] = useState(false);
   const [selectedRisk, setSelectedRisk] = useState(0);
-  const [selectedHorizon, setSelectedHorizon] = useState(36);
+  const [selectedHorizon, setSelectedHorizon] = useState(48);
   const [selectedDelay, setSelectedDelay] = useState(5);
   const [candidateEngineId, setCandidateEngineId] = useState("");
   const [candidateSignalSetKey, setCandidateSignalSetKey] = useState("");
@@ -247,6 +250,13 @@ export function ResearchSignalDiscoveryPage() {
       ),
     [session, signalSetsQuery.data?.signal_sets]
   );
+  const configuredRiskValues = useMemo(() => {
+    try {
+      return buildRiskGrid(createState.riskMinimum, createState.riskMaximum);
+    } catch {
+      return [];
+    }
+  }, [createState.riskMaximum, createState.riskMinimum]);
   const job = activeJobQuery.data?.job;
   const jobRunning = Boolean(job && ["queued", "running"].includes(job.status));
 
@@ -264,7 +274,7 @@ export function ResearchSignalDiscoveryPage() {
       ? session.frozen_target.selected_target
       : undefined;
     setSelectedRisk(target?.selected_risk_pct ?? session.config.risk_values[0] ?? 0);
-    setSelectedHorizon(target?.horizon_hours ?? session.config.horizon_hours[0] ?? 36);
+    setSelectedHorizon(target?.horizon_hours ?? session.config.horizon_hours[0] ?? 48);
     setSelectedDelay(target?.entry_delay_minutes ?? session.config.entry_delays_minutes[0] ?? 5);
     setCandidateEngineId(session.candidate_engine_id ?? "");
     setCandidateSignalSetKey(session.candidate_signal_set_key ?? "");
@@ -373,7 +383,6 @@ export function ResearchSignalDiscoveryPage() {
     if (!selectedDataset) {
       return;
     }
-    const riskValues = parseNumberList(createState.riskValues).filter((value) => value > 0);
     const entryDelays = parseNumberList(createState.entryDelays).map((value) => Math.round(value));
     createMutation.mutate({
       name: createState.name.trim() || `${selectedDataset.asset} Outcome-First`,
@@ -384,10 +393,10 @@ export function ResearchSignalDiscoveryPage() {
       research_end: dateEnd(createState.researchEnd),
       walk_forward_start: dateStart(createState.walkForwardStart),
       walk_forward_end: dateEnd(createState.walkForwardEnd),
-      risk_values: riskValues,
+      risk_values: configuredRiskValues,
       reward_multiple: 2,
       stop_multiple: 1,
-      horizon_hours: createState.maxHoldHours === 48 ? [36, 48] : [36],
+      horizon_hours: [Math.round(createState.maxHoldHours)],
       entry_delays_minutes: entryDelays,
       fee_bps_per_side: createState.feeBps,
       slippage_bps_per_side: createState.slippageBps,
@@ -430,7 +439,7 @@ export function ResearchSignalDiscoveryPage() {
                     <StatusBadge tone={statusTone(row.status)}>{row.status.replaceAll("_", " ")}</StatusBadge>
                   </div>
                   <span>{row.asset} · {dateOnly(row.research_start)} — {dateOnly(row.walk_forward_end)}</span>
-                  <span>{row.config.risk_values.join(" / ")}% R · {row.config.horizon_hours.join(" / ")}h</span>
+                  <span>{formatRiskGrid(row.config.risk_values)} · {Math.max(...row.config.horizon_hours)}h max</span>
                 </button>
               ))
             ) : (
@@ -517,8 +526,8 @@ export function ResearchSignalDiscoveryPage() {
                   <FieldRow label="Instrument" value={session.instrument} />
                   <FieldRow label="Training" value={`${dateOnly(session.research_start)} — ${dateOnly(session.research_end)}`} />
                   <FieldRow label="Walk-forward" value={`${dateOnly(session.walk_forward_start)} — ${dateOnly(session.walk_forward_end)}`} />
-                  <FieldRow label="R grid" value={`${session.config.risk_values.join(" / ")}%`} />
-                  <FieldRow label="Holding horizons" value={`${session.config.horizon_hours.join(" / ")}h`} />
+                  <FieldRow label="R range" value={formatRiskGrid(session.config.risk_values)} />
+                  <FieldRow label="Max hold" value={`${Math.max(...session.config.horizon_hours)}h`} />
                   <FieldRow label="Entry delays" value={`${session.config.entry_delays_minutes.join(" / ")}m`} />
                   <FieldRow label="Round-trip costs" value={`${2 * (session.config.fee_bps_per_side + session.config.slippage_bps_per_side)} bps`} />
                 </div>
@@ -814,8 +823,12 @@ export function ResearchSignalDiscoveryPage() {
                   </select>
                 </label>
                 <label>
-                  R Grid (%)
-                  <input value={createState.riskValues} onChange={(event) => setCreateState((current) => ({ ...current, riskValues: event.target.value }))} />
+                  Minimum R (%)
+                  <input min={0.1} step={0.1} type="number" value={createState.riskMinimum} onChange={(event) => setCreateState((current) => ({ ...current, riskMinimum: Number(event.target.value) }))} />
+                </label>
+                <label>
+                  Maximum R (%)
+                  <input min={0.1} step={0.1} type="number" value={createState.riskMaximum} onChange={(event) => setCreateState((current) => ({ ...current, riskMaximum: Number(event.target.value) }))} />
                 </label>
                 <label>
                   Research Start
@@ -834,11 +847,8 @@ export function ResearchSignalDiscoveryPage() {
                   <input type="date" value={createState.walkForwardEnd} onChange={(event) => setCreateState((current) => ({ ...current, walkForwardEnd: event.target.value }))} />
                 </label>
                 <label>
-                  Max Hold
-                  <select value={createState.maxHoldHours} onChange={(event) => setCreateState((current) => ({ ...current, maxHoldHours: Number(event.target.value) }))}>
-                    <option value={36}>36 hours</option>
-                    <option value={48}>48 hours</option>
-                  </select>
+                  Max Hold (hours)
+                  <input min={1} step={1} type="number" value={createState.maxHoldHours} onChange={(event) => setCreateState((current) => ({ ...current, maxHoldHours: Number(event.target.value) }))} />
                 </label>
                 <label>
                   Entry Delays (min)
@@ -861,7 +871,7 @@ export function ResearchSignalDiscoveryPage() {
                 <button className="button button--secondary" onClick={() => setCreateOpen(false)} type="button">Cancel</button>
                 <button
                   className="button button--primary"
-                  disabled={!selectedDataset || parseNumberList(createState.riskValues).filter((value) => value > 0).length === 0 || createMutation.isPending}
+                  disabled={!selectedDataset || configuredRiskValues.length === 0 || !Number.isInteger(createState.maxHoldHours) || createState.maxHoldHours <= 0 || createMutation.isPending}
                   onClick={submitCreate}
                   type="button"
                 >

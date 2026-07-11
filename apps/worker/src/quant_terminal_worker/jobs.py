@@ -256,7 +256,7 @@ def _execute_signal_discovery_atlas(
     try:
         ref = _signal_discovery_data_ref(market_data_repository, session)
         config_value = session.get("config") or {}
-        horizons = tuple(float(value) for value in config_value.get("horizon_hours", (36, 48)))
+        horizons = tuple(float(value) for value in config_value.get("horizon_hours", (48,)))
         delays = tuple(
             int(value) for value in config_value.get("entry_delays_minutes", (5,))
         )
@@ -1065,7 +1065,18 @@ def _flatten_signal_roles(signals_by_role: dict[str, list[dict[str, Any]]]) -> l
 
 def _stage2_raw_candles(repository: Any, session: dict[str, Any], *, workspace_root: Path) -> list[Any]:
     start = f"{_date_string(session['train_start'])}T00:00:00Z"
-    end = _add_hours(f"{_date_string(session['walk_forward_end'])}T23:59:59Z", 36)
+    get_source_run = getattr(repository, "get_stage0_universe_run", None)
+    source_run_id = session.get("source_universe_run_id")
+    source_run = (
+        get_source_run(source_run_id)
+        if callable(get_source_run) and source_run_id
+        else None
+    )
+    forward_hours = int(source_run["forward_hours"]) if source_run is not None else 36
+    end = _add_hours(
+        f"{_date_string(session['walk_forward_end'])}T23:59:59Z",
+        forward_hours,
+    )
     reader = MarketDataReader(repository=repository, workspace_root=workspace_root)
     return reader.get_candles(
         asset=session["asset"],

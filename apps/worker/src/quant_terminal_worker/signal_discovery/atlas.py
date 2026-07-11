@@ -21,7 +21,7 @@ class DiscoveryConfig:
     walk_forward_start: datetime
     reward_multiple: float = 2.0
     stop_multiple: float = 1.0
-    horizon_hours: tuple[float, ...] = (36.0, 48.0)
+    horizon_hours: tuple[float, ...] = (48.0,)
     entry_delays_minutes: tuple[int, ...] = (5,)
     fee_bps_per_side: float = 0.0
     slippage_bps_per_side: float = 0.0

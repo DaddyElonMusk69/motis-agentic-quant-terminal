@@ -5,10 +5,46 @@ from typing import Any
 
 import pytest
 
+import quant_terminal_worker.stage4.portfolio_backtest as portfolio_backtest
 from quant_terminal_worker.stage4.portfolio_backtest import delete_portfolio_backtest_run
 from quant_terminal_worker.stage4.portfolio_backtest import list_portfolio_backtest_runs
 from quant_terminal_worker.stage4.portfolio_backtest import run_portfolio_backtest
 from quant_terminal_worker.stage4.realized_expectancy import _simulate_account_position
+
+
+def test_portfolio_candle_loader_uses_source_universe_forward_hours(
+    tmp_path,
+    monkeypatch,
+):
+    calls = {}
+
+    class Reader:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_candles(self, **kwargs):
+            calls.update(kwargs)
+            return []
+
+    monkeypatch.setattr(portfolio_backtest, "MarketDataReader", Reader)
+
+    class Repository:
+        @staticmethod
+        def get_stage0_universe_run(run_id):
+            return {"forward_hours": 72} if run_id == "stage0-discovery-v1" else None
+
+    portfolio_backtest._load_candles(
+        session={
+            "asset": "BTC",
+            "train_start": "2026-01-01",
+            "walk_forward_end": "2026-01-31",
+            "source_universe_run_id": "stage0-discovery-v1",
+        },
+        repository=Repository(),
+        workspace_root=tmp_path,
+    )
+
+    assert calls["end"] == "2026-02-03T23:59:59Z"
 
 
 class MockRepository:

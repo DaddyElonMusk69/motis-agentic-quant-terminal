@@ -1,4 +1,4 @@
-import { BarChart3, ChevronDown, Database, FlaskConical, Gauge, RadioTower, TrendingUp } from "lucide-react";
+import { BarChart3, ChevronDown, Database, FlaskConical, Gauge, RadioTower, ScanSearch, TrendingUp } from "lucide-react";
 import type { AppRoute } from "../app/router";
 
 type SidebarNavProps = {
@@ -13,19 +13,19 @@ const primaryItems: Array<{
 }> = [
   { label: "Dashboard", route: "/dashboard", icon: Gauge },
   { label: "Data", route: "/data", icon: Database },
+  { label: "Signal Discovery", route: "/research/discovery", icon: ScanSearch },
   { label: "Engines", route: "/engines", icon: RadioTower },
   { label: "R&D", route: "/research/stage0", icon: FlaskConical },
   { label: "Trading", route: "/trading", icon: TrendingUp }
 ];
 
 const researchItems: Array<{ label: string; route: AppRoute }> = [
-  { label: "Signal Discovery", route: "/research/discovery" },
   { label: "Training Pools", route: "/research/stage0" },
   { label: "Development", route: "/research/development" }
 ];
 
 export function SidebarNav({ route, navigate }: SidebarNavProps) {
-  const inResearch = route.startsWith("/research");
+  const inResearch = route === "/research/stage0" || route === "/research/development";
 
   return (
     <aside className="terminal-sidebar">

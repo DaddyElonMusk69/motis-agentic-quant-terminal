@@ -165,7 +165,7 @@ class SignalDiscoverySessionCreateRequest(BaseModel):
     risk_values: list[float] = Field(min_length=1)
     reward_multiple: float = Field(default=2.0, gt=0)
     stop_multiple: float = Field(default=1.0, gt=0)
-    horizon_hours: list[int] = Field(default_factory=lambda: [36, 48], min_length=1)
+    horizon_hours: list[int] = Field(default_factory=lambda: [48], min_length=1)
     entry_delays_minutes: list[int] = Field(default_factory=lambda: [5], min_length=1)
     fee_bps_per_side: float = Field(default=0.0, ge=0)
     slippage_bps_per_side: float = Field(default=0.0, ge=0)
@@ -174,7 +174,7 @@ class SignalDiscoverySessionCreateRequest(BaseModel):
 
 class SignalDiscoveryFreezeRequest(BaseModel):
     selected_risk_pct: float = Field(gt=0)
-    horizon_hours: Literal[36, 48]
+    horizon_hours: int = Field(gt=0)
     entry_delay_minutes: int = Field(ge=0)
 
 
@@ -2768,8 +2768,8 @@ def _validate_signal_discovery_create_request(
         raise HTTPException(status_code=400, detail="risk_values must be positive")
     if request.reward_multiple != 2.0 or request.stop_multiple != 1.0:
         raise HTTPException(status_code=400, detail="Outcome-First v1 requires 2R/1R barriers")
-    if any(value not in {36, 48} for value in request.horizon_hours):
-        raise HTTPException(status_code=400, detail="horizon_hours may contain only 36 and 48")
+    if any(value <= 0 for value in request.horizon_hours):
+        raise HTTPException(status_code=400, detail="horizon_hours must be positive whole hours")
     if any(value < 0 for value in request.entry_delays_minutes):
         raise HTTPException(status_code=400, detail="entry delays must be nonnegative")
     research_start = _as_utc(request.research_start)
@@ -3063,7 +3063,18 @@ def _flatten_signal_roles(signals_by_role: dict[str, list[dict[str, Any]]]) -> l
 
 def _stage2_raw_candles(session: dict[str, Any], *, repository: Any) -> list[Any]:
     start = f"{_date_string(session['train_start'])}T00:00:00Z"
-    end = _add_hours(f"{_date_string(session['walk_forward_end'])}T23:59:59Z", 36)
+    get_source_run = getattr(repository, "get_stage0_universe_run", None)
+    source_run_id = session.get("source_universe_run_id")
+    source_run = (
+        get_source_run(source_run_id)
+        if callable(get_source_run) and source_run_id
+        else None
+    )
+    forward_hours = int(source_run["forward_hours"]) if source_run is not None else 36
+    end = _add_hours(
+        f"{_date_string(session['walk_forward_end'])}T23:59:59Z",
+        forward_hours,
+    )
     reader = MarketDataReader(repository=repository, workspace_root=Path.cwd())
     return reader.get_candles(
         asset=session["asset"],

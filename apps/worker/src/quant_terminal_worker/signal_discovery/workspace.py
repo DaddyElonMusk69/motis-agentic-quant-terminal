@@ -156,8 +156,9 @@ def _validate_target_payload(
         raise ValueError("Outcome-First v1 requires a 2R reward barrier")
     if float(selected_target["stop_multiple"]) != 1.0:
         raise ValueError("Outcome-First v1 requires a 1R stop barrier")
-    if float(selected_target["horizon_hours"]) not in {36.0, 48.0}:
-        raise ValueError("horizon_hours must be 36 or 48")
+    horizon_hours = float(selected_target["horizon_hours"])
+    if horizon_hours <= 0 or not horizon_hours.is_integer():
+        raise ValueError("horizon_hours must be positive whole hours")
     if int(selected_target["entry_delay_minutes"]) < 0:
         raise ValueError("entry_delay_minutes must be nonnegative")
     if selected_target["entry_semantics"] != "next_5m_open":

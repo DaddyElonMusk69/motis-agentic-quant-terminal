@@ -97,7 +97,7 @@ def test_frozen_target_is_versioned_hashed_idempotent_and_immutable(tmp_path: Pa
         "selected_risk_pct": 1.0,
         "reward_multiple": 2.0,
         "stop_multiple": 1.0,
-        "horizon_hours": 36,
+        "horizon_hours": 72,
         "entry_delay_minutes": 5,
         "entry_semantics": "next_5m_open",
         "fee_bps_per_side": 5.0,

@@ -1,6 +1,7 @@
 import json
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -15,6 +16,37 @@ from quant_terminal_api.repositories.runtime import RuntimeRepository
 from quant_terminal_worker.execution.bundle_loader import load_strategy_module
 from quant_terminal_worker.signal_discovery.workspace import materialize_training_atlas
 from quant_terminal_worker.stage4.realized_expectancy import run_stage4_realized_expectancy
+
+
+def test_stage2_raw_candles_uses_source_universe_forward_hours(monkeypatch):
+    calls = {}
+
+    class Reader:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_candles(self, **kwargs):
+            calls.update(kwargs)
+            return []
+
+    monkeypatch.setattr(api_main, "MarketDataReader", Reader)
+    repository = SimpleNamespace(
+        get_stage0_universe_run=lambda run_id: (
+            {"forward_hours": 72} if run_id == "stage0-discovery-v1" else None
+        )
+    )
+
+    api_main._stage2_raw_candles(
+        {
+            "asset": "BTC",
+            "train_start": "2026-01-01",
+            "walk_forward_end": "2026-01-31",
+            "source_universe_run_id": "stage0-discovery-v1",
+        },
+        repository=repository,
+    )
+
+    assert calls["end"] == "2026-02-03T23:59:59Z"
 
 
 def test_signal_discovery_api_lifecycle_and_validation(tmp_path, monkeypatch):
@@ -43,10 +75,10 @@ def test_signal_discovery_api_lifecycle_and_validation(tmp_path, monkeypatch):
         "research_end": "2026-03-29T23:55:00Z",
         "walk_forward_start": "2026-04-01T00:00:00Z",
         "walk_forward_end": "2026-05-30T23:55:00Z",
-        "risk_values": [0.75, 1.0, 1.25],
+        "risk_values": [0.6, 0.7, 0.8, 0.9, 1.0],
         "reward_multiple": 2.0,
         "stop_multiple": 1.0,
-        "horizon_hours": [36, 48],
+        "horizon_hours": [72],
         "entry_delays_minutes": [5, 10],
         "fee_bps_per_side": 5.0,
         "slippage_bps_per_side": 5.0,
@@ -61,7 +93,8 @@ def test_signal_discovery_api_lifecycle_and_validation(tmp_path, monkeypatch):
     session = create_response.json()["session"]
     assert session["status"] == "draft"
     assert session["asset"] == "BTC"
-    assert session["config"]["risk_values"] == [0.75, 1.0, 1.25]
+    assert session["config"]["risk_values"] == [0.6, 0.7, 0.8, 0.9, 1.0]
+    assert session["config"]["horizon_hours"] == [72]
     assert client.get("/api/v1/research/signal-discovery-sessions").json()["sessions"][0][
         "session_id"
     ] == "discovery-btc-api"
@@ -85,9 +118,11 @@ def test_signal_discovery_api_lifecycle_and_validation(tmp_path, monkeypatch):
         hard_negatives=[],
         r_feasibility={
             "r_summaries": [
-                {"risk_pct": 0.75},
+                {"risk_pct": 0.6},
+                {"risk_pct": 0.7},
+                {"risk_pct": 0.8},
+                {"risk_pct": 0.9},
                 {"risk_pct": 1.0},
-                {"risk_pct": 1.25},
             ]
         },
     )
@@ -100,7 +135,7 @@ def test_signal_discovery_api_lifecycle_and_validation(tmp_path, monkeypatch):
         "/api/v1/research/signal-discovery-sessions/discovery-btc-api/freeze",
         json={
             "selected_risk_pct": 1.0,
-            "horizon_hours": 36,
+            "horizon_hours": 72,
             "entry_delay_minutes": 5,
         },
     )
@@ -109,6 +144,7 @@ def test_signal_discovery_api_lifecycle_and_validation(tmp_path, monkeypatch):
     frozen = freeze_response.json()["session"]
     assert frozen["status"] == "target_frozen"
     assert frozen["frozen_target"]["selected_target"]["selected_risk_pct"] == 1.0
+    assert frozen["frozen_target"]["selected_target"]["horizon_hours"] == 72
     assert (artifact_root / "target/frozen_target.json").is_file()
     assert not (artifact_root / "walk_forward").exists()
 
@@ -201,11 +237,24 @@ def test_signal_discovery_api_lifecycle_and_validation(tmp_path, monkeypatch):
             "session_id": "discovery-invalid",
             "research_end": "2026-04-02T00:00:00Z",
             "risk_values": [],
-            "horizon_hours": [24],
+            "horizon_hours": [0],
             "fee_bps_per_side": -1,
         },
     )
     assert invalid_response.status_code in {400, 422}
+
+    default_horizon_payload = {
+        key: value for key, value in create_payload.items() if key != "horizon_hours"
+    }
+    default_horizon_response = client.post(
+        "/api/v1/research/signal-discovery-sessions",
+        json={
+            **default_horizon_payload,
+            "session_id": "discovery-default-horizon",
+        },
+    )
+    assert default_horizon_response.status_code == 200
+    assert default_horizon_response.json()["session"]["config"]["horizon_hours"] == [48]
 
     draft_response = client.post(
         "/api/v1/research/signal-discovery-sessions",

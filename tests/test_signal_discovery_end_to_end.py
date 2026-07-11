@@ -58,12 +58,12 @@ def test_fresh_discovery_session_reaches_stage1_without_artifact_surgery(
             "dataset_id": dataset_id,
             "research_start": "2026-01-01T00:00:00Z",
             "research_end": "2026-01-01T00:10:00Z",
-            "walk_forward_start": "2026-01-04T00:00:00Z",
-            "walk_forward_end": "2026-01-04T00:10:00Z",
-            "risk_values": [0.75, 1.0, 1.25],
+            "walk_forward_start": "2026-01-05T00:00:00Z",
+            "walk_forward_end": "2026-01-05T00:10:00Z",
+            "risk_values": [0.6, 0.7, 0.8, 0.9, 1.0],
             "reward_multiple": 2.0,
             "stop_multiple": 1.0,
-            "horizon_hours": [36, 48],
+            "horizon_hours": [72],
             "entry_delays_minutes": [5, 10],
             "fee_bps_per_side": 2.5,
             "slippage_bps_per_side": 2.5,
@@ -85,9 +85,11 @@ def test_fresh_discovery_session_reaches_stage1_without_artifact_surgery(
     assert atlas_session["status"] == "atlas_ready"
     feasibility = atlas_session["summary"]
     assert {row["risk_pct"] for row in feasibility["r_summaries"]} == {
-        0.75,
+        0.6,
+        0.7,
+        0.8,
+        0.9,
         1.0,
-        1.25,
     }
     assert feasibility["training_episode_count"] > 0
     assert not (artifact_root / "walk_forward").exists()
@@ -96,7 +98,7 @@ def test_fresh_discovery_session_reaches_stage1_without_artifact_surgery(
         f"/api/v1/research/signal-discovery-sessions/{session_id}/freeze",
         json={
             "selected_risk_pct": 1.0,
-            "horizon_hours": 36,
+            "horizon_hours": 72,
             "entry_delay_minutes": 5,
         },
     )
@@ -133,7 +135,7 @@ def test_fresh_discovery_session_reaches_stage1_without_artifact_surgery(
     engine_id = "fixture-engine"
     signal_set_id = "BTC-fixture-engine-canonical"
     signal_set_key = f"{engine_id}:BTC:{signal_set_id}"
-    decision_timestamps = [_ts("2026-01-01"), _ts("2026-01-04")]
+    decision_timestamps = [_ts("2026-01-01"), _ts("2026-01-05")]
     repository.upsert_signal_set(
         {
             "signal_set_key": signal_set_key,
@@ -238,6 +240,7 @@ def test_fresh_discovery_session_reaches_stage1_without_artifact_surgery(
     candidate_id = handed_off["handoff"]["candidate_id"]
     candidate = repository.get_stage0_universe_candidate(candidate_id)
     assert candidate["metrics"]["label_contract"] == "fixed_r_first_touch.v1"
+    assert candidate["metrics"]["forward_hours"] == 72
     assert candidate["metrics"]["fixed_target_contract_path"] == (
         handed_off["handoff"]["fixed_target_contract_path"]
     )
@@ -329,11 +332,11 @@ def _write_canonical_parquet(tmp_path: Path) -> Path:
     storage_root = tmp_path / ".data/market-data/btc-outcome-first-e2e"
     outcome_timestamps = {
         _ts("2026-01-01") + timedelta(minutes=10),
-        _ts("2026-01-04") + timedelta(minutes=10),
+        _ts("2026-01-05") + timedelta(minutes=10),
     }
     rows_by_month: dict[tuple[int, int], list[dict[str, object]]] = {}
     timestamp = datetime(2025, 12, 25, tzinfo=UTC)
-    end = datetime(2026, 1, 6, 1, tzinfo=UTC)
+    end = datetime(2026, 1, 8, 1, tzinfo=UTC)
     while timestamp <= end:
         is_long_target = timestamp in outcome_timestamps
         rows_by_month.setdefault((timestamp.year, timestamp.month), []).append(

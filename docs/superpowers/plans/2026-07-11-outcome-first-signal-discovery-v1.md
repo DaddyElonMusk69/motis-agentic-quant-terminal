@@ -106,7 +106,7 @@ git commit -m "feat: add executable fixed-r opportunity labels"
 
 - [x] **Step 1: Add failing episode and summary tests**
 
-Test that consecutive 5m LONG labels form one episode, a NEUTRAL row closes it, the next LONG component gets a new episode id, and SHORT never joins LONG. Test that summaries report raw timestamps, independent episodes, direction counts, monthly recurrence, delay robustness, 36h/48h sensitivity, and cost-to-R.
+Test that consecutive 5m LONG labels form one episode, a NEUTRAL row closes it, the next LONG component gets a new episode id, and SHORT never joins LONG. Test that summaries report raw timestamps, independent episodes, direction counts, monthly recurrence, delay robustness, configured-horizon sensitivity, and cost-to-R.
 
 - [x] **Step 2: Run the focused test**
 
@@ -300,7 +300,7 @@ git commit -m "feat: run signal discovery research jobs"
 
 - [x] **Step 1: Write failing API tests**
 
-Test create/list/get/delete, atlas enqueue, freeze, prompt retrieval, attach candidate engine, evaluation enqueue, and handoff enqueue. Validate ordered split windows, nonempty R values, positive multiples, 36/48-style horizons, nonnegative costs, and immutable frozen targets.
+Test create/list/get/delete, atlas enqueue, freeze, prompt retrieval, attach candidate engine, evaluation enqueue, and handoff enqueue. Validate ordered split windows, nonempty R values, positive multiples, positive whole-hour horizons, nonnegative costs, and immutable frozen targets.
 
 - [x] **Step 2: Run focused API tests**
 
@@ -559,6 +559,57 @@ git add docs/engine-strategy-contract.md docs/superpowers/specs/2026-07-11-fixed
 git commit -m "docs: document outcome-first signal discovery"
 ```
 
+### Task 14: Flexible Discovery Inputs and Standalone Navigation
+
+**Files:**
+- Create: `apps/web-v2/src/app/signalDiscovery.ts`
+- Create: `apps/web-v2/tests/signalDiscovery.test.ts`
+- Modify: `apps/web-v2/package.json`
+- Modify: `apps/web-v2/src/pages/ResearchSignalDiscoveryPage.tsx`
+- Modify: `apps/web-v2/src/shell/SidebarNav.tsx`
+- Modify: `apps/api/src/quant_terminal_api/main.py`
+- Modify: `apps/worker/src/quant_terminal_worker/signal_discovery/workspace.py`
+- Modify: `apps/worker/src/quant_terminal_worker/jobs.py`
+- Modify: `apps/worker/src/quant_terminal_worker/stage4/portfolio_backtest.py`
+- Test: `tests/test_api.py`
+- Test: `tests/test_worker_jobs.py`
+- Test: `tests/test_signal_discovery_workspace.py`
+- Test: `tests/test_signal_discovery_end_to_end.py`
+- Test: `tests/test_portfolio_backtest.py`
+
+- [x] **Step 1: Prove the new input contracts fail**
+
+Add a Node unit test requiring `buildRiskGrid(0.6, 1.0)` to return `[0.6, 0.7, 0.8, 0.9, 1.0]`, including stable decimal rounding and invalid-range rejection. Change the discovery API lifecycle test to create and freeze a `72`-hour horizon, and change the immutable target test to freeze the same positive nonstandard horizon.
+
+Run:
+
+```bash
+node --test --experimental-strip-types apps/web-v2/tests/signalDiscovery.test.ts
+pytest -q tests/test_api.py -k signal_discovery tests/test_signal_discovery_workspace.py
+```
+
+Expected: the TypeScript helper import is missing and the backend rejects the `72`-hour horizon.
+
+- [x] **Step 2: Implement the flexible controls and validation**
+
+Add the deterministic range helper, replace the comma-delimited R field with numeric minimum/maximum inputs using `step="0.1"`, and submit the generated explicit values. Replace the 36/48 selector with a positive whole-hour numeric input and submit it as the sole configured horizon. Change API and frozen-target validation from a 36/48 allowlist to positive whole hours. Extend Stage 2 and Stage 4 candle reads by the source universe's frozen `forward_hours`, not a hard-coded 36 hours.
+
+- [x] **Step 3: Promote Signal Discovery in navigation**
+
+Move `/research/discovery` from `researchItems` into `primaryItems` immediately before `/engines`, using the Lucide `ScanSearch` icon. Keep `/research/stage0` and `/research/development` under R&D, and ensure the R&D parent is active only for those nested routes.
+
+- [x] **Step 4: Verify and commit**
+
+Run:
+
+```bash
+npm --workspace apps/web-v2 run test:signal-discovery
+pytest -q tests/test_api.py -k signal_discovery tests/test_signal_discovery_workspace.py tests/test_signal_discovery_end_to_end.py tests/test_worker_jobs.py tests/test_portfolio_backtest.py
+npm --workspace apps/web-v2 run build
+```
+
+Expected: all focused tests and the production build pass.
+
 ## Completion Audit
 
 Before marking the goal complete, collect authoritative evidence for every Definition of Done item:
@@ -566,11 +617,12 @@ Before marking the goal complete, collect authoritative evidence for every Defin
 - API response and DB row prove session creation and immutable freeze.
 - Training artifact listing proves executable labels, episodes, neighboring-R, delay, and cost metrics.
 - Absence of WF label artifacts before freeze proves the leakage boundary.
-- The compiled discovery workspace exposes R feasibility, episode counts and concentration, LONG/SHORT distribution, monthly recurrence, costs, delay sensitivity, and 36h/48h scenario comparison. Screenshot evidence is intentionally absent under the user's 2026-07-11 interactive acceptance waiver.
+- The compiled discovery workspace exposes R feasibility, episode counts and concentration, LONG/SHORT distribution, monthly recurrence, costs, delay sensitivity, and configured-horizon scenario comparison. Screenshot evidence is intentionally absent under the user's 2026-07-11 interactive acceptance waiver.
 - Prompt test and rendered prompt prove training-only context plus the required skill contract.
 - Candidate evaluation artifact proves precision, coverage, direct R outcomes, direction, parity, and WF slices.
 - Handoff artifact, accepted Stage 0 candidate, and successfully created Stage 1 session prove no manual artifact surgery.
 - `tests/test_signal_discovery_end_to_end.py` proves one fresh session traverses the complete Parquet-to-Stage-1 lifecycle through public APIs and real queued job handlers without direct session or artifact mutation.
 - Stage 2/3 tests prove the frozen target is not recalibrated downstream.
 - The final focused suite passed `213` tests. The repository-wide suite passed `629` tests and reproduced the same 10 checkpoint failures in legacy registry/bundle fixtures and the pre-existing `pgrep` script check; no Signal Discovery regression was added.
+- The flexible-input amendment expanded the focused API/worker/Stage 2/3/portfolio suite to `238` passing tests, plus 3 frontend range-helper tests and a successful production build.
 - Static checks and the frontend production build prove automated coverage. Interactive UX quality remains unverified under the explicit waiver.

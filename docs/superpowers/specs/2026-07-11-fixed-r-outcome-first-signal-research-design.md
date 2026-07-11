@@ -2,11 +2,11 @@
 
 ## Status
 
-Implemented on `codex/outcome-first-signal-discovery-v1`. Backend contracts, queued jobs, API lifecycle, engine prompt, candidate evaluation, Stage handoff, downstream fixed-target preservation, and the v2 workspace are covered by focused tests. A continuous integration test proves a fresh canonical Parquet session can reach Stage 1 without direct session or artifact mutation. The compiled workspace includes episode concentration, direction distribution, monthly recurrence, cost, delay, and 36h/48h review surfaces. The user waived interactive browser and frontend end-to-end acceptance on 2026-07-11.
+Implemented on `main`. Backend contracts, queued jobs, API lifecycle, engine prompt, candidate evaluation, Stage handoff, downstream fixed-target preservation, and the v2 workspace are covered by focused tests. A continuous integration test proves a fresh canonical Parquet session can reach Stage 1 without direct session or artifact mutation. The compiled workspace includes episode concentration, direction distribution, monthly recurrence, cost, delay, and configured-horizon review surfaces. The user waived interactive browser and frontend end-to-end acceptance on 2026-07-11.
 
 ## Objective
 
-Research a BTC entry process that can identify trade opportunities approximately daily or almost daily, with a maximum holding horizon of 36 to 48 hours.
+Research a BTC entry process that can identify trade opportunities approximately daily or almost daily, using a user-selected positive whole-hour maximum holding horizon.
 
 The system will allow only one open position per asset. Pyramiding is outside the scope of this research iteration. The immediate objective is entry opportunity discovery and directional entry selection, not position management.
 
@@ -42,7 +42,7 @@ The path label is determined by barrier order, not eventual maximum excursion:
 - `NEUTRAL`: neither direction produces a qualifying target-before-stop path within the horizon.
 - `AMBIGUOUS`: available candle resolution cannot establish barrier order.
 
-The primary horizon is 36 hours. A 48-hour horizon is used as a sensitivity check and possible timeout extension. A timestamp's reference entry must be executable using information available at that time; future MAE or MFE must never determine its TP or SL levels.
+The default horizon is 48 hours, but the user may select any positive whole-hour maximum holding time. A timestamp's reference entry must be executable using information available at that time; future MAE or MFE must never determine its TP or SL levels.
 
 ## Opportunity Episodes
 
@@ -103,7 +103,7 @@ Research evaluation must preserve these rules:
 - Report independent episodes separately from raw qualifying timestamps.
 - Judge emitted signals by their own realized 2R-before-1R path; do not use nearest-oracle timestamp tolerance.
 - Include fees, slippage assumptions, entry-delay sensitivity, timeout outcomes, and ambiguous candles.
-- Use purging or embargo appropriate for overlapping 36-to-48-hour future windows.
+- Use purging or embargo appropriate for the configured overlapping future windows.
 - Require stability across neighboring `R` values and multiple independent periods.
 - Run a final sequential replay with one position per asset and no overlapping entries.
 
@@ -127,7 +127,7 @@ No production signal engine should be built before the opportunity atlas establi
 
 The terminal now exposes this sequence as a persisted Signal Discovery session:
 
-1. Create a session from a canonical Parquet 5-minute candle dataset, optional canonical OI dataset, ordered research/WF windows, a predeclared R grid, 36/48-hour horizons, entry delays, and costs.
+1. Create a session from a canonical Parquet 5-minute candle dataset, optional canonical OI dataset, ordered research/WF windows, an inclusive minimum/maximum R range expanded at fixed `0.1` percentage-point increments, a positive whole-hour maximum holding horizon, entry delays, and costs.
 2. Run the training atlas to write timestamp labels, contiguous same-direction episodes, causal feature snapshots, matched hard negatives, neighboring-R feasibility, delay sensitivity, horizon sensitivity, and cost-in-R diagnostics.
 3. Freeze one selected target as immutable `signal_discovery_target.v1`, keyed by a SHA-256 config hash.
 4. Generate one training-only `$signal-engine-builder` prompt. The agent may reject the hypothesis or build one neutral engine plus paired directional strategy.
@@ -172,7 +172,7 @@ Those subjects may be designed later after the fixed-R opportunity thesis is tes
 - Research begins from desired trade outcomes rather than a preselected engine pattern.
 - `R` is a fixed percentage, not volatility-adjusted.
 - The target path is 2R before 1R.
-- The main horizon is 36 hours, with 48 hours as sensitivity.
+- The maximum holding horizon is user-selected in positive whole hours; 48 hours is the default rather than a contract restriction.
 - Any qualifying timestamp inside an opportunity episode is an acceptable entry.
 - Exact timestamp-matching tolerances are unnecessary.
 - Episodes, not raw timestamps, are the independent opportunity unit.
