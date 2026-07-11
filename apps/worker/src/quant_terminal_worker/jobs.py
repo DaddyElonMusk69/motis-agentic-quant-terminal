@@ -27,6 +27,7 @@ from quant_terminal_worker.signal_discovery.features import (
     select_hard_negatives,
 )
 from quant_terminal_worker.signal_discovery.evaluation import evaluate_registered_engine
+from quant_terminal_worker.signal_discovery.handoff import handoff_accepted_candidate
 from quant_terminal_worker.signal_discovery.workspace import (
     materialize_training_atlas,
     materialize_walk_forward_atlas,
@@ -74,6 +75,7 @@ def execute_job(
         "signal_discovery_atlas": _execute_signal_discovery_atlas,
         "signal_discovery_walk_forward": _execute_signal_discovery_walk_forward,
         "signal_discovery_engine_evaluation": _execute_signal_discovery_engine_evaluation,
+        "signal_discovery_handoff": _execute_signal_discovery_handoff,
     }
     handler = handlers.get(job["job_type"])
     if handler is None:
@@ -503,6 +505,40 @@ def _execute_signal_discovery_engine_evaluation(
         else:
             updated = repository.get_signal_discovery_session(session["session_id"])
         return {"session": updated, "evaluation": evaluation}
+    except Exception as exc:
+        _fail_signal_discovery_session(repository, session=session, exc=exc)
+        raise
+
+
+def _execute_signal_discovery_handoff(
+    *,
+    repository: Any,
+    job: dict[str, Any],
+    workspace_root: Path,
+    market_data_repository: Any | None = None,
+) -> dict[str, Any]:
+    del market_data_repository
+    payload = job.get("payload") or {}
+    session = _signal_discovery_session(repository, str(payload["session_id"]))
+    if not (session.get("evaluation") or {}).get("accepted"):
+        raise ValueError("signal discovery handoff requires an accepted evaluation")
+    repository.heartbeat_job(job["job_id"], current_step="signal_discovery_handoff")
+    session = repository.update_signal_discovery_session(
+        session["session_id"],
+        status="handoff_running",
+    )
+    try:
+        handoff = handoff_accepted_candidate(
+            workspace_root=workspace_root,
+            repository=repository,
+            session=session,
+        )
+        updated = repository.update_signal_discovery_session(
+            session["session_id"],
+            status="handed_off",
+            handoff=handoff,
+        )
+        return {"session": updated, "handoff": handoff}
     except Exception as exc:
         _fail_signal_discovery_session(repository, session=session, exc=exc)
         raise

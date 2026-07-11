@@ -403,27 +403,27 @@ git commit -m "feat: evaluate engines against frozen discovery targets"
 - Modify: `apps/worker/src/quant_terminal_worker/jobs.py`
 - Test: `tests/test_signal_discovery_handoff.py`
 
-- [ ] **Step 1: Write failing handoff tests**
+- [x] **Step 1: Write failing handoff tests**
 
 Given an accepted evaluation, assert handoff creates a versioned Stage 0 run/candidate tied to the candidate signal set, materializes `scores/ground_truth/*.json` for the candidate's train and WF signals, writes `ground_truth_summary.json` with `label_contract: fixed_r_first_touch.v1`, marks the candidate accepted, and returns a candidate id usable by the existing Stage 1 create endpoint.
 
-- [ ] **Step 2: Run handoff tests**
+- [x] **Step 2: Run handoff tests**
 
 Run: `pytest -q tests/test_signal_discovery_handoff.py`
 
 Expected: missing handoff module failure.
 
-- [ ] **Step 3: Implement compatibility artifacts and repository writes**
+- [x] **Step 3: Implement compatibility artifacts and repository writes**
 
 Materialize only the frozen target labels for actual engine signal timestamps. Store `target_pct=risk_pct*reward_multiple`, `stop_pct=risk_pct*stop_multiple`, `forward_hours`, source discovery session id, config hash, and artifact paths in candidate metrics. Do not call legacy threshold calibration or the Stage 0A max-excursion gate.
 
-- [ ] **Step 4: Verify Stage 1 compatibility**
+- [x] **Step 4: Verify Stage 1 compatibility**
 
 Run: `pytest -q tests/test_signal_discovery_handoff.py tests/test_stage1_scoring.py`
 
 Expected: the existing Stage 1 scorer consumes the generated labels and the new handoff tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/worker/src/quant_terminal_worker/signal_discovery/handoff.py apps/worker/src/quant_terminal_worker/jobs.py tests/test_signal_discovery_handoff.py
