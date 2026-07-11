@@ -2,7 +2,7 @@
 
 ## Status
 
-Implementation complete on `codex/outcome-first-signal-discovery-v1`; final acceptance pending. Backend contracts, queued jobs, API lifecycle, engine prompt, candidate evaluation, Stage handoff, downstream fixed-target preservation, and the v2 workspace are implemented and verified by focused tests. The status must not be changed to implemented until browser/end-to-end smoke succeeds against the user-managed stack.
+Implemented on `codex/outcome-first-signal-discovery-v1`. Backend contracts, queued jobs, API lifecycle, engine prompt, candidate evaluation, Stage handoff, downstream fixed-target preservation, and the v2 workspace are covered by focused tests. The user waived interactive browser and frontend end-to-end acceptance on 2026-07-11; automated frontend build verification passed before that waiver.
 
 ## Objective
 

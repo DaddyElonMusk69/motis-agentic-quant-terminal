@@ -545,13 +545,13 @@ Expected: no new lint failures, all relevant regression tests pass, and the fron
 
 After workspace tests pass, copy `skills/signal-engine-builder/SKILL.md` to `/Users/haokaiqin/.codex/skills/signal-engine-builder/SKILL.md`, then run `cmp` to prove byte parity. This external write requires approval.
 
-- [ ] **Step 4: Run browser and end-to-end smoke verification**
+- [x] **Step 4: Record browser and end-to-end smoke waiver**
 
-With the user-managed stack running, verify desktop and mobile views in the in-app browser: create a small fixture session, run atlas, inspect feasibility, freeze target, open the generated prompt, attach a fixture engine, run evaluation, and hand off. Capture screenshots and confirm no overlaps, blank panels, clipped controls, or console errors. Verify the resulting candidate can create a Stage 1 session through the existing UI.
+Interactive desktop/mobile browser and frontend end-to-end verification was waived by the user on 2026-07-11. The automated frontend production build completed successfully before the waiver, but no browser screenshots or live-stack UI workflow evidence were collected.
 
-- [ ] **Step 5: Update docs and commit**
+- [x] **Step 5: Update docs and commit**
 
-Document the discovery target contract, artifact roles, leakage boundary, engine prompt contract, and fixed-target downstream semantics. Update the concept spec's status to implemented only after the end-to-end smoke test succeeds.
+Document the discovery target contract, artifact roles, leakage boundary, engine prompt contract, fixed-target downstream semantics, and the explicit interactive acceptance waiver.
 
 ```bash
 git add docs/engine-strategy-contract.md docs/superpowers/specs/2026-07-11-fixed-r-outcome-first-signal-research-design.md
@@ -565,9 +565,9 @@ Before marking the goal complete, collect authoritative evidence for every Defin
 - API response and DB row prove session creation and immutable freeze.
 - Training artifact listing proves executable labels, episodes, neighboring-R, delay, and cost metrics.
 - Absence of WF label artifacts before freeze proves the leakage boundary.
-- Frontend screenshots prove R feasibility, concentration, direction, recurrence, cost, and horizon review.
+- Frontend screenshot evidence is intentionally absent under the user's 2026-07-11 interactive acceptance waiver.
 - Prompt test and rendered prompt prove training-only context plus the required skill contract.
 - Candidate evaluation artifact proves precision, coverage, direct R outcomes, direction, parity, and WF slices.
 - Handoff artifact, accepted Stage 0 candidate, and successfully created Stage 1 session prove no manual artifact surgery.
 - Stage 2/3 tests prove the frozen target is not recalibrated downstream.
-- Full test, lint, frontend build, and browser smoke outputs prove regression and UX quality.
+- Focused tests, regression comparison, static checks, and the frontend production build prove automated coverage. Interactive UX quality remains unverified under the explicit waiver.
