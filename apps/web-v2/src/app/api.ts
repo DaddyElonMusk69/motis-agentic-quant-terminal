@@ -1494,11 +1494,13 @@ export function createStage0UniverseRun(request: {
   });
 }
 
-export function executeStage0CandidateBatch(request: { universe_run_id: string; limit: number }): Promise<Stage0BatchExecutionResponse | AsyncJobResponse> {
+export type Stage0LabelMode = "threshold_first_hit" | "terminal_fallback";
+
+export function executeStage0CandidateBatch(request: { universe_run_id: string; limit: number; label_mode?: Stage0LabelMode }): Promise<Stage0BatchExecutionResponse | AsyncJobResponse> {
   return requestJson<Stage0BatchExecutionResponse | AsyncJobResponse>(`/api/v1/research/stage0-universe-runs/${request.universe_run_id}/candidates/execute-batch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ limit: request.limit })
+    body: JSON.stringify({ limit: request.limit, label_mode: request.label_mode ?? "threshold_first_hit" })
   });
 }
 

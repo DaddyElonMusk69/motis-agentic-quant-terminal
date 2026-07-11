@@ -215,6 +215,37 @@ def test_lifecycle_extends_live_canonical_signal_pool_after_warmup(tmp_path):
     assert result["wake"]["signal_scan_result"]["status"] == "no_fresh_canonical_signal"
 
 
+def test_lifecycle_extends_four_hour_variant_canonical_pool_after_warmup(tmp_path):
+    bundle = _bundle(tmp_path)
+    runtime_repository = FakeRuntimeRepository(bundle)
+    runtime_repository.route["signal_engine_id"] = "compression_participation_release_4h_v1"
+    runtime_repository.engines[0][
+        "signal_engine_id"
+    ] = "compression_participation_release_4h_v1"
+    calls = []
+
+    def signal_pool_extender(**kwargs):
+        calls.append(kwargs)
+        return {"status": "completed", "appended": 0}
+
+    run_route_lifecycle_cycle(
+        route_id="aave-live",
+        runtime_repository=runtime_repository,
+        market_data_repository=FakeMarketDataRepository(),
+        fill_service=lambda **kwargs: {"status": "filled"},
+        signal_pool_extender=signal_pool_extender,
+        live_signal_scanner=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("raw scanner must not run")
+        ),
+        adapter=FakeAdapter(),
+        workspace_root=tmp_path,
+    )
+
+    assert calls[0]["signal_engine_id"] == "compression_participation_release_4h_v1"
+    assert calls[0]["asset"] == "AAVE"
+    assert calls[0]["target_end"] is None
+
+
 def test_lifecycle_signal_extension_failure_still_runs_position_management(tmp_path):
     bundle = _bundle(
         tmp_path,

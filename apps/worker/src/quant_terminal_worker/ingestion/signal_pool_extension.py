@@ -6,7 +6,11 @@ from typing import Any
 
 from quant_terminal_sdk.market_data_reader import MarketDataReader
 from quant_terminal_worker.ingestion.legacy_signals import build_signal_set_key
-from quant_terminal_worker.signal_engines.runtime import EngineTrainingContext, resolve_signal_engine
+from quant_terminal_worker.signal_engines.runtime import (
+    EngineTrainingContext,
+    apply_fixed_engine_parameters,
+    resolve_signal_engine,
+)
 
 
 SIGNAL_ENGINE_VERSION = "0.1"
@@ -76,7 +80,10 @@ def extend_signal_pool_from_local_candles(
         repository=repository,
         workspace_root=root,
     )
-    parameters = _engine_parameters(signal_set, defaults=_spec_default_parameters(resolved.spec))
+    parameters = apply_fixed_engine_parameters(
+        resolved.spec,
+        _engine_parameters(signal_set, defaults=_spec_default_parameters(resolved.spec)),
+    )
     generation_parameters = dict(parameters)
     if previous_signal_end is not None:
         generation_parameters["_dedupe_seed_timestamp"] = _iso_z(previous_signal_end)
@@ -136,6 +143,13 @@ def extend_signal_pool_from_local_candles(
             packet_sink=packet_sink,
         )
     )
+    training_result = getattr(training_output, "result", None)
+    reported_coverage = getattr(training_result, "scan_coverage_end_ts", None)
+    scan_coverage_end = (
+        min(requested_target, _parse_timestamp(reported_coverage))
+        if reported_coverage
+        else requested_target
+    )
     generated_packets = list(training_output.packets)
 
     if generated_packets:
@@ -154,7 +168,7 @@ def extend_signal_pool_from_local_candles(
     final_signal_end = stream_state["final_signal_end"]
     updated_manifest = _updated_manifest(
         signal_set=signal_set,
-        target_end=requested_target,
+        target_end=scan_coverage_end,
         raw_candle_end=raw_candle_end,
     )
     repository.upsert_signal_set(
@@ -184,7 +198,7 @@ def extend_signal_pool_from_local_candles(
         signal_set=refreshed or signal_set,
         raw_candle_end=raw_candle_end,
         previous_signal_end=previous_signal_end,
-        scan_coverage_end=requested_target,
+        scan_coverage_end=scan_coverage_end,
         final_signal_end=final_signal_end,
         existing_packet_count=len(existing_signals),
         generated_packet_count=stream_state["generated_packet_count"] or len(generated_packets),

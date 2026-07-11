@@ -3,11 +3,71 @@ from pathlib import Path
 
 from quant_terminal_worker.stage1.workspace import (
     build_stage1_gate_summary,
+    clear_stage1_downstream_artifacts,
     create_stage1_iteration_workspace,
     list_stage1_iterations,
     materialize_stage1_session_workspace,
     repair_stage1_iteration_bundle,
 )
+
+
+def test_clear_stage1_downstream_artifacts_preserves_stage1(tmp_path: Path):
+    artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
+    promotion_root = artifact_root / "promotion"
+    iteration_manifest = artifact_root / "iterations/iter_001_v0.1/manifest.json"
+    canonical_scores = promotion_root / "stage1a_canonical_full_cycle_scores.json"
+    frozen_strategy = promotion_root / "frozen_stage1a_strategy_module/strategy.py"
+    iteration_manifest.parent.mkdir(parents=True)
+    frozen_strategy.parent.mkdir(parents=True)
+    iteration_manifest.write_text("{}\n")
+    canonical_scores.write_text("{}\n")
+    frozen_strategy.write_text("def decide(context): return {}\n")
+
+    downstream_files = [
+        "stage2_capture_curve.json",
+        "stage2_capture_per_signal.json",
+        "stage2_summary.md",
+        "stage2_exit_policy.json",
+        "stage3_trade_inputs.json",
+        "stage3_grid_results.json",
+        "stage3_optimal.json",
+        "stage3_summary.md",
+        "stage3_pyramid_results.json",
+        "stage3_pyramid_optimal.json",
+        "stage3_pyramid_summary.md",
+        "stage4_candidates.json",
+        "stage4_realized_expectancy.json",
+        "stage4_trade_ledger.json",
+        "stage4_optimal.json",
+        "stage4_summary.md",
+    ]
+    for name in downstream_files:
+        (promotion_root / name).write_text("{}\n")
+    downstream_directories = [
+        promotion_root / "stage4_runs",
+        promotion_root / "stage4b_timing",
+        promotion_root / "frozen_stage4b_timing_strategy_module",
+    ]
+    for path in downstream_directories:
+        path.mkdir(parents=True)
+        (path / "artifact.json").write_text("{}\n")
+    portfolio_root = tmp_path / "dev/portfolio_backtests/universe-march-may-vegas"
+    portfolio_root.mkdir(parents=True)
+    (portfolio_root / "portfolio_backtest.json").write_text("{}\n")
+    session = {
+        "session_id": "stage1-aave",
+        "artifact_root": str(artifact_root),
+        "source_universe_run_id": "universe-march-may-vegas",
+    }
+
+    clear_stage1_downstream_artifacts(workspace_root=tmp_path, session=session)
+
+    assert iteration_manifest.exists()
+    assert canonical_scores.exists()
+    assert frozen_strategy.exists()
+    assert all(not (promotion_root / name).exists() for name in downstream_files)
+    assert all(not path.exists() for path in downstream_directories)
+    assert not portfolio_root.exists()
 
 
 def test_materialize_stage1_session_workspace_writes_manifest_and_starter_strategy(tmp_path: Path):

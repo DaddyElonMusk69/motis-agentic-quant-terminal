@@ -59,6 +59,18 @@ class ResolvedSignalEngine:
     scan_live_signal: Callable[[EngineLiveScanContext], LiveSignalScanResult]
 
 
+def apply_fixed_engine_parameters(
+    spec: SignalEngineSpec,
+    parameters: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(parameters)
+    schema = spec.configuration_schema if isinstance(spec.configuration_schema, dict) else {}
+    fixed = schema.get("fixed_parameters")
+    if isinstance(fixed, dict):
+        merged.update(fixed)
+    return merged
+
+
 def resolve_signal_engine(
     signal_engine_id: str,
     *,

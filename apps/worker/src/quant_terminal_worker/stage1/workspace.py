@@ -14,6 +14,40 @@ from quant_terminal_strategies.vegas_ema_base import decide
 
 '''
 
+STAGE1_DOWNSTREAM_FILES = (
+    "stage2_capture_curve.json",
+    "stage2_capture_per_signal.json",
+    "stage2_summary.md",
+    "stage2_exit_policy.json",
+    "stage3_trade_inputs.json",
+    "stage3_grid_results.json",
+    "stage3_optimal.json",
+    "stage3_summary.md",
+    "stage3_pyramid_results.json",
+    "stage3_pyramid_optimal.json",
+    "stage3_pyramid_summary.md",
+    "stage4_candidates.json",
+    "stage4_realized_expectancy.json",
+    "stage4_trade_ledger.json",
+    "stage4_optimal.json",
+    "stage4_summary.md",
+)
+
+
+def clear_stage1_downstream_artifacts(*, workspace_root: Path, session: dict[str, Any]) -> None:
+    promotion_root = _artifact_root(workspace_root, session) / "promotion"
+    for name in STAGE1_DOWNSTREAM_FILES:
+        (promotion_root / name).unlink(missing_ok=True)
+    for name in ("stage4_runs", "stage4b_timing", "frozen_stage4b_timing_strategy_module"):
+        shutil.rmtree(promotion_root / name, ignore_errors=True)
+
+    universe_run_id = session.get("source_universe_run_id")
+    if universe_run_id:
+        shutil.rmtree(
+            workspace_root / "dev" / "portfolio_backtests" / str(universe_run_id),
+            ignore_errors=True,
+        )
+
 
 def materialize_stage1_session_workspace(
     *,

@@ -90,3 +90,22 @@ def test_build_stage0_commands_uses_canonical_skill_scripts(tmp_path):
     assert "36" in commands["stage0a"]
     assert "--significance-threshold" in commands["stage0c"]
     assert "0.9" in commands["stage0c"]
+
+
+def test_build_stage0_commands_passes_terminal_fallback_label_mode(tmp_path):
+    commands = build_stage0_commands(
+        workspace_root=tmp_path,
+        strategy_id="btc-vegas-tunnel-v01",
+        asset="BTC",
+        signal_engine_id="vegas_ema",
+        signal_set_id="2026-BTC-2h-dedupe-vote2",
+        signal_packets_dir=str(tmp_path / "dev/signals/vegas_ema/BTC/2026-BTC-2h-dedupe-vote2/packets"),
+        candles_csv=str(tmp_path / "dev/data/raw/BTC/5m/candles.csv"),
+        forward_hours=36,
+        vote_threshold=2,
+        significance_threshold_pct=0.9,
+        label_mode="terminal_fallback",
+    )
+
+    assert "--label-mode" in commands["stage0c"]
+    assert commands["stage0c"][commands["stage0c"].index("--label-mode") + 1] == "terminal_fallback"

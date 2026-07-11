@@ -2345,7 +2345,7 @@ function Stage1Panel({
                     <FieldRow label="Signals" value={formatNumber(latest?.signal_count)} />
                     <FieldRow label="Score" value={score ? stage1Agreement(score.metrics.directional_agreement) : "not scored"} />
                   </div>
-                  <button className="button button--secondary full-width-action" disabled={frozen || createBundlePending || walkForwardLocked} onClick={() => onCreateBundle(role)} type="button">
+                  <button className="button button--secondary full-width-action" disabled={createBundlePending || walkForwardLocked} onClick={() => onCreateBundle(role)} type="button">
                     <Play aria-hidden="true" />
                     Create {role === "training" ? "Builder" : "Evaluator"} Bundle
                   </button>
@@ -2391,11 +2391,10 @@ function Stage1Panel({
                       </button>
                     ) : null}
                     <button className="button button--secondary" onClick={(event) => { event.stopPropagation(); onOpenPrompt(iteration); }} type="button">Prompt</button>
-                    <button className="button button--secondary" disabled={frozen} onClick={(event) => { event.stopPropagation(); onScore(iteration); }} type="button">Score</button>
-                    <button className="button button--secondary" disabled={frozen || !stage1ScoreForRole(iteration, stage1RoleForIteration(iteration))} onClick={(event) => { event.stopPropagation(); onAudit(iteration); }} type="button">Audit</button>
+                    <button className="button button--secondary" onClick={(event) => { event.stopPropagation(); onScore(iteration); }} type="button">Score</button>
+                    <button className="button button--secondary" disabled={!stage1ScoreForRole(iteration, stage1RoleForIteration(iteration))} onClick={(event) => { event.stopPropagation(); onAudit(iteration); }} type="button">Audit</button>
                     <button
                       className="icon-button"
-                      disabled={frozen}
                       onClick={(event) => {
                         event.stopPropagation();
                         if (window.confirm(`Delete ${iteration.iteration_id}?`)) {

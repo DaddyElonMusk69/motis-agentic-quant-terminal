@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, insert
 
 from quant_terminal_api.db.models import data_sources, market_data_refs, metadata
 from quant_terminal_api.repositories.runtime import RuntimeRepository
+from quant_terminal_sdk.engine_contracts import TrainingSignalGenerationResult
 from quant_terminal_worker.signal_engines import vegas_ema
 from quant_terminal_worker.ingestion.signal_pool_extension import _append_packets_to_signal_set, extend_signal_pool_from_local_candles
 
@@ -240,6 +241,82 @@ def test_extend_signal_pool_enforces_dedupe_against_existing_canonical_pool(
     ]
 
 
+def test_extend_signal_pool_applies_fixed_dedupe_at_existing_pool_boundary(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = _make_workspace(tmp_path)
+    repository = _repository_with_signal_pool(root)
+    _register_default_refs(
+        repository,
+        root=root,
+        asset="AAVE",
+        timestamps=[
+            "2026-05-10T00:00:00Z",
+            "2026-05-10T03:00:00Z",
+            "2026-05-10T04:00:00Z",
+        ],
+    )
+    observed_parameters = []
+
+    def fake_resolve_signal_engine(*args, **kwargs):
+        class FakeSpec:
+            configuration_schema = {
+                "fixed_parameters": {"dedupe_window_minutes": 240},
+            }
+
+        class FakeResolved:
+            spec = FakeSpec()
+
+            @staticmethod
+            def generate_training_signals(context):
+                observed_parameters.append(dict(context.parameters))
+                context.packet_sink(
+                    [
+                        {
+                            "schema_version": "signal_packet.v2",
+                            "asset": "AAVE",
+                            "timestamp": "2026-05-10T03:00:00Z",
+                        },
+                        {
+                            "schema_version": "signal_packet.v2",
+                            "asset": "AAVE",
+                            "timestamp": "2026-05-10T04:00:00Z",
+                        },
+                    ]
+                )
+
+                class FakeOutput:
+                    packets = []
+
+                return FakeOutput()
+
+        return FakeResolved()
+
+    monkeypatch.setattr(
+        "quant_terminal_worker.ingestion.signal_pool_extension.resolve_signal_engine",
+        fake_resolve_signal_engine,
+    )
+
+    result = extend_signal_pool_from_local_candles(
+        workspace_root=root,
+        repository=repository,
+        signal_engine_id="vegas_ema",
+        asset="AAVE",
+        target_end="2026-05-10T04:00:00Z",
+    )
+
+    assert observed_parameters[0]["dedupe_window_minutes"] == 240
+    assert result["appended_packet_count"] == 1
+    assert [
+        _iso_z(signal["timestamp"])
+        for signal in repository.list_signals(signal_set_key=result["signal_set_key"])
+    ] == [
+        "2026-05-10T00:00:00+00:00",
+        "2026-05-10T04:00:00+00:00",
+    ]
+
+
 def test_extend_signal_pool_seeds_engine_dedupe_from_existing_canonical_signal(
     tmp_path: Path,
     monkeypatch,
@@ -417,6 +494,60 @@ def test_extend_signal_pool_reports_no_new_signals_and_advances_scan_coverage(
     assert refreshed["packet_count"] == 1
     assert refreshed["end_ts"].isoformat() == "2026-05-10T00:00:00+00:00"
     assert refreshed["coverage_end_ts"].isoformat() == "2026-05-20T00:00:00+00:00"
+
+
+def test_extend_signal_pool_persists_engine_limited_scan_coverage(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = _make_workspace(tmp_path)
+    repository = _repository_with_signal_pool(root)
+    _register_default_refs(
+        repository,
+        root=root,
+        asset="AAVE",
+        timestamps=["2026-05-10T00:00:00Z", "2026-05-20T00:00:00Z"],
+    )
+
+    def fake_resolve_signal_engine(*args, **kwargs):
+        class FakeSpec:
+            configuration_schema = {}
+
+        class FakeResolved:
+            spec = FakeSpec()
+
+            @staticmethod
+            def generate_training_signals(context):
+                class FakeOutput:
+                    packets = []
+                    result = TrainingSignalGenerationResult(
+                        status="noop",
+                        generated_packet_count=0,
+                        appended_packet_count=0,
+                        raw_candle_end_ts="2026-05-20T00:00:00Z",
+                        scan_coverage_end_ts="2026-05-15T00:00:00Z",
+                    )
+
+                return FakeOutput()
+
+        return FakeResolved()
+
+    monkeypatch.setattr(
+        "quant_terminal_worker.ingestion.signal_pool_extension.resolve_signal_engine",
+        fake_resolve_signal_engine,
+    )
+
+    result = extend_signal_pool_from_local_candles(
+        workspace_root=root,
+        repository=repository,
+        signal_engine_id="vegas_ema",
+        asset="AAVE",
+        target_end="2026-05-20T00:00:00Z",
+    )
+
+    assert result["scan_coverage_end_ts"] == "2026-05-15T00:00:00Z"
+    refreshed = repository.get_signal_set("vegas_ema:AAVE:AAVE-vegas_ema-canonical")
+    assert refreshed["coverage_end_ts"].isoformat() == "2026-05-15T00:00:00+00:00"
 
 
 def test_extend_signal_pool_resumes_after_existing_parquet_scan_coverage(

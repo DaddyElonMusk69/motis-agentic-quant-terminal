@@ -5,7 +5,11 @@ from pathlib import Path
 from typing import Any
 
 from quant_terminal_sdk.market_data_reader import MarketDataReader
-from quant_terminal_worker.signal_engines.runtime import EngineLiveScanContext, resolve_signal_engine
+from quant_terminal_worker.signal_engines.runtime import (
+    EngineLiveScanContext,
+    apply_fixed_engine_parameters,
+    resolve_signal_engine,
+)
 
 
 def scan_latest_live_signal(
@@ -28,7 +32,10 @@ def scan_latest_live_signal(
             asset=asset,
             instrument=instrument,
             route=route,
-            parameters={**_spec_default_parameters(resolved.spec), **_engine_parameters(route)},
+            parameters=apply_fixed_engine_parameters(
+                resolved.spec,
+                {**_spec_default_parameters(resolved.spec), **_engine_parameters(route)},
+            ),
             market_data_reader=MarketDataReader(repository=repository, workspace_root=workspace_root),
             spec=resolved.spec,
             workspace_root=workspace_root,

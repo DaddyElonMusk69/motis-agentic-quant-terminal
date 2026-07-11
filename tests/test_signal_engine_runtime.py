@@ -27,7 +27,27 @@ from quant_terminal_worker.signal_engines.vegas_ema_5m_cluster import generate_t
 from quant_terminal_worker.signal_engines.vegas_ema_recursive import recursive_ema_update
 from quant_terminal_worker.signal_engines.vegas_ema_recursive import generate_training_signals as generate_recursive_training_signals
 from quant_terminal_worker.signal_engines.vegas_ema_recursive_features import generate_training_signals as generate_recursive_feature_training_signals
-from quant_terminal_worker.signal_engines.runtime import EngineTrainingContext, resolve_signal_engine
+from quant_terminal_worker.signal_engines.runtime import (
+    EngineTrainingContext,
+    apply_fixed_engine_parameters,
+    resolve_signal_engine,
+)
+
+
+def test_fixed_engine_parameters_override_runtime_values() -> None:
+    class FakeSpec:
+        configuration_schema = {
+            "default_parameters": {"dedupe_window_minutes": 480},
+            "fixed_parameters": {"dedupe_window_minutes": 240},
+        }
+
+    assert apply_fixed_engine_parameters(
+        FakeSpec(),
+        {"dedupe_window_minutes": 0, "context_bars": 96},
+    ) == {
+        "dedupe_window_minutes": 240,
+        "context_bars": 96,
+    }
 
 
 def test_resolve_signal_engine_prefers_canonical_db_spec(tmp_path: Path):

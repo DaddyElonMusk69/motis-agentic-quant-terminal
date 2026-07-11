@@ -82,6 +82,7 @@ def build_stage0_commands(
     forward_hours: int,
     vote_threshold: int,
     significance_threshold_pct: float,
+    label_mode: str = "threshold_first_hit",
     stage0_dir: Path | None = None,
 ) -> dict[str, list[str]]:
     stage0_dir = stage0_dir or workspace_root / "dev" / "training_sessions" / strategy_id / "stage0" / signal_set_id
@@ -131,6 +132,8 @@ def build_stage0_commands(
             str(forward_hours),
             "--significance-threshold",
             str(significance_threshold_pct),
+            "--label-mode",
+            label_mode,
             "--asset",
             asset,
             "--vote-threshold",

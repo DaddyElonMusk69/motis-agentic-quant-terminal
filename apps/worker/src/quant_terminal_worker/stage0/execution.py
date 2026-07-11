@@ -23,6 +23,7 @@ def execute_stage0_candidate(
     signal_set: dict[str, Any],
     signals: list[dict[str, Any]],
     candle_rows: list[dict[str, Any]],
+    label_mode: str = "threshold_first_hit",
     runner: Stage0Runner | None = None,
 ) -> dict[str, Any]:
     run_command = runner or _run_subprocess
@@ -48,6 +49,7 @@ def execute_stage0_candidate(
         forward_hours=int(universe_run["forward_hours"]),
         vote_threshold=vote_threshold,
         significance_threshold_pct=initial_threshold,
+        label_mode=label_mode,
         stage0_dir=stage0_dir,
     )
 
@@ -67,6 +69,7 @@ def execute_stage0_candidate(
             forward_hours=int(universe_run["forward_hours"]),
             vote_threshold=vote_threshold,
             significance_threshold_pct=chosen_threshold,
+            label_mode=label_mode,
             stage0_dir=stage0_dir,
         )["stage0c"],
     }
@@ -79,6 +82,7 @@ def execute_stage0_candidate(
         **summary.get("metrics", {}),
         "significance_threshold_pct": chosen_threshold,
         "artifact_root": str(stage0_dir),
+        "label_mode": label_mode,
         "travel_distribution": travel_distribution.get("distribution", {}),
         "travel_mean_pct": travel_distribution.get("mean"),
         "stable_threshold_range": threshold_calibration.get("stable_range", []),

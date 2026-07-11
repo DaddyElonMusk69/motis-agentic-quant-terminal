@@ -105,14 +105,22 @@ def analyze_signal(
     forward_hours: int,
     threshold_pct: float,
     candle_time_index: list[datetime] | None = None,
+    label_mode: str = "threshold_first_hit",
 ) -> dict:
+    if label_mode not in {"threshold_first_hit", "terminal_fallback"}:
+        raise ValueError(f"unsupported label_mode: {label_mode}")
     cutoff = signal_ts + timedelta(hours=forward_hours)
     threshold_abs = threshold_pct / 100.0
 
     first_idx = first_candle_after(candle_time_index or build_candle_time_index(candles), signal_ts)
     if first_idx is None:
         return {"natural_direction": None, "first_move_pct": 0, "max_travel_pct": 0,
-                "opposite_max_pct": 0, "reversed": False, "status": "no_candles"}
+                "opposite_max_pct": 0, "reversed": False, "status": "no_candles",
+                "label_source": "none", "threshold_passed": False,
+                "terminal_direction": None, "terminal_return_pct": 0,
+                "terminal_price": None}
+
+    terminal = _terminal_snapshot(candles, first_idx, cutoff, ref_price)
 
     long_target = ref_price * (1 + threshold_abs)
     short_target = ref_price * (1 - threshold_abs)
@@ -131,8 +139,30 @@ def analyze_signal(
             break
 
     if long_hit_idx is None and short_hit_idx is None:
+        if label_mode == "terminal_fallback" and terminal["terminal_direction"] in {"LONG", "SHORT"}:
+            terminal_direction = terminal["terminal_direction"]
+            natural_pct, opposite_pct = _directional_excursions(
+                candles,
+                first_idx,
+                cutoff,
+                ref_price,
+                terminal_direction,
+            )
+            return {
+                "natural_direction": terminal_direction,
+                "first_move_pct": round(natural_pct, 4),
+                "max_travel_pct": round(natural_pct, 4),
+                "opposite_max_pct": round(opposite_pct, 4),
+                "reversed": False,
+                "status": "terminal_fallback",
+                "label_source": "terminal_fallback",
+                "threshold_passed": False,
+                **terminal,
+            }
         return {"natural_direction": None, "first_move_pct": 0, "max_travel_pct": 0,
-                "opposite_max_pct": 0, "reversed": False, "status": "no_trigger"}
+                "opposite_max_pct": 0, "reversed": False, "status": "no_trigger",
+                "label_source": "none", "threshold_passed": False,
+                **terminal}
 
     # Determine natural direction
     if long_hit_idx is not None and short_hit_idx is None:
@@ -190,7 +220,54 @@ def analyze_signal(
         "opposite_max_pct": round(max_opposite if max_opposite != float('-inf') else 0, 4),
         "reversed": reversed_,
         "status": "ok",
+        "label_source": "threshold_first_hit",
+        "threshold_passed": True,
+        **terminal,
     }
+
+
+def _terminal_snapshot(candles: list, first_idx: int, cutoff: datetime, ref_price: float) -> dict:
+    terminal_candle = None
+    for i in range(first_idx, len(candles)):
+        c = candles[i]
+        if c["ts"] > cutoff:
+            break
+        terminal_candle = c
+    if terminal_candle is None:
+        return {
+            "terminal_direction": None,
+            "terminal_return_pct": 0,
+            "terminal_price": None,
+        }
+    terminal_price = float(terminal_candle["close"])
+    terminal_return_pct = (terminal_price - ref_price) / ref_price * 100
+    if terminal_return_pct > 0:
+        terminal_direction = "LONG"
+    elif terminal_return_pct < 0:
+        terminal_direction = "SHORT"
+    else:
+        terminal_direction = None
+    return {
+        "terminal_direction": terminal_direction,
+        "terminal_return_pct": round(terminal_return_pct, 4),
+        "terminal_price": terminal_price,
+    }
+
+
+def _directional_excursions(candles: list, start_idx: int, cutoff: datetime, ref_price: float, direction: str) -> tuple[float, float]:
+    max_high = ref_price
+    min_low = ref_price
+    for i in range(start_idx, len(candles)):
+        c = candles[i]
+        if c["ts"] > cutoff:
+            break
+        max_high = max(max_high, float(c["high"]))
+        min_low = min(min_low, float(c["low"]))
+    up_pct = max(0.0, (max_high - ref_price) / ref_price * 100)
+    down_pct = max(0.0, (ref_price - min_low) / ref_price * 100)
+    if direction == "LONG":
+        return up_pct, down_pct
+    return down_pct, up_pct
 
 
 def percentiles(values: list, *pcts) -> dict:
@@ -213,6 +290,12 @@ def main():
     parser.add_argument("--forward-hours", type=int, default=36)
     parser.add_argument("--significance-threshold", type=float, required=True,
                         help="Calibrated significance threshold pct (e.g. 1.8)")
+    parser.add_argument(
+        "--label-mode",
+        choices=["threshold_first_hit", "terminal_fallback"],
+        default="threshold_first_hit",
+        help="Natural-direction label mode. terminal_fallback labels no-trigger signals by cutoff close direction.",
+    )
     parser.add_argument("--out", required=True, help="Canonical output directory for per-signal JSON + distribution")
     parser.add_argument("--asset", default="UNKNOWN")
     parser.add_argument("--vote-threshold", type=int, default=0)
@@ -222,6 +305,7 @@ def main():
     candles_path = Path(args.candles)
     forward_hours = args.forward_hours
     threshold = args.significance_threshold
+    label_mode = args.label_mode
 
     # Discover signal files
     signal_files = sorted(signal_dir.glob("*.json"))
@@ -251,7 +335,7 @@ def main():
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\nComputing ground truth for {len(signal_records)} signals (threshold={threshold}%)...")
+    print(f"\nComputing ground truth for {len(signal_records)} signals (threshold={threshold}%, label_mode={label_mode})...")
     report_every = max(1, len(signal_records) // 10)
 
     results = []
@@ -259,6 +343,8 @@ def main():
     shorts = []
     no_trigger = 0
     reversed_count = 0
+    label_source_counts = {"threshold_first_hit": 0, "terminal_fallback": 0, "none": 0}
+    threshold_passed_count = 0
 
     for idx, (sf, sig_ts) in enumerate(signal_records):
         try:
@@ -271,16 +357,26 @@ def main():
         if ref_price is None:
             continue
 
-        r = analyze_signal(candles, sig_ts, ref_price, forward_hours, threshold, candle_time_index)
+        r = analyze_signal(candles, sig_ts, ref_price, forward_hours, threshold, candle_time_index, label_mode=label_mode)
+        label_source = r.get("label_source", "none")
+        label_source_counts[label_source] = label_source_counts.get(label_source, 0) + 1
+        if r.get("threshold_passed"):
+            threshold_passed_count += 1
 
         record = {
             "signal_id": sf.stem,
             "reference_price": ref_price,
             "significance_threshold_pct": threshold,
+            "label_mode": label_mode,
+            "label_source": label_source,
+            "threshold_passed": bool(r.get("threshold_passed", False)),
             "natural_direction": r["natural_direction"],
             "first_move_pct": r["first_move_pct"],
             "max_travel_pct": r["max_travel_pct"],
             "opposite_max_pct": r["opposite_max_pct"],
+            "terminal_direction": r.get("terminal_direction"),
+            "terminal_return_pct": r.get("terminal_return_pct", 0),
+            "terminal_price": r.get("terminal_price"),
             "reversed": r["reversed"],
             "status": r["status"],
         }
@@ -322,6 +418,8 @@ def main():
     print(f"    SHORT:                 {short_count}")
     print(f"  No trigger (never hit):  {no_trigger} ({no_trigger/len(results)*100:.1f}%)")
     print(f"  Reversed:                {reversed_count} ({reversed_count/total_valid*100:.1f}% of triggered)")
+    print(f"  Threshold passed:        {threshold_passed_count}")
+    print(f"  Terminal fallback:       {label_source_counts.get('terminal_fallback', 0)}")
 
     print(f"\nDirectional Travel Distribution:")
     print(f"{'':>8s}  {'LONG':>8s}  {'SHORT':>8s}  {'ALL':>8s}")
@@ -351,6 +449,10 @@ def main():
         "asset": args.asset,
         "vote_threshold": args.vote_threshold,
         "significance_threshold_pct": threshold,
+        "label_mode": label_mode,
+        "label_source_counts": label_source_counts,
+        "threshold_passed_count": threshold_passed_count,
+        "terminal_fallback_count": label_source_counts.get("terminal_fallback", 0),
         "calibration_source": "sensitivity_scan",
         "total_signals": len(results),
         "forward_hours": forward_hours,
@@ -389,6 +491,10 @@ def main():
             },
             "trigger_rate_pct": trigger_rate_pct,
             "significance_threshold_pct": threshold,
+            "label_mode": label_mode,
+            "label_source_counts": label_source_counts,
+            "threshold_passed_count": threshold_passed_count,
+            "terminal_fallback_count": label_source_counts.get("terminal_fallback", 0),
             "forward_hours": forward_hours,
             "branch_path": branch_path,
             "branch_decision": branch_decision,

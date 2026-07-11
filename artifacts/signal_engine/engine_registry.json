@@ -85,6 +85,101 @@
     "signal_engine_id": "bollinger",
     "version": "0.1"
   },
+  "compression_participation_release_4h_v1": {
+    "code_ref": {
+      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/compression_participation_release_v1_base.py",
+      "path": "apps/worker/src/quant_terminal_worker/signal_engines/compression_participation_release_4h_v1.py"
+    },
+    "configuration_schema": {
+      "default_parameters": {
+        "compression_percentile_threshold": "0.35",
+        "compression_window_bars": 144,
+        "context_bars": 96,
+        "context_timeframes": [
+          "2h",
+          "4h",
+          "8h"
+        ],
+        "dedupe_window_minutes": 240,
+        "min_stats_bars": 2016,
+        "range_zscore_threshold": "0.75",
+        "stats_lookback_bars": 8640,
+        "volume_zscore_threshold": "1.0"
+      },
+      "fixed_parameters": {
+        "dedupe_window_minutes": 240
+      }
+    },
+    "description": "Four-hour cadence variant of the confirmed price, range, and volume release after causal 12h compression, with neutral Binance OI and positioning context. The 240-minute dedupe cadence is immutable.",
+    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.compression_participation_release_4h_v1:scan_live_signal",
+    "name": "Compression Participation Release 4h v1",
+    "output_envelope_version": "signal_packet.v2",
+    "required_data": [
+      {
+        "data_type": "candles",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 10000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "open_interest",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 10000,
+        "origin": "raw",
+        "timeframe": "5m"
+      }
+    ],
+    "runtime_entrypoint": "quant_terminal_worker.signal_engines.compression_participation_release_4h_v1:generate_training_signals",
+    "signal_engine_id": "compression_participation_release_4h_v1",
+    "version": "0.1"
+  },
+  "compression_participation_release_v1": {
+    "code_ref": {
+      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/compression_participation_release_v1_base.py",
+      "path": "apps/worker/src/quant_terminal_worker/signal_engines/compression_participation_release_v1.py"
+    },
+    "configuration_schema": {
+      "default_parameters": {
+        "compression_percentile_threshold": "0.35",
+        "compression_window_bars": 144,
+        "context_bars": 96,
+        "context_timeframes": [
+          "2h",
+          "4h",
+          "8h"
+        ],
+        "dedupe_window_minutes": 480,
+        "min_stats_bars": 2016,
+        "range_zscore_threshold": "0.75",
+        "stats_lookback_bars": 8640,
+        "volume_zscore_threshold": "1.0"
+      }
+    },
+    "description": "Confirmed price, range, and volume release after causal 12h compression, with neutral Binance OI and positioning context. Stage 0A validated at 2h and 4h on BTC.",
+    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.compression_participation_release_v1:scan_live_signal",
+    "name": "Compression Participation Release v1",
+    "output_envelope_version": "signal_packet.v2",
+    "required_data": [
+      {
+        "data_type": "candles",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 10000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "open_interest",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 10000,
+        "origin": "raw",
+        "timeframe": "5m"
+      }
+    ],
+    "runtime_entrypoint": "quant_terminal_worker.signal_engines.compression_participation_release_v1:generate_training_signals",
+    "signal_engine_id": "compression_participation_release_v1",
+    "version": "0.1"
+  },
   "liquidity_sweep_v1": {
     "code_ref": {
       "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/liquidity_sweep_v1_base.py",

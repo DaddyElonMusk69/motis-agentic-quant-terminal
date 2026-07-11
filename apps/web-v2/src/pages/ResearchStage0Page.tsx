@@ -17,6 +17,7 @@ import {
   isJobResponse,
   runStage0InformationGate,
   type DevelopmentQueueRow,
+  type Stage0LabelMode,
   type Stage0UniverseCandidate,
   type Stage0UniverseRun
 } from "../app/api";
@@ -116,6 +117,18 @@ function significanceThresholdLabel(candidate: Stage0UniverseCandidate | undefin
   return `${value}%`;
 }
 
+function stage0LabelModeLabel(candidate: Stage0UniverseCandidate | undefined): string {
+  const value = candidate?.metrics?.label_mode;
+  if (value === "terminal_fallback") {
+    const count = candidate?.metrics?.terminal_fallback_count;
+    return typeof count === "number" ? `Terminal fallback · ${formatNumber(count)} fallback` : "Terminal fallback";
+  }
+  if (value === "threshold_first_hit") {
+    return "First threshold hit";
+  }
+  return "pending";
+}
+
 function candidateInformation(candidate: Stage0UniverseCandidate | undefined, row: DevelopmentQueueRow | null | undefined) {
   return stage0InformationFromCandidate(candidate) ?? stage0InformationFromRow(row);
 }
@@ -186,6 +199,7 @@ export function ResearchStage0Page() {
   const [appendModalOpen, setAppendModalOpen] = useState(false);
   const [appendSelectedTickers, setAppendSelectedTickers] = useState<string[]>([]);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [stage0LabelMode, setStage0LabelMode] = useState<Stage0LabelMode>("threshold_first_hit");
 
   const enginesQuery = useQuery({ queryKey: ["signal-engines"], queryFn: fetchSignalEngines });
   const effectiveEngineId = selectedEngineId || enginesQuery.data?.engines[0]?.signal_engine_id || "";
@@ -338,9 +352,9 @@ export function ResearchStage0Page() {
       && !executePoolMutation.isPending
     ) {
       setAutoRunPoolId(null);
-      executePoolMutation.mutate({ universe_run_id: autoRunPoolId, limit: progress.pending });
+      executePoolMutation.mutate({ universe_run_id: autoRunPoolId, limit: progress.pending, label_mode: stage0LabelMode });
     }
-  }, [autoRunPoolId, executePoolMutation, progress.pending, queueQuery.isLoading, selectedRun?.universe_run_id]);
+  }, [autoRunPoolId, executePoolMutation, progress.pending, queueQuery.isLoading, selectedRun?.universe_run_id, stage0LabelMode]);
 
   const addTicker = () => {
     const symbol = tickerInput.trim().toUpperCase();
@@ -433,6 +447,16 @@ export function ResearchStage0Page() {
               <div className="header-actions">
                 <StatusBadge tone={progress.pending > 0 ? "warn" : "pass"}>{progress.pending > 0 ? "Pending" : "Complete"}</StatusBadge>
                 <button
+                  className={stage0LabelMode === "terminal_fallback" ? "stage0-label-mode-toggle is-active" : "stage0-label-mode-toggle"}
+                  onClick={() => setStage0LabelMode(stage0LabelMode === "terminal_fallback" ? "threshold_first_hit" : "terminal_fallback")}
+                  type="button"
+                  aria-pressed={stage0LabelMode === "terminal_fallback"}
+                  title="Experimental: label no-threshold signals by hard-exit terminal direction"
+                >
+                  <span>Terminal fallback</span>
+                  <em>{stage0LabelMode === "terminal_fallback" ? "On" : "Off"}</em>
+                </button>
+                <button
                   className="button button--secondary"
                   disabled={!selectedRun}
                   onClick={() => setAppendModalOpen(true)}
@@ -444,7 +468,7 @@ export function ResearchStage0Page() {
                 <button
                   className="button button--secondary"
                   disabled={!selectedRun || progress.pending <= 0 || isScoring}
-                  onClick={() => selectedRun && executePoolMutation.mutate({ universe_run_id: selectedRun.universe_run_id, limit: progress.pending })}
+                  onClick={() => selectedRun && executePoolMutation.mutate({ universe_run_id: selectedRun.universe_run_id, limit: progress.pending, label_mode: stage0LabelMode })}
                   type="button"
                 >
                   <Play aria-hidden="true" />
@@ -624,6 +648,7 @@ export function ResearchStage0Page() {
                       <FieldRow label="Evaluated signals" value={formatNumber(evaluatedSignalCount(selectedCandidate, selectedRow))} />
                       <FieldRow label="Trigger rate" value={selectedRow.trigger_rate_pct === null ? "pending" : `${selectedRow.trigger_rate_pct}%`} />
                       <FieldRow label="Significant travel threshold" value={significanceThresholdLabel(selectedCandidate)} />
+                      <FieldRow label="Natural direction mode" value={stage0LabelModeLabel(selectedCandidate)} />
                       <FieldRow label="Source packets" value={formatNumber(selectedCandidate?.packet_count ?? selectedRow.packet_count)} />
                       <FieldRow label="Development" value={selectedRow.development_status.replaceAll("_", " ")} />
                       <FieldRow label="Next action" value={selectedRow.next_action.label} />

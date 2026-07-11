@@ -236,6 +236,7 @@ def _execute_stage0_candidate_job(
         workspace_root=workspace_root,
         universe_run=universe_run,
         candidate=candidate,
+        label_mode=str(payload.get("label_mode") or "threshold_first_hit"),
     )
     repository.update_stage0_universe_candidate(result["candidate"])
     _refresh_stage0_information_q_values(repository, universe_run["universe_run_id"])
@@ -301,6 +302,7 @@ def _execute_stage0_candidate_batch(
                 workspace_root=workspace_root,
                 universe_run=universe_run,
                 candidate=candidate,
+                label_mode=str(payload.get("label_mode") or "threshold_first_hit"),
             )
             repository.update_stage0_universe_candidate(result["candidate"])
             results.append(result)
@@ -539,6 +541,7 @@ def _run_stage0_candidate(
     workspace_root: Path,
     universe_run: dict[str, Any],
     candidate: dict[str, Any],
+    label_mode: str = "threshold_first_hit",
 ) -> dict[str, Any]:
     signal_set = repository.get_signal_set(candidate["signal_set_key"])
     if signal_set is None:
@@ -570,6 +573,7 @@ def _run_stage0_candidate(
         signal_set=signal_set,
         signals=signals,
         candle_rows=candle_rows,
+        label_mode=label_mode,
     )
 
 

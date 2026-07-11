@@ -54,6 +54,7 @@ from quant_terminal_worker.stage0.universe import (
 from quant_terminal_worker.stage1.workspace import materialize_stage1_session_workspace
 from quant_terminal_worker.stage1.workspace import create_stage1_iteration_workspace
 from quant_terminal_worker.stage1.workspace import build_stage1_gate_summary
+from quant_terminal_worker.stage1.workspace import clear_stage1_downstream_artifacts
 from quant_terminal_worker.stage1.workspace import list_stage1_iterations
 from quant_terminal_worker.stage1.workspace import read_stage1_iteration_detail
 from quant_terminal_worker.stage1.workspace import read_stage4_candidate_detail
@@ -228,10 +229,12 @@ class Stage0UniverseAppendAssetsRequest(BaseModel):
 
 class ExecuteStage0CandidateRequest(BaseModel):
     candidate_id: str
+    label_mode: Literal["threshold_first_hit", "terminal_fallback"] = "threshold_first_hit"
 
 
 class ExecuteStage0CandidateBatchRequest(BaseModel):
     limit: int = Field(default=500, ge=1, le=1000)
+    label_mode: Literal["threshold_first_hit", "terminal_fallback"] = "threshold_first_hit"
 
 
 class ExecutionBundlePromotionRequest(BaseModel):
@@ -386,9 +389,14 @@ def create_app(
 
     app.router.lifespan_context = lifespan
 
-    def run_stage0_candidate(universe_run: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    def run_stage0_candidate(
+        universe_run: dict[str, Any],
+        candidate: dict[str, Any],
+        *,
+        label_mode: Literal["threshold_first_hit", "terminal_fallback"] = "threshold_first_hit",
+    ) -> dict[str, Any]:
         if injected_stage0_executor is not None:
-            return injected_stage0_executor(universe_run, candidate)
+            return injected_stage0_executor(universe_run, candidate, label_mode)
         signal_set = get_runtime_repository().get_signal_set(candidate["signal_set_key"])
         if signal_set is None:
             raise HTTPException(status_code=404, detail="signal set not found")
@@ -421,6 +429,7 @@ def create_app(
             signal_set=signal_set,
             signals=signals,
             candle_rows=candle_rows,
+            label_mode=label_mode,
         )
 
     def run_stage0_information_candidate(universe_run: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
@@ -889,12 +898,13 @@ def create_app(
     ) -> dict[str, Any]:
         if request.bundle_role not in {"strategy_builder", "evaluator"}:
             raise HTTPException(status_code=400, detail="bundle_role must be strategy_builder or evaluator")
-        session = get_runtime_repository().get_stage1_research_session(session_id)
+        repository = get_runtime_repository()
+        session = repository.get_stage1_research_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Stage 1 session not found")
-        _ensure_stage1_session_mutable(session)
+        _ensure_stage1_branch_action_allowed(repository=repository, session=session)
         window_start, window_end = _stage1_sample_window(session, request.sample_method)
-        signals = get_runtime_repository().list_signals_for_signal_set_window(
+        signals = repository.list_signals_for_signal_set_window(
             signal_set_key=session["signal_set_key"],
             window_start=f"{window_start}T00:00:00Z",
             window_end=f"{window_end}T23:59:59Z",
@@ -955,10 +965,11 @@ def create_app(
 
     @app.delete("/api/v1/research/stage1-sessions/{session_id}/iterations/{iteration_id}")
     def delete_stage1_research_iteration(session_id: str, iteration_id: str) -> dict[str, Any]:
-        session = get_runtime_repository().get_stage1_research_session(session_id)
+        repository = get_runtime_repository()
+        session = repository.get_stage1_research_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Stage 1 session not found")
-        _ensure_stage1_session_mutable(session)
+        _ensure_stage1_branch_action_allowed(repository=repository, session=session)
         artifact_root = Path(session["artifact_root"])
         if not artifact_root.is_absolute():
             artifact_root = Path.cwd() / artifact_root
@@ -977,6 +988,7 @@ def create_app(
         session = repository.get_stage1_research_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Stage 1 session not found")
+        _ensure_stage1_branch_action_allowed(repository=repository, session=session)
         artifact_root = Path(session["artifact_root"])
         if not artifact_root.is_absolute():
             artifact_root = Path.cwd() / artifact_root
@@ -1016,6 +1028,7 @@ def create_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        clear_stage1_downstream_artifacts(workspace_root=Path.cwd(), session=session)
         promoted_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         promoted_metadata = {
             "iteration_id": iteration_id,
@@ -1049,7 +1062,6 @@ def create_app(
         session = get_runtime_repository().get_stage1_research_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Stage 1 session not found")
-        _ensure_stage1_session_mutable(session)
         artifact_root = Path(session["artifact_root"])
         if not artifact_root.is_absolute():
             artifact_root = Path.cwd() / artifact_root
@@ -1886,7 +1898,7 @@ def create_app(
         session = repository.get_stage1_research_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Stage 1 session not found")
-        _ensure_stage1_session_mutable(session)
+        _ensure_stage1_branch_action_allowed(repository=repository, session=session)
         artifact_root = Path(session["artifact_root"])
         if not artifact_root.is_absolute():
             artifact_root = Path.cwd() / artifact_root
@@ -1918,9 +1930,11 @@ def create_app(
         iteration_id: str,
         sample_role: str = "training",
     ) -> dict[str, Any]:
-        session = get_runtime_repository().get_stage1_research_session(session_id)
+        repository = get_runtime_repository()
+        session = repository.get_stage1_research_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Stage 1 session not found")
+        _ensure_stage1_branch_action_allowed(repository=repository, session=session)
         artifact_root = Path(session["artifact_root"])
         if not artifact_root.is_absolute():
             artifact_root = Path.cwd() / artifact_root
@@ -2094,13 +2108,17 @@ def create_app(
                 get_runtime_repository(),
                 job_type="stage0_candidate",
                 scope_key=f"stage0:{universe_run_id}",
-                payload={"universe_run_id": universe_run_id, "candidate_id": request.candidate_id},
+                payload={
+                    "universe_run_id": universe_run_id,
+                    "candidate_id": request.candidate_id,
+                    "label_mode": request.label_mode,
+                },
                 current_step="queued",
             )
         if queued:
             return queued
 
-        result = run_stage0_candidate(universe_run, candidate)
+        result = run_stage0_candidate(universe_run, candidate, label_mode=request.label_mode)
         get_runtime_repository().update_stage0_universe_candidate(result["candidate"])
         _refresh_stage0_information_q_values(get_runtime_repository(), universe_run_id)
         get_runtime_repository().refresh_stage0_universe_summary(universe_run_id)
@@ -2149,7 +2167,11 @@ def create_app(
                 get_runtime_repository(),
                 job_type="stage0_candidate_batch",
                 scope_key=f"stage0:{universe_run_id}",
-                payload={"universe_run_id": universe_run_id, "limit": request.limit},
+                payload={
+                    "universe_run_id": universe_run_id,
+                    "limit": request.limit,
+                    "label_mode": request.label_mode,
+                },
                 current_step="queued",
             )
         if queued:
@@ -2165,7 +2187,7 @@ def create_app(
 
         for candidate in selected_candidates:
             try:
-                result = run_stage0_candidate(universe_run, candidate)
+                result = run_stage0_candidate(universe_run, candidate, label_mode=request.label_mode)
                 get_runtime_repository().update_stage0_universe_candidate(result["candidate"])
                 results.append(result)
             except HTTPException as exc:
@@ -3737,12 +3759,18 @@ def _validate_stage2_policy_values(
         raise ValueError(f"{label} protect_trigger_pct cannot be greater than lock_profit_pct")
 
 
-def _ensure_stage1_session_mutable(session: dict[str, Any]) -> None:
-    if session.get("status") == "stage1a_frozen":
-        raise HTTPException(status_code=409, detail="Stage 1 session is frozen")
-    gate = build_stage1_gate_summary(workspace_root=Path.cwd(), session=session)
-    if (gate.get("canonical_readout") or {}).get("exists"):
-        raise HTTPException(status_code=409, detail="Stage 1 session is frozen")
+def _ensure_stage1_branch_action_allowed(*, repository: Any, session: dict[str, Any]) -> None:
+    finder = getattr(repository, "list_execution_bundles_for_stage1_session", None)
+    if callable(finder):
+        bundles = finder(session["session_id"])
+    else:
+        bundles = [
+            bundle
+            for bundle in repository.list_execution_bundles()
+            if bundle.get("source_stage1_session_id") == session["session_id"]
+        ]
+    if bundles:
+        raise HTTPException(status_code=409, detail="Stage 1 session has an attached execution bundle")
 
 
 def _ensure_stage1_session_resettable(*, repository: Any, session: dict[str, Any]) -> None:

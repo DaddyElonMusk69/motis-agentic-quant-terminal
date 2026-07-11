@@ -1238,6 +1238,32 @@ def test_signal_pool_extend_endpoint_uses_local_extension_service():
     assert calls[0]["target_end"] == "2026-06-01T00:00:00Z"
 
 
+def test_four_hour_signal_pool_manual_fill_uses_variant_extension_path():
+    calls = []
+
+    def extender(**kwargs):
+        calls.append(kwargs)
+        return {"status": "no_new_signals", "appended_packet_count": 0}
+
+    client = TestClient(
+        create_app(
+            runtime_repository=StubRuntimeRepository(),
+            signal_pool_extension_service=extender,
+        )
+    )
+
+    response = client.post(
+        "/api/v1/signal-engines/"
+        "compression_participation_release_4h_v1/signal-sets/BTC/extend-local",
+        json={},
+    )
+
+    assert response.status_code == 200
+    assert calls[0]["signal_engine_id"] == "compression_participation_release_4h_v1"
+    assert calls[0]["asset"] == "BTC"
+    assert calls[0]["target_end"] is None
+
+
 def test_signal_pool_extend_endpoint_reports_local_coverage_blocker():
     def extender(**kwargs):
         raise ValueError("Raw candle data only covers through 2026-05-15T00:00:00Z")
@@ -1379,7 +1405,7 @@ def test_execute_stage0_candidate_endpoint_updates_candidate():
         }
     ]
 
-    def fake_executor(universe_run, candidate):
+    def fake_executor(universe_run, candidate, label_mode=None):
         return {
             "candidate": {
                 **candidate,
@@ -1543,10 +1569,10 @@ def test_execute_stage0_candidate_batch_runs_pending_only_and_reports_partial_fa
             "metrics": {"trigger_rate_pct": 91},
         },
     ]
-    executed_ids = []
+    executed: list[tuple[str, str | None]] = []
 
-    def fake_executor(universe_run, candidate):
-        executed_ids.append(candidate["candidate_id"])
+    def fake_executor(universe_run, candidate, label_mode=None):
+        executed.append((candidate["candidate_id"], label_mode))
         if candidate["candidate_id"] == "candidate-pending-b":
             raise RuntimeError("missing candle coverage")
         return {
@@ -1565,12 +1591,12 @@ def test_execute_stage0_candidate_batch_runs_pending_only_and_reports_partial_fa
 
     response = client.post(
         "/api/v1/research/stage0-universe-runs/universe-march-may-vegas/candidates/execute-batch",
-        json={"limit": 10},
+        json={"limit": 10, "label_mode": "terminal_fallback"},
     )
 
     assert response.status_code == 200
     payload = response.json()
-    assert executed_ids == ["candidate-pending-a", "candidate-pending-b"]
+    assert executed == [("candidate-pending-a", "terminal_fallback"), ("candidate-pending-b", "terminal_fallback")]
     assert payload["summary"]["requested"] == 2
     assert payload["summary"]["succeeded"] == 1
     assert payload["summary"]["failed"] == 1
@@ -2504,8 +2530,14 @@ def test_stage1_iteration_endpoint_creates_iteration_bundle(tmp_path, monkeypatc
     assert "natural_direction" not in evaluator_sample
 
 
-def test_stage1_iteration_endpoint_rejects_frozen_session(tmp_path, monkeypatch):
+def test_stage1_iteration_endpoint_allows_frozen_session_without_execution_bundle(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    stage0_root = tmp_path / "dev/stage0/universe/vegas_ema/AAVE/2026-AAVE-2h-dedupe-vote2"
+    ground_truth_root = stage0_root / "scores" / "ground_truth"
+    ground_truth_root.mkdir(parents=True)
+    (ground_truth_root / "sig-1.json").write_text(
+        '{"signal_id":"sig-1","natural_direction":"LONG","first_move_pct":1.5,"status":"triggered"}'
+    )
     repository = StubRuntimeRepository()
     artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
     repository.stage1_sessions = [
@@ -2524,9 +2556,52 @@ def test_stage1_iteration_endpoint_rejects_frozen_session(tmp_path, monkeypatch)
             "train_end": "2026-04-30",
             "walk_forward_start": "2026-05-25",
             "walk_forward_end": "2026-05-31",
+            "stage0_artifact_root": str(stage0_root),
             "artifact_root": str(artifact_root),
             "status": "stage1a_frozen",
+            "manifest": {"session_id": "stage1-aave", "stage0_artifact_root": str(stage0_root)},
+        }
+    ]
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post(
+        "/api/v1/research/stage1-sessions/stage1-aave/iterations",
+        json={"sample_method": "training", "bundle_role": "strategy_builder"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["iteration"]["iteration_id"] == "iter_001_v0.1"
+
+
+def test_stage1_iteration_endpoint_rejects_attached_execution_bundle(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repository = StubRuntimeRepository()
+    repository.stage1_sessions = [
+        {
+            "session_id": "stage1-aave",
+            "source_universe_run_id": "universe-march-may-vegas",
+            "source_candidate_id": "candidate-aave",
+            "signal_set_key": "vegas_ema:AAVE:2026-AAVE-2h-dedupe-vote2",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "AAVE",
+            "signal_set_id": "2026-AAVE-2h-dedupe-vote2",
+            "strategy_id": "aave-vegas-tunnel-v01",
+            "strategy_version": "v0.1",
+            "train_start": "2026-03-01",
+            "train_end": "2026-04-30",
+            "walk_forward_start": "2026-05-25",
+            "walk_forward_end": "2026-05-31",
+            "artifact_root": str(tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"),
+            "status": "stage1a_frozen",
             "manifest": {"session_id": "stage1-aave"},
+        }
+    ]
+    repository.execution_bundles = [
+        {
+            "bundle_id": "bundle-aave",
+            "source_stage1_session_id": "stage1-aave",
+            "status": "promoted",
         }
     ]
     client = TestClient(create_app(runtime_repository=repository))
@@ -2537,7 +2612,7 @@ def test_stage1_iteration_endpoint_rejects_frozen_session(tmp_path, monkeypatch)
     )
 
     assert response.status_code == 409
-    assert response.json()["detail"] == "Stage 1 session is frozen"
+    assert response.json()["detail"] == "Stage 1 session has an attached execution bundle"
 
 
 def test_stage1_iteration_endpoint_uses_sample_method_window(tmp_path, monkeypatch):
@@ -2731,7 +2806,7 @@ def test_stage1_iteration_delete_endpoint_removes_iteration_folder(tmp_path, mon
             "train_end": "2026-04-30",
             "walk_forward_start": "2026-05-25",
             "walk_forward_end": "2026-05-31",
-            "status": "draft",
+            "status": "stage1a_frozen",
             "manifest": {"session_id": "stage1-aave"},
         }
     ]
@@ -2773,7 +2848,7 @@ def test_stage1_iteration_agent_prompt_prefers_failure_audit_prompt(tmp_path, mo
             "train_end": "2026-04-30",
             "walk_forward_start": "2026-05-25",
             "walk_forward_end": "2026-05-31",
-            "status": "draft",
+            "status": "stage1a_frozen",
             "manifest": {"session_id": "stage1-aave"},
         }
     ]
@@ -3285,11 +3360,27 @@ def test_stage1_training_iteration_promote_reuses_frozen_path(tmp_path, monkeypa
         (strategy_root / "strategy.py").write_text(
             _stage1_test_strategy_source(strategy_id=iteration_id, direction=direction, reason_code=reason_code)
         )
+    promotion_root = artifact_root / "promotion"
+    promotion_root.mkdir(parents=True)
+    (promotion_root / "stage2_capture_curve.json").write_text("{}\n")
+    (promotion_root / "stage2_exit_policy.json").write_text("{}\n")
+    (promotion_root / "stage3_grid_results.json").write_text("{}\n")
+    (promotion_root / "stage4_realized_expectancy.json").write_text("{}\n")
+    (promotion_root / "stage4_runs").mkdir()
+    (promotion_root / "stage4_runs/index.json").write_text("{}\n")
+    (promotion_root / "stage4b_timing").mkdir()
+    (promotion_root / "stage4b_timing/timing_replay.json").write_text("{}\n")
+    (promotion_root / "frozen_stage4b_timing_strategy_module").mkdir()
+    (promotion_root / "frozen_stage4b_timing_strategy_module/strategy.py").write_text("def decide(context): return {}\n")
+    portfolio_root = tmp_path / "dev/portfolio_backtests/universe-march-may-vegas"
+    portfolio_root.mkdir(parents=True)
+    (portfolio_root / "portfolio_backtest.json").write_text("{}\n")
     repository.stage1_sessions = [
         {
             "session_id": "stage1-aave",
             "artifact_root": str(artifact_root),
             "stage0_artifact_root": str(stage0_root),
+            "source_universe_run_id": "universe-march-may-vegas",
             "source_candidate_id": "candidate-aave",
             "signal_set_key": "vegas_ema:AAVE:2026-AAVE-2h-dedupe-vote2",
             "signal_engine_id": "vegas_ema",
@@ -3318,6 +3409,16 @@ def test_stage1_training_iteration_promote_reuses_frozen_path(tmp_path, monkeypa
     frozen_strategy = artifact_root / "promotion/frozen_stage1a_strategy_module/strategy.py"
     assert "promoted_training" in frozen_strategy.read_text()
     assert "promoted_training" in (artifact_root / "strategy_module/strategy.py").read_text()
+    assert (artifact_root / "iterations/iter_001_v0.1/manifest.json").exists()
+    assert (artifact_root / "iterations/iter_002_v0.1/manifest.json").exists()
+    assert not (promotion_root / "stage2_capture_curve.json").exists()
+    assert not (promotion_root / "stage2_exit_policy.json").exists()
+    assert not (promotion_root / "stage3_grid_results.json").exists()
+    assert not (promotion_root / "stage4_realized_expectancy.json").exists()
+    assert not (promotion_root / "stage4_runs").exists()
+    assert not (promotion_root / "stage4b_timing").exists()
+    assert not (promotion_root / "frozen_stage4b_timing_strategy_module").exists()
+    assert not portfolio_root.exists()
     assert repository.updated_stage1_session["status"] == "stage1a_frozen"
     assert repository.updated_stage1_session["manifest"]["stage1a_promoted_iteration"]["iteration_id"] == "iter_002_v0.1"
     assert len(repository.window_requests) == 2
@@ -4877,8 +4978,13 @@ def test_portfolio_backtest_endpoint_rejects_without_stage4_assets(tmp_path, mon
     assert response.json()["detail"] == "Portfolio backtest requires at least one Stage 4-complete asset"
 
 
-def test_stage1_score_endpoint_rejects_frozen_session(tmp_path, monkeypatch):
+def test_stage1_score_endpoint_allows_frozen_session_without_execution_bundle(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        api_main,
+        "run_stage1a_score",
+        lambda **kwargs: {"metrics": {"passes_threshold": True}},
+    )
     repository = StubRuntimeRepository()
     artifact_root = tmp_path / "dev/training_sessions/aave-vegas-tunnel-v01/stage1-aave"
     iteration_root = artifact_root / "iterations" / "iter_001_v0.1"
@@ -4907,8 +5013,8 @@ def test_stage1_score_endpoint_rejects_frozen_session(tmp_path, monkeypatch):
 
     response = client.post("/api/v1/research/stage1-sessions/stage1-aave/iterations/iter_001_v0.1/score-training")
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == "Stage 1 session is frozen"
+    assert response.status_code == 200
+    assert response.json()["score"]["metrics"]["passes_threshold"] is True
 
 
 def test_stage1_failure_audit_endpoint_generates_audit(tmp_path, monkeypatch):
@@ -4959,7 +5065,7 @@ def test_stage1_failure_audit_endpoint_generates_audit(tmp_path, monkeypatch):
             "train_end": "2026-04-30",
             "walk_forward_start": "2026-05-25",
             "walk_forward_end": "2026-05-31",
-            "status": "draft",
+            "status": "stage1a_frozen",
             "manifest": {"session_id": "stage1-aave"},
         }
     ]
