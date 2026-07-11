@@ -507,7 +507,7 @@ git commit -m "feat: add signal discovery workspace"
 - Modify: `docs/engine-strategy-contract.md`
 - Modify: `docs/superpowers/specs/2026-07-11-fixed-r-outcome-first-signal-research-design.md`
 
-- [ ] **Step 1: Run focused backend verification**
+- [x] **Step 1: Run focused backend verification**
 
 Run:
 
@@ -529,7 +529,7 @@ pytest -q \
 
 Expected: all focused tests pass.
 
-- [ ] **Step 2: Run broad static and regression checks**
+- [x] **Step 2: Run broad static and regression checks**
 
 Run:
 
@@ -541,7 +541,7 @@ npm --workspace apps/web-v2 run build
 
 Expected: no new lint failures, all relevant regression tests pass, and the frontend builds.
 
-- [ ] **Step 3: Sync and verify the installed skill**
+- [x] **Step 3: Sync and verify the installed skill**
 
 After workspace tests pass, copy `skills/signal-engine-builder/SKILL.md` to `/Users/haokaiqin/.codex/skills/signal-engine-builder/SKILL.md`, then run `cmp` to prove byte parity. This external write requires approval.
 

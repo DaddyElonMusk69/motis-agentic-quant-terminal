@@ -116,6 +116,79 @@ Result contract:
 
 Training dedupe belongs to research signal generation only. Live execution must not drain historical packets as a backlog.
 
+## Outcome-First Signal Discovery
+
+Outcome-First discovery is an alternative research entry point for engines whose event hypothesis is not known in advance. It freezes an executable fixed-R outcome target before an engine is researched, then evaluates the registered engine and paired strategy directly against that target.
+
+The immutable target uses schema `signal_discovery_target.v1`:
+
+```json
+{
+  "schema_version": "signal_discovery_target.v1",
+  "target_version": 1,
+  "session_id": "discovery-btc-v1",
+  "config_hash": "sha256",
+  "selected_target": {
+    "selected_risk_pct": 1.0,
+    "reward_multiple": 2.0,
+    "stop_multiple": 1.0,
+    "horizon_hours": 36,
+    "entry_delay_minutes": 5,
+    "entry_semantics": "next_5m_open",
+    "fee_bps_per_side": 5.0,
+    "slippage_bps_per_side": 5.0
+  },
+  "source_data": {
+    "dataset_id": "canonical-raw-5m",
+    "storage_backend": "parquet",
+    "storage_uri": ".data/market-data/..."
+  },
+  "splits": {
+    "research_start": "2025-03-01T00:00:00Z",
+    "research_end": "2026-03-31T23:55:00Z",
+    "walk_forward_start": "2026-04-01T00:00:00Z",
+    "walk_forward_end": "2026-05-30T23:55:00Z"
+  }
+}
+```
+
+Target semantics are fixed:
+
+- Entry is the next confirmed 5-minute open after the configured delay. The entry candle is not part of the barrier scan.
+- `LONG` and `SHORT` require the 2R target to touch before the 1R stop in that direction.
+- `NEUTRAL` means neither direction qualifies within the complete horizon.
+- `AMBIGUOUS` means available candle resolution cannot establish barrier order.
+- Every emitted engine timestamp is relabeled from its own executable path. Nearest-opportunity tolerance is not used.
+
+Session artifacts live under `dev/signal_discovery_sessions/<session_id>/`:
+
+```text
+manifest.json
+atlas/training_timestamp_labels.parquet
+atlas/training_episodes.parquet
+atlas/training_features.parquet
+atlas/training_hard_negatives.parquet
+atlas/r_feasibility.json
+target/frozen_target.json
+prompt/engine_builder_prompt.md
+prompt/engine_research_rationale.md
+walk_forward/walk_forward_timestamp_labels.parquet
+walk_forward/walk_forward_episodes.parquet
+walk_forward/walk_forward_summary.json
+evaluation/engine_evaluation.json
+handoff/stage0/scores/fixed_target_contract.json
+handoff/stage0/scores/ground_truth_summary.json
+handoff/stage0/scores/ground_truth/*.json
+```
+
+The leakage boundary is enforced by artifact role. Before target freeze, only training labels, episodes, causal features, hard negatives, and R feasibility exist. The engine-builder prompt may name those training artifacts and `target/frozen_target.json`; it must not name or embed walk-forward labels, exact opportunity timestamps, exact episode/signal ids, or outcome rows. Walk-forward artifacts are created only by the terminal after the target is frozen and are never authorized evidence for the engine-building agent.
+
+The generated prompt requires `$signal-engine-builder`. The agent must either reject the hypothesis or register one neutral `signal_packet.v2` engine and a directional paired strategy, write `engine_research_rationale.md`, and prove point-in-time safety, cadence parity, packet-consumer compatibility, and direct training-target scoring.
+
+Candidate evaluation resolves the registered engine, fills its canonical signal pool through the shared training runtime, loads `code_ref.base_strategy_path`, invokes the strategy with the canonical runtime wrapper, and reports training and sealed walk-forward slices. Primary metrics include opportunity precision, episode recall, LONG/SHORT/NEUTRAL/AMBIGUOUS counts, directional accuracy including natural neutral mismatches, and net R after costs from each emitted timestamp's own selected path.
+
+Accepted evaluations materialize Stage 0 compatibility artifacts with `label_contract: fixed_r_first_touch.v1`. They do not run legacy excursion threshold calibration or the Stage 0A information gate. Stage 2 may retain travel capture as diagnostics, but its shared TP, initial SL, and horizon come from the frozen target. Stage 3 validates those values against the Stage 0 contract and may vary protection behavior only; it cannot recalibrate base TP or SL.
+
 ## Live Signal Scan
 
 Live scanning uses freshly warmed canonical Parquet, builds the latest eligible candle state, and scans the latest confirmed candle only.
@@ -226,9 +299,10 @@ Live execution derives actual TP/SL prices from OKX average entry, side, size, m
 Stage handoff responsibilities:
 
 - Stage 0 defines asset universe, training/walk-forward windows, significant-move threshold, and hard forward-hours gate.
+- Outcome-First discovery may instead provide an accepted Stage 0 compatibility candidate with `fixed_r_first_touch.v1` labels and an immutable target contract.
 - Stage 1 produces the strategy module and directional evidence.
-- Stage 2 selects an exit policy from the training travel profile.
-- Stage 3 tests fixed SL, exact protection, local variants, and pyramiding candidates using candle walk-forward semantics.
+- Stage 2 selects an exit policy from the training travel profile, except fixed-target discovery candidates whose base TP/SL/horizon are already frozen.
+- Stage 3 tests fixed SL, exact protection, local variants, and pyramiding candidates using candle walk-forward semantics. Fixed-target candidates preserve base TP/SL across protection variants.
 - Stage 4 runs sequential account simulation with user capital, margin allocation, leverage, fees, hard exit, protection, and pyramiding.
 - Promotion freezes the latest completed Stage 4 candidate into an execution bundle with `strategy.py`, `execution_setup.json`, `manifest.json`, `evidence_refs.json`, and risk limits.
 

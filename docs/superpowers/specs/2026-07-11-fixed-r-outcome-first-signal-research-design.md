@@ -2,7 +2,7 @@
 
 ## Status
 
-Approved research concept. This document preserves the research thesis and its boundaries. It intentionally does not prescribe implementation architecture, commands, storage formats, model classes, or an exact parameter grid.
+Implementation complete on `codex/outcome-first-signal-discovery-v1`; final acceptance pending. Backend contracts, queued jobs, API lifecycle, engine prompt, candidate evaluation, Stage handoff, downstream fixed-target preservation, and the v2 workspace are implemented and verified by focused tests. The status must not be changed to implemented until browser/end-to-end smoke succeeds against the user-managed stack.
 
 ## Objective
 
@@ -123,6 +123,34 @@ The approved sequence is:
 
 No production signal engine should be built before the opportunity atlas establishes that a credible fixed-R target population exists.
 
+## Implemented Workflow
+
+The terminal now exposes this sequence as a persisted Signal Discovery session:
+
+1. Create a session from a canonical Parquet 5-minute candle dataset, optional canonical OI dataset, ordered research/WF windows, a predeclared R grid, 36/48-hour horizons, entry delays, and costs.
+2. Run the training atlas to write timestamp labels, contiguous same-direction episodes, causal feature snapshots, matched hard negatives, neighboring-R feasibility, delay sensitivity, horizon sensitivity, and cost-in-R diagnostics.
+3. Freeze one selected target as immutable `signal_discovery_target.v1`, keyed by a SHA-256 config hash.
+4. Generate one training-only `$signal-engine-builder` prompt. The agent may reject the hypothesis or build one neutral engine plus paired directional strategy.
+5. Run sealed walk-forward labels only after freeze, attach the engine's canonical signal set, and evaluate every emitted timestamp from its own fixed-R path.
+6. Accept only contract-valid candidates with cadence parity, nonempty training/WF samples, and positive net R after costs in both slices.
+7. Materialize `fixed_r_first_touch.v1` Stage 0 compatibility labels and create an accepted candidate usable by the existing Stage 1 session endpoint.
+8. Preserve the frozen target, stop, and horizon in Stage 2 and Stage 3. Capture curves remain diagnostics; local Stage 3 variants may change protection behavior but not base TP/SL.
+
+The session artifact root is `dev/signal_discovery_sessions/<session_id>/`. Large timestamp/episode evidence is Parquet; compact contracts, summaries, prompts, evaluation, and handoff metadata are JSON or Markdown. PostgreSQL stores lifecycle state and references, not duplicated bulk labels.
+
+## Leakage Boundary
+
+Engine research is authorized to inspect only the frozen target plus these training artifacts:
+
+- `atlas/training_timestamp_labels.parquet`
+- `atlas/training_episodes.parquet`
+- `atlas/training_features.parquet`
+- `atlas/training_hard_negatives.parquet`
+
+The generated prompt does not expose walk-forward paths, exact opportunity timestamps, exact episode/signal ids, or embedded outcome rows. The agent must not inspect validation, walk-forward, locked OOS, live-result, or future-outcome artifacts. Walk-forward generation and candidate evaluation are terminal-owned operations after the engine id is attached.
+
+The paired strategy is scored on all emitted timestamps. Naturally neutral timestamps are not removed: a directional preference at a neutral target is a mismatch. Episode recall is diagnostic interval membership; precision and net R come from each emitted timestamp's own executable path.
+
 ## Non-Goals
 
 This concept does not cover:
@@ -135,7 +163,7 @@ This concept does not cover:
 - leverage, sizing, or portfolio allocation;
 - order-book depth data;
 - production deployment or live routing;
-- changes to Stage 0, Stage 1, or execution contracts.
+- a general redesign of Stage 0, Stage 1, or execution contracts. The implemented bridge writes compatible fixed-target artifacts and adds conditional Stage 2/3 preservation without changing legacy candidates.
 
 Those subjects may be designed later after the fixed-R opportunity thesis is tested.
 
