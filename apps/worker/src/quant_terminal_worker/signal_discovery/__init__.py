@@ -10,6 +10,13 @@ from quant_terminal_worker.signal_discovery.features import (
     build_causal_feature_rows,
     select_hard_negatives,
 )
+from quant_terminal_worker.signal_discovery.workspace import (
+    discovery_artifact_root,
+    freeze_target_contract,
+    materialize_training_atlas,
+    read_frozen_target,
+    write_session_manifest,
+)
 
 __all__ = [
     "DiscoveryConfig",
@@ -17,7 +24,12 @@ __all__ = [
     "build_opportunity_episodes",
     "build_causal_feature_rows",
     "label_fixed_r_timestamp",
+    "discovery_artifact_root",
+    "freeze_target_contract",
+    "materialize_training_atlas",
+    "read_frozen_target",
     "run_training_atlas",
     "select_hard_negatives",
     "summarize_r_candidate",
+    "write_session_manifest",
 ]

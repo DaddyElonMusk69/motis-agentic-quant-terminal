@@ -178,7 +178,7 @@ git commit -m "feat: build causal discovery evidence"
 - Create: `apps/worker/src/quant_terminal_worker/signal_discovery/workspace.py`
 - Test: `tests/test_signal_discovery_workspace.py`
 
-- [ ] **Step 1: Write failing workspace tests**
+- [x] **Step 1: Write failing workspace tests**
 
 Assert this artifact layout:
 
@@ -198,23 +198,23 @@ dev/signal_discovery_sessions/<session_id>/
 
 Test that freezing writes schema `signal_discovery_target.v1`, includes the source dataset id and split boundaries, stores a SHA-256 config hash, and raises `ValueError` on a second freeze with different contents.
 
-- [ ] **Step 2: Verify failure**
+- [x] **Step 2: Verify failure**
 
 Run: `pytest -q tests/test_signal_discovery_workspace.py`
 
 Expected: import failure for the missing workspace module.
 
-- [ ] **Step 3: Implement artifact writers/readers**
+- [x] **Step 3: Implement artifact writers/readers**
 
 Use PyArrow for timestamp labels and episodes; JSON for compact summaries and contracts. Write target files atomically through a sibling `.tmp` file followed by `Path.replace`. Implement `materialize_training_atlas`, `freeze_target_contract`, `read_frozen_target`, `write_session_manifest`, and `discovery_artifact_root`.
 
-- [ ] **Step 4: Verify artifacts**
+- [x] **Step 4: Verify artifacts**
 
 Run: `pytest -q tests/test_signal_discovery_workspace.py`
 
 Expected: all artifact and immutability tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/worker/src/quant_terminal_worker/signal_discovery/workspace.py tests/test_signal_discovery_workspace.py
