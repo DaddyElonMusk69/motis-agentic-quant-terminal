@@ -8,7 +8,7 @@ import re
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -50,6 +50,11 @@ from quant_terminal_worker.stage0.execution import execute_stage0_candidate, exe
 from quant_terminal_worker.stage0.universe import (
     build_stage0_universe,
     build_stage0_universe_config_hash,
+)
+from quant_terminal_worker.signal_discovery.workspace import (
+    discovery_artifact_root,
+    freeze_target_contract,
+    write_session_manifest,
 )
 from quant_terminal_worker.stage1.workspace import materialize_stage1_session_workspace
 from quant_terminal_worker.stage1.workspace import create_stage1_iteration_workspace
@@ -144,6 +149,37 @@ class Stage1SessionCreateRequest(BaseModel):
     walk_forward_start: str | None = None
     walk_forward_end: str | None = None
     seed_strategy_preference: str = "auto"
+
+
+class SignalDiscoverySessionCreateRequest(BaseModel):
+    session_id: str
+    name: str = Field(min_length=1)
+    asset: str = Field(min_length=1)
+    instrument: str = Field(min_length=1)
+    dataset_id: str = Field(min_length=1)
+    research_start: datetime
+    research_end: datetime
+    walk_forward_start: datetime
+    walk_forward_end: datetime
+    risk_values: list[float] = Field(min_length=1)
+    reward_multiple: float = Field(default=2.0, gt=0)
+    stop_multiple: float = Field(default=1.0, gt=0)
+    horizon_hours: list[int] = Field(default_factory=lambda: [36, 48], min_length=1)
+    entry_delays_minutes: list[int] = Field(default_factory=lambda: [5], min_length=1)
+    fee_bps_per_side: float = Field(default=0.0, ge=0)
+    slippage_bps_per_side: float = Field(default=0.0, ge=0)
+    oi_dataset_id: str | None = None
+
+
+class SignalDiscoveryFreezeRequest(BaseModel):
+    selected_risk_pct: float = Field(gt=0)
+    horizon_hours: Literal[36, 48]
+    entry_delay_minutes: int = Field(ge=0)
+
+
+class SignalDiscoveryCandidateRequest(BaseModel):
+    signal_engine_id: str = Field(min_length=1)
+    signal_set_key: str = Field(min_length=1)
 
 
 class Stage1IterationCreateRequest(BaseModel):
@@ -783,6 +819,289 @@ def create_app(
     @app.get("/api/v1/research/runs")
     def list_research_runs() -> dict[str, Any]:
         return {"runs": get_runtime_repository().list_strategy_development_runs()}
+
+    @app.get("/api/v1/research/signal-discovery-sessions")
+    def list_signal_discovery_sessions() -> dict[str, Any]:
+        return {"sessions": get_runtime_repository().list_signal_discovery_sessions()}
+
+    @app.post("/api/v1/research/signal-discovery-sessions")
+    def create_signal_discovery_session(
+        request: SignalDiscoverySessionCreateRequest,
+    ) -> dict[str, Any]:
+        _validate_signal_discovery_create_request(request)
+        runtime = get_runtime_repository()
+        if runtime.get_signal_discovery_session(request.session_id) is not None:
+            raise HTTPException(status_code=409, detail="Signal discovery session already exists")
+        market_ref = _signal_discovery_api_data_ref(
+            get_market_data_repository(),
+            dataset_id=request.dataset_id,
+        )
+        if str(market_ref.get("asset") or "").upper() != request.asset.upper():
+            raise HTTPException(status_code=400, detail="Dataset asset does not match the session")
+        if str(market_ref.get("instrument") or "") != request.instrument:
+            raise HTTPException(status_code=400, detail="Dataset instrument does not match the session")
+        if request.oi_dataset_id:
+            oi_ref = _signal_discovery_api_data_ref(
+                get_market_data_repository(),
+                dataset_id=request.oi_dataset_id,
+                expected_data_type="open_interest",
+                expected_timeframe=None,
+            )
+            if str(oi_ref.get("asset") or "").upper() != request.asset.upper():
+                raise HTTPException(status_code=400, detail="OI dataset asset does not match the session")
+
+        artifact_root = discovery_artifact_root(
+            workspace_root=Path.cwd(),
+            session_id=request.session_id,
+        )
+        config = {
+            "risk_values": sorted({float(value) for value in request.risk_values}),
+            "reward_multiple": request.reward_multiple,
+            "stop_multiple": request.stop_multiple,
+            "horizon_hours": sorted(set(request.horizon_hours)),
+            "entry_delays_minutes": sorted(set(request.entry_delays_minutes)),
+            "fee_bps_per_side": request.fee_bps_per_side,
+            "slippage_bps_per_side": request.slippage_bps_per_side,
+            "oi_dataset_id": request.oi_dataset_id,
+        }
+        session_value = {
+            "session_id": request.session_id,
+            "name": request.name,
+            "asset": request.asset.upper(),
+            "instrument": request.instrument,
+            "dataset_id": request.dataset_id,
+            "research_start": _as_utc(request.research_start),
+            "research_end": _as_utc(request.research_end),
+            "walk_forward_start": _as_utc(request.walk_forward_start),
+            "walk_forward_end": _as_utc(request.walk_forward_end),
+            "artifact_root": str(artifact_root),
+            "status": "draft",
+            "config": config,
+        }
+        write_session_manifest(
+            artifact_root=artifact_root,
+            manifest={
+                "session_id": request.session_id,
+                "status": "draft",
+                "dataset_id": request.dataset_id,
+                "asset": request.asset.upper(),
+                "config": config,
+            },
+        )
+        return {"session": runtime.create_signal_discovery_session(session_value)}
+
+    @app.get("/api/v1/research/signal-discovery-sessions/{session_id}")
+    def get_signal_discovery_session(session_id: str) -> dict[str, Any]:
+        return {"session": _signal_discovery_api_session(get_runtime_repository(), session_id)}
+
+    @app.delete("/api/v1/research/signal-discovery-sessions/{session_id}")
+    def delete_signal_discovery_session(session_id: str) -> dict[str, Any]:
+        runtime = get_runtime_repository()
+        session = _signal_discovery_api_session(runtime, session_id)
+        if session["status"] in {
+            "atlas_running",
+            "walk_forward_running",
+            "evaluation_running",
+            "handoff_running",
+        }:
+            raise HTTPException(status_code=409, detail="Running discovery sessions cannot be deleted")
+        artifact_root = _signal_discovery_api_artifact_root(session)
+        if artifact_root.exists():
+            shutil.rmtree(artifact_root)
+        runtime.delete_signal_discovery_session(session_id)
+        return {"status": "deleted", "session_id": session_id}
+
+    @app.post("/api/v1/research/signal-discovery-sessions/{session_id}/atlas")
+    def run_signal_discovery_atlas(session_id: str) -> dict[str, Any]:
+        runtime = get_runtime_repository()
+        session = _signal_discovery_api_session(runtime, session_id)
+        if session.get("target_version") is not None or session["status"] not in {
+            "draft",
+            "atlas_ready",
+            "failed",
+        }:
+            raise HTTPException(status_code=409, detail="Session is not eligible for training atlas")
+        queued = enqueue_runtime_job(
+            runtime,
+            job_type="signal_discovery_atlas",
+            scope_key=f"signal_discovery:{session_id}",
+            payload={"session_id": session_id},
+            current_step="queued_atlas",
+        )
+        if queued is None:
+            raise HTTPException(status_code=501, detail="Discovery job queue is unavailable")
+        return queued
+
+    @app.post("/api/v1/research/signal-discovery-sessions/{session_id}/freeze")
+    def freeze_signal_discovery_target(
+        session_id: str,
+        request: SignalDiscoveryFreezeRequest,
+    ) -> dict[str, Any]:
+        runtime = get_runtime_repository()
+        session = _signal_discovery_api_session(runtime, session_id)
+        if session["status"] != "atlas_ready":
+            raise HTTPException(status_code=409, detail="Training atlas must be ready before freeze")
+        config = session.get("config") or {}
+        if request.selected_risk_pct not in {
+            float(value) for value in config.get("risk_values", ())
+        }:
+            raise HTTPException(status_code=400, detail="Selected R was not in the training grid")
+        if request.horizon_hours not in {
+            int(value) for value in config.get("horizon_hours", ())
+        }:
+            raise HTTPException(status_code=400, detail="Selected horizon was not predeclared")
+        if request.entry_delay_minutes not in {
+            int(value) for value in config.get("entry_delays_minutes", ())
+        }:
+            raise HTTPException(status_code=400, detail="Selected entry delay was not predeclared")
+        market_ref = _signal_discovery_api_data_ref(
+            get_market_data_repository(),
+            dataset_id=session["dataset_id"],
+        )
+        artifact_root = _signal_discovery_api_artifact_root(session)
+        try:
+            contract = freeze_target_contract(
+                artifact_root=artifact_root,
+                session_id=session_id,
+                selected_target={
+                    "selected_risk_pct": request.selected_risk_pct,
+                    "reward_multiple": float(config["reward_multiple"]),
+                    "stop_multiple": float(config["stop_multiple"]),
+                    "horizon_hours": request.horizon_hours,
+                    "entry_delay_minutes": request.entry_delay_minutes,
+                    "entry_semantics": "next_5m_open",
+                    "fee_bps_per_side": float(config.get("fee_bps_per_side") or 0.0),
+                    "slippage_bps_per_side": float(
+                        config.get("slippage_bps_per_side") or 0.0
+                    ),
+                },
+                source_data={
+                    key: market_ref.get(key)
+                    for key in (
+                        "dataset_id",
+                        "storage_backend",
+                        "storage_uri",
+                        "data_origin",
+                        "data_type",
+                        "timeframe",
+                        "ingestion_version",
+                    )
+                    if market_ref.get(key) is not None
+                },
+                splits={
+                    "research_start": _iso_datetime(session["research_start"]),
+                    "research_end": _iso_datetime(session["research_end"]),
+                    "walk_forward_start": _iso_datetime(session["walk_forward_start"]),
+                    "walk_forward_end": _iso_datetime(session["walk_forward_end"]),
+                },
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        updated = runtime.update_signal_discovery_session(
+            session_id,
+            status="target_frozen",
+            frozen_target=contract,
+            target_version=1,
+        )
+        write_session_manifest(
+            artifact_root=artifact_root,
+            manifest={
+                "session_id": session_id,
+                "status": "target_frozen",
+                "dataset_id": session["dataset_id"],
+                "training_artifacts": (session.get("summary") or {}).get("artifacts", {}),
+                "target_config_hash": contract["config_hash"],
+            },
+        )
+        return {"session": updated, "target": contract}
+
+    @app.get(
+        "/api/v1/research/signal-discovery-sessions/{session_id}/engine-builder-prompt"
+    )
+    def get_signal_discovery_engine_builder_prompt(session_id: str) -> dict[str, Any]:
+        session = _signal_discovery_api_session(get_runtime_repository(), session_id)
+        prompt_path = _signal_discovery_api_artifact_root(session) / "prompt/engine_builder_prompt.md"
+        if not prompt_path.is_file():
+            raise HTTPException(status_code=409, detail="Engine builder prompt has not been generated")
+        return {"session_id": session_id, "prompt": prompt_path.read_text(), "path": str(prompt_path)}
+
+    @app.post("/api/v1/research/signal-discovery-sessions/{session_id}/walk-forward")
+    def run_signal_discovery_walk_forward(session_id: str) -> dict[str, Any]:
+        runtime = get_runtime_repository()
+        session = _signal_discovery_api_session(runtime, session_id)
+        if session["status"] != "target_frozen":
+            raise HTTPException(status_code=409, detail="Target must be frozen before WF replay")
+        queued = enqueue_runtime_job(
+            runtime,
+            job_type="signal_discovery_walk_forward",
+            scope_key=f"signal_discovery:{session_id}",
+            payload={"session_id": session_id},
+            current_step="queued_walk_forward",
+        )
+        if queued is None:
+            raise HTTPException(status_code=501, detail="Discovery job queue is unavailable")
+        return queued
+
+    @app.post("/api/v1/research/signal-discovery-sessions/{session_id}/candidate")
+    def attach_signal_discovery_candidate(
+        session_id: str,
+        request: SignalDiscoveryCandidateRequest,
+    ) -> dict[str, Any]:
+        runtime = get_runtime_repository()
+        session = _signal_discovery_api_session(runtime, session_id)
+        if session["status"] not in {"walk_forward_ready", "evaluated"}:
+            raise HTTPException(status_code=409, detail="Session is not ready for an engine candidate")
+        signal_set = runtime.get_signal_set(request.signal_set_key)
+        if signal_set is None:
+            raise HTTPException(status_code=404, detail="Candidate signal set not found")
+        if signal_set["signal_engine_id"] != request.signal_engine_id:
+            raise HTTPException(status_code=400, detail="Candidate engine and signal set do not match")
+        if str(signal_set["asset"]).upper() != str(session["asset"]).upper():
+            raise HTTPException(status_code=400, detail="Candidate signal set asset does not match")
+        updated = runtime.update_signal_discovery_session(
+            session_id,
+            status="candidate_attached",
+            candidate_engine_id=request.signal_engine_id,
+            candidate_signal_set_key=request.signal_set_key,
+            evaluation={},
+        )
+        return {"session": updated}
+
+    @app.post("/api/v1/research/signal-discovery-sessions/{session_id}/evaluate")
+    def evaluate_signal_discovery_candidate(session_id: str) -> dict[str, Any]:
+        runtime = get_runtime_repository()
+        session = _signal_discovery_api_session(runtime, session_id)
+        if session["status"] != "candidate_attached":
+            raise HTTPException(status_code=409, detail="Attach an engine candidate before evaluation")
+        queued = enqueue_runtime_job(
+            runtime,
+            job_type="signal_discovery_engine_evaluation",
+            scope_key=f"signal_discovery:{session_id}",
+            payload={"session_id": session_id},
+            current_step="queued_evaluation",
+        )
+        if queued is None:
+            raise HTTPException(status_code=501, detail="Discovery job queue is unavailable")
+        return queued
+
+    @app.post("/api/v1/research/signal-discovery-sessions/{session_id}/handoff")
+    def handoff_signal_discovery_candidate(session_id: str) -> dict[str, Any]:
+        runtime = get_runtime_repository()
+        session = _signal_discovery_api_session(runtime, session_id)
+        if session["status"] != "accepted" or not (session.get("evaluation") or {}).get(
+            "accepted"
+        ):
+            raise HTTPException(status_code=409, detail="Only accepted candidates can be handed off")
+        queued = enqueue_runtime_job(
+            runtime,
+            job_type="signal_discovery_handoff",
+            scope_key=f"signal_discovery:{session_id}",
+            payload={"session_id": session_id},
+            current_step="queued_handoff",
+        )
+        if queued is None:
+            raise HTTPException(status_code=501, detail="Discovery job queue is unavailable")
+        return queued
 
     @app.get("/api/v1/research/stage1-sessions")
     def list_stage1_research_sessions() -> dict[str, Any]:
@@ -2419,6 +2738,66 @@ def create_app(
 
 
 app = create_app()
+
+
+def _validate_signal_discovery_create_request(
+    request: SignalDiscoverySessionCreateRequest,
+) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", request.session_id):
+        raise HTTPException(status_code=400, detail="session_id must be a path-safe identifier")
+    if any(value <= 0 for value in request.risk_values):
+        raise HTTPException(status_code=400, detail="risk_values must be positive")
+    if request.reward_multiple != 2.0 or request.stop_multiple != 1.0:
+        raise HTTPException(status_code=400, detail="Outcome-First v1 requires 2R/1R barriers")
+    if any(value not in {36, 48} for value in request.horizon_hours):
+        raise HTTPException(status_code=400, detail="horizon_hours may contain only 36 and 48")
+    if any(value < 0 for value in request.entry_delays_minutes):
+        raise HTTPException(status_code=400, detail="entry delays must be nonnegative")
+    research_start = _as_utc(request.research_start)
+    research_end = _as_utc(request.research_end)
+    walk_forward_start = _as_utc(request.walk_forward_start)
+    walk_forward_end = _as_utc(request.walk_forward_end)
+    if not research_start <= research_end < walk_forward_start <= walk_forward_end:
+        raise HTTPException(
+            status_code=400,
+            detail="Research and walk-forward windows must be ordered and non-overlapping",
+        )
+
+
+def _signal_discovery_api_data_ref(
+    repository: Any,
+    *,
+    dataset_id: str,
+    expected_data_type: str = "candles",
+    expected_timeframe: str | None = "5m",
+) -> dict[str, Any]:
+    getter = getattr(repository, "get_ref", None)
+    ref = getter(dataset_id) if callable(getter) else None
+    if ref is None:
+        raise HTTPException(status_code=404, detail=f"Dataset not found: {dataset_id}")
+    if ref.get("storage_backend") != "parquet":
+        raise HTTPException(status_code=400, detail="Signal discovery requires canonical Parquet data")
+    if ref.get("data_type") != expected_data_type:
+        raise HTTPException(status_code=400, detail=f"Dataset must contain {expected_data_type}")
+    if expected_timeframe is not None and ref.get("timeframe") != expected_timeframe:
+        raise HTTPException(status_code=400, detail=f"Dataset timeframe must be {expected_timeframe}")
+    return ref
+
+
+def _signal_discovery_api_session(repository: Any, session_id: str) -> dict[str, Any]:
+    session = repository.get_signal_discovery_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Signal discovery session not found")
+    return session
+
+
+def _signal_discovery_api_artifact_root(session: Mapping[str, Any]) -> Path:
+    root = Path(session["artifact_root"])
+    return root if root.is_absolute() else Path.cwd() / root
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
 
 
 def _iso_datetime(value: Any) -> str:

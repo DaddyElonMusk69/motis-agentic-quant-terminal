@@ -13,7 +13,222 @@ from quant_terminal_api.db.models import deployment_routes, execution_bundles, m
 from quant_terminal_api.main import create_app
 from quant_terminal_api.repositories.runtime import RuntimeRepository
 from quant_terminal_worker.execution.bundle_loader import load_strategy_module
+from quant_terminal_worker.signal_discovery.workspace import materialize_training_atlas
 from quant_terminal_worker.stage4.realized_expectancy import run_stage4_realized_expectancy
+
+
+def test_signal_discovery_api_lifecycle_and_validation(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    market_repository = FakeDiscoveryMarketDataRepository()
+    client = TestClient(
+        create_app(
+            runtime_repository=repository,
+            market_data_repository=market_repository,
+        )
+    )
+    create_payload = {
+        "session_id": "discovery-btc-api",
+        "name": "BTC Fixed-R Discovery",
+        "asset": "BTC",
+        "instrument": "BTC-USDT-SWAP",
+        "dataset_id": market_repository.ref["dataset_id"],
+        "research_start": "2025-03-01T00:00:00Z",
+        "research_end": "2026-03-29T23:55:00Z",
+        "walk_forward_start": "2026-04-01T00:00:00Z",
+        "walk_forward_end": "2026-05-30T23:55:00Z",
+        "risk_values": [0.75, 1.0, 1.25],
+        "reward_multiple": 2.0,
+        "stop_multiple": 1.0,
+        "horizon_hours": [36, 48],
+        "entry_delays_minutes": [5, 10],
+        "fee_bps_per_side": 5.0,
+        "slippage_bps_per_side": 5.0,
+    }
+
+    create_response = client.post(
+        "/api/v1/research/signal-discovery-sessions",
+        json=create_payload,
+    )
+
+    assert create_response.status_code == 200
+    session = create_response.json()["session"]
+    assert session["status"] == "draft"
+    assert session["asset"] == "BTC"
+    assert session["config"]["risk_values"] == [0.75, 1.0, 1.25]
+    assert client.get("/api/v1/research/signal-discovery-sessions").json()["sessions"][0][
+        "session_id"
+    ] == "discovery-btc-api"
+    assert client.get(
+        "/api/v1/research/signal-discovery-sessions/discovery-btc-api"
+    ).status_code == 200
+
+    atlas_response = client.post(
+        "/api/v1/research/signal-discovery-sessions/discovery-btc-api/atlas"
+    )
+    assert atlas_response.status_code == 200
+    assert atlas_response.json()["job"]["job_type"] == "signal_discovery_atlas"
+    repository.cancel_job(atlas_response.json()["job"]["job_id"])
+
+    artifact_root = Path(session["artifact_root"])
+    materialize_training_atlas(
+        artifact_root=artifact_root,
+        timestamp_labels=[],
+        episodes=[],
+        features=[],
+        hard_negatives=[],
+        r_feasibility={
+            "r_summaries": [
+                {"risk_pct": 0.75},
+                {"risk_pct": 1.0},
+                {"risk_pct": 1.25},
+            ]
+        },
+    )
+    repository.update_signal_discovery_session(
+        "discovery-btc-api",
+        status="atlas_ready",
+        summary={"r_summaries": [{"risk_pct": 1.0, "episode_count": 120}]},
+    )
+    freeze_response = client.post(
+        "/api/v1/research/signal-discovery-sessions/discovery-btc-api/freeze",
+        json={
+            "selected_risk_pct": 1.0,
+            "horizon_hours": 36,
+            "entry_delay_minutes": 5,
+        },
+    )
+
+    assert freeze_response.status_code == 200
+    frozen = freeze_response.json()["session"]
+    assert frozen["status"] == "target_frozen"
+    assert frozen["frozen_target"]["selected_target"]["selected_risk_pct"] == 1.0
+    assert (artifact_root / "target/frozen_target.json").is_file()
+    assert not (artifact_root / "walk_forward").exists()
+
+    prompt_path = artifact_root / "prompt/engine_builder_prompt.md"
+    prompt_path.parent.mkdir(parents=True)
+    prompt_path.write_text("Use $signal-engine-builder with training-only evidence.\n")
+    prompt_response = client.get(
+        "/api/v1/research/signal-discovery-sessions/discovery-btc-api/engine-builder-prompt"
+    )
+    assert prompt_response.status_code == 200
+    assert "$signal-engine-builder" in prompt_response.json()["prompt"]
+
+    wf_response = client.post(
+        "/api/v1/research/signal-discovery-sessions/discovery-btc-api/walk-forward"
+    )
+    assert wf_response.status_code == 200
+    assert wf_response.json()["job"]["job_type"] == "signal_discovery_walk_forward"
+    repository.cancel_job(wf_response.json()["job"]["job_id"])
+    repository.update_signal_discovery_session(
+        "discovery-btc-api",
+        status="walk_forward_running",
+    )
+    repository.update_signal_discovery_session(
+        "discovery-btc-api",
+        status="walk_forward_ready",
+    )
+    repository.upsert_signal_set(
+        {
+            "signal_set_key": "outcome_first_btc_v1:BTC:BTC-outcome-first-canonical",
+            "signal_set_id": "BTC-outcome-first-canonical",
+            "signal_engine_id": "outcome_first_btc_v1",
+            "signal_engine_version": "0.1",
+            "asset": "BTC",
+            "instrument": "BTC-USDT-SWAP",
+            "start_ts": "2025-03-01T00:00:00Z",
+            "end_ts": "2026-05-30T23:55:00Z",
+            "packet_count": 100,
+            "payload_schema": "signal_packet.v2",
+            "source_path": "dev/signals/outcome_first_btc_v1/BTC/packets",
+            "manifest": {},
+        }
+    )
+
+    attach_response = client.post(
+        "/api/v1/research/signal-discovery-sessions/discovery-btc-api/candidate",
+        json={
+            "signal_engine_id": "outcome_first_btc_v1",
+            "signal_set_key": "outcome_first_btc_v1:BTC:BTC-outcome-first-canonical",
+        },
+    )
+    assert attach_response.status_code == 200
+    assert attach_response.json()["session"]["status"] == "candidate_attached"
+
+    evaluation_response = client.post(
+        "/api/v1/research/signal-discovery-sessions/discovery-btc-api/evaluate"
+    )
+    assert evaluation_response.status_code == 200
+    assert evaluation_response.json()["job"]["job_type"] == (
+        "signal_discovery_engine_evaluation"
+    )
+    repository.cancel_job(evaluation_response.json()["job"]["job_id"])
+    repository.update_signal_discovery_session(
+        "discovery-btc-api",
+        status="evaluation_running",
+    )
+    repository.update_signal_discovery_session(
+        "discovery-btc-api",
+        status="evaluated",
+        evaluation={"accepted": True},
+    )
+    repository.update_signal_discovery_session(
+        "discovery-btc-api",
+        status="accepted",
+    )
+    handoff_response = client.post(
+        "/api/v1/research/signal-discovery-sessions/discovery-btc-api/handoff"
+    )
+    assert handoff_response.status_code == 200
+    assert handoff_response.json()["job"]["job_type"] == "signal_discovery_handoff"
+
+    invalid_response = client.post(
+        "/api/v1/research/signal-discovery-sessions",
+        json={
+            **create_payload,
+            "session_id": "discovery-invalid",
+            "research_end": "2026-04-02T00:00:00Z",
+            "risk_values": [],
+            "horizon_hours": [24],
+            "fee_bps_per_side": -1,
+        },
+    )
+    assert invalid_response.status_code in {400, 422}
+
+    draft_response = client.post(
+        "/api/v1/research/signal-discovery-sessions",
+        json={**create_payload, "session_id": "discovery-delete"},
+    )
+    assert draft_response.status_code == 200
+    delete_response = client.delete(
+        "/api/v1/research/signal-discovery-sessions/discovery-delete"
+    )
+    assert delete_response.status_code == 200
+    assert delete_response.json()["status"] == "deleted"
+
+
+class FakeDiscoveryMarketDataRepository:
+    def __init__(self) -> None:
+        self.ref = {
+            "dataset_id": "okx-btc-raw-5m-discovery-api",
+            "asset": "BTC",
+            "instrument": "BTC-USDT-SWAP",
+            "data_type": "candles",
+            "timeframe": "5m",
+            "data_origin": "raw",
+            "storage_backend": "parquet",
+            "storage_uri": ".data/market-data/btc/5m",
+        }
+
+    def get_ref(self, dataset_id: str):
+        return self.ref if dataset_id == self.ref["dataset_id"] else None
 
 
 class StubRuntimeRepository:

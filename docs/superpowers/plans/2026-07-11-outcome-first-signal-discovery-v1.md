@@ -298,27 +298,27 @@ git commit -m "feat: run signal discovery research jobs"
 - Modify: `apps/api/src/quant_terminal_api/main.py`
 - Test: `tests/test_api.py`
 
-- [ ] **Step 1: Write failing API tests**
+- [x] **Step 1: Write failing API tests**
 
 Test create/list/get/delete, atlas enqueue, freeze, prompt retrieval, attach candidate engine, evaluation enqueue, and handoff enqueue. Validate ordered split windows, nonempty R values, positive multiples, 36/48-style horizons, nonnegative costs, and immutable frozen targets.
 
-- [ ] **Step 2: Run focused API tests**
+- [x] **Step 2: Run focused API tests**
 
 Run: `pytest -q tests/test_api.py -k signal_discovery`
 
 Expected: 404 responses for missing routes.
 
-- [ ] **Step 3: Add request models and endpoints**
+- [x] **Step 3: Add request models and endpoints**
 
 Add Pydantic models `SignalDiscoverySessionCreateRequest`, `SignalDiscoveryFreezeRequest`, `SignalDiscoveryCandidateRequest`, and endpoints under `/api/v1/research/signal-discovery-sessions`. Queue long-running work with scope `signal_discovery:<session_id>` and return the existing async job envelope. Freeze must read training feasibility, validate the selected R was in the configured grid, persist `target_version=1`, and never read WF artifacts.
 
-- [ ] **Step 4: Verify endpoints**
+- [x] **Step 4: Verify endpoints**
 
 Run: `pytest -q tests/test_api.py -k signal_discovery`
 
 Expected: all discovery API tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/api/src/quant_terminal_api/main.py tests/test_api.py
