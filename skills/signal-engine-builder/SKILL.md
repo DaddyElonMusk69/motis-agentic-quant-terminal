@@ -34,6 +34,7 @@ For current runtime examples, read:
 - `required_data` must declare canonical Parquet needs, currently candle data by `origin` and `timeframe`.
 - Training generator must consume canonical Parquet through `MarketDataReader` or the engine runtime context.
 - Live scanner must scan the latest eligible canonical Parquet candle state, not historical DB signal backlog.
+- The complete emission decision must be point-in-time safe, not only the packet. For a signal timestamp `T`, trigger/no-trigger, selected leaf or leaves, feature and normalization state, resampling, joins, cadence/dedupe admission, and packet construction may depend only on source observations whose `available_at <= T`.
 - Signal packets must be point-in-time safe: every field, chart, feature, and higher-timeframe context value must be derivable from data available at or before the signal generation timestamp. Do not use future rows, unclosed candles presented as completed context, centered/forward-looking indicators, or derived features that were calculated with future candles.
 - Signal packets must be neutral market evidence only. Do not include direction, side, confidence, sizing, leverage, TP, SL, or order intent.
 - Signal packets must fit downstream Motis consumers, not only `validate_signal_packet()`. Every event packet must expose a standard reference price in `evidence.reference_price` and `evidence.trigger_candle_close`; for confirmed-5m event engines these usually equal the signal candle close. Do not patch Stage 0/2/3/4 to learn one-off engine aliases unless the user explicitly requests a system-wide compatibility change.
@@ -60,11 +61,15 @@ For current runtime examples, read:
 
 Use this section before designing any multi-timeframe or indicator-heavy engine.
 
+**Look-ahead bias warning:** a source row timestamp at or before `T` is not sufficient when that row closes, settles, publishes, or becomes knowable after `T`. Prove an explicit availability time for every trigger input and enforce `available_at <= T` throughout research, training generation, extension, and live scanning.
+
 - Define the signal timestamp as the latest confirmed 5m candle close used to trigger the event.
 - For higher-timeframe completed candles, select by availability/close time, not open time. A 2h candle that opens at 06:00 is unavailable to a 07:05 signal if it closes at 08:00.
 - If forming higher-timeframe context is useful, compute it from confirmed lower-timeframe candles up to the signal timestamp and mark it explicitly as `complete: false`. Never mix forming candles into completed-candle arrays without an explicit completeness flag.
 - Prefer one canonical `candles` structure per timeframe where each row has enough metadata for strategy code to know `timeframe`, `open_time`, `close_time` or equivalent timestamp convention, and `complete`. Avoid storing duplicate `completed_candles` plus `candles` copies unless compatibility requires it.
 - Indicators must be causal. EMA/SMA/RSI style indicators are acceptable only when calculated using rows available at or before the signal timestamp. Never use centered windows, full-series normalization, future-filled features, or postcomputed higher-timeframe values attached retroactively.
+- Make every resample and as-of join availability-aware. Bucket membership by open time does not make a higher-timeframe aggregate available before its close, and a join must never select a later observation merely because its source timestamp sorts before `T`.
+- Use outcome labels, brackets, and future excursions only as authorized offline training evaluation evidence. They may guide hypothesis and fixed-threshold selection inside the training window, but must never become runtime feature values, preprocessing state, leaf-routing inputs, dedupe state, packet fields, or implementation fixtures.
 - Training generation and live generation must use the same packet-building function. Live must not have a richer or poorer context shape than training.
 - Dedupe/cadence state must be continuous across repeated generation calls. If training uses a 2h post-fill dedupe, extending a signal pool every 5m must look back to the latest existing canonical signal and preserve the same cadence instead of resetting the dedupe window.
 - Packets should include enough market evidence for Stage 1 to reason, but not every possible candle twice. Large packets slow Stage 1 and frontend artifact handling; add context intentionally and test packet size with representative assets.
@@ -136,6 +141,7 @@ Use this workflow when the task is driven by a frozen fixed-R opportunity target
    - training dispatch from Parquet
    - live scan from Parquet
    - point-in-time safety: no emitted packet may include data whose close/availability time is after the signal timestamp, especially higher-timeframe context candles and derived features
+   - future-mutation invariance: for a representative timestamp `T`, mutate or append every source row with `available_at > T` and assert byte-identical trigger/no-trigger, selected leaves, dedupe admission, and emitted packet at `T`
    - repeated extension/cadence parity: a second generator call must respect existing dedupe state and not append signals inside the training dedupe window
    - packet neutrality
    - paired base strategy validates
@@ -159,6 +165,7 @@ Use this workflow when the task is driven by a frozen fixed-R opportunity target
 - Letting a packet imply `LONG` or `SHORT`.
 - Emitting only engine-specific price aliases such as `evidence.close`. Stage 0/2/3/4 need a standard reference price field.
 - Selecting higher-timeframe context by candle open timestamp instead of close/availability timestamp. A 2h/1d candle is not available to a 5m signal until that higher-timeframe candle has closed.
+- Proving only that packet fields exclude future rows while trigger routing, normalization, resampling, joins, or dedupe admission still use post-signal information.
 - Calling a partially formed 2h/8h/1d candle "latest completed" because its open timestamp is before the signal. If it is useful, emit it as forming context with `complete: false`.
 - Letting training generation and live extension use different packet builders, different dedupe windows, or different HTF availability rules.
 - Resetting a post-fill dedupe window on every generator call, which makes live append clustered signals that could never appear in the training pool.
@@ -181,7 +188,8 @@ Use this workflow when the task is driven by a frozen fixed-R opportunity target
 - `validate_signal_engine_spec(...)` passes.
 - `validate_signal_packet(...)` passes for emitted packets.
 - `validate_strategy_module(base_strategy_path)` passes.
-- Tests prove all packet evidence is point-in-time safe and excludes unavailable future context at signal generation time.
+- Tests prove the entire emission decision is point-in-time safe: trigger/no-trigger, selected leaves, feature state, resampling/joins, dedupe admission, and packet evidence exclude observations unavailable at signal generation time.
+- A future-mutation test proves that changing or appending all rows with `available_at > T` cannot change the decision or packet at `T`.
 - Repeated signal-pool extension preserves the same dedupe/cadence behavior as full-window training generation.
 - Representative packet size is inspected; duplicate candle payloads are avoided unless explicitly needed for backward compatibility.
 - A representative packet passes `scripts/audit_signal_packet_contract.py` and has standard reference price fields.
