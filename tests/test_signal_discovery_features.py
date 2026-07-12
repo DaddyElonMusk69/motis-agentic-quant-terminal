@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from math import sin
 
+import quant_terminal_worker.signal_discovery.features as discovery_features
 from quant_terminal_sdk.market_data_reader import MarketDataCandle
 from quant_terminal_worker.signal_discovery.features import (
     build_causal_feature_rows,
@@ -116,6 +117,56 @@ def test_hard_negatives_match_context_and_are_deterministic() -> None:
     assert first[0]["match_month"] == "2026-01"
     assert first[0]["utc_hour_block"] == 0
     assert first[0]["prior_volatility_quintile"] == 0
+
+
+def test_hard_negative_matching_scales_with_rows_and_episodes(
+    monkeypatch,
+) -> None:
+    positive_start = _ts("2026-01-10T01:00:00Z")
+    neutral_start = _ts("2026-01-10T02:00:00Z")
+    positives = [
+        _feature_row(
+            positive_start + timedelta(seconds=index),
+            label="LONG",
+            volatility=float(index),
+        )
+        for index in range(100)
+    ]
+    neutrals = [
+        _feature_row(
+            neutral_start + timedelta(seconds=index),
+            label="NEUTRAL",
+            volatility=float(index) / 5,
+        )
+        for index in range(500)
+    ]
+    episodes = [
+        {
+            "episode_id": f"episode-{index + 1:06d}",
+            "start_ts": row["decision_ts"],
+            "direction": "LONG",
+        }
+        for index, row in enumerate(positives)
+    ]
+    original_coerce = discovery_features._coerce_timestamp
+    coerce_calls = 0
+
+    def count_coercions(value):
+        nonlocal coerce_calls
+        coerce_calls += 1
+        return original_coerce(value)
+
+    monkeypatch.setattr(discovery_features, "_coerce_timestamp", count_coercions)
+
+    selected = select_hard_negatives(
+        feature_rows=[*positives, *neutrals],
+        episodes=episodes,
+        negatives_per_episode=1,
+    )
+
+    assert len(selected) == 100
+    assert len({row["decision_ts"] for row in selected}) == 100
+    assert coerce_calls < 5_000
 
 
 def _feature_candles(*, decision_ts: datetime) -> list[MarketDataCandle]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
+from collections import deque
 from datetime import UTC, datetime, timedelta
 from math import log, sqrt
 from typing import Any, Mapping, Sequence
@@ -46,13 +47,28 @@ def select_hard_negatives(
         raise ValueError("negatives_per_episode must be positive")
     enriched = _with_volatility_quintiles(feature_rows)
     positives_by_timestamp: dict[datetime, list[dict[str, Any]]] = {}
-    neutral_rows: list[dict[str, Any]] = []
+    neutral_rows: list[tuple[datetime, dict[str, Any]]] = []
     for row in enriched:
         timestamp = _coerce_timestamp(row["decision_ts"])
         positives_by_timestamp.setdefault(timestamp, []).append(row)
-        if str(row.get("label") or "").upper() == "NEUTRAL":
-            neutral_rows.append(row)
-    neutral_rows.sort(key=lambda row: _coerce_timestamp(row["decision_ts"]))
+        if (
+            str(row.get("label") or "").upper() == "NEUTRAL"
+            and row.get("prior_volatility_quintile") is not None
+        ):
+            neutral_rows.append((timestamp, row))
+    neutral_rows.sort(key=lambda item: item[0])
+    neutral_buckets: dict[
+        tuple[int, int, int, int],
+        deque[tuple[datetime, dict[str, Any]]],
+    ] = {}
+    for timestamp, row in neutral_rows:
+        key = (
+            timestamp.year,
+            timestamp.month,
+            timestamp.hour // 6,
+            int(row["prior_volatility_quintile"]),
+        )
+        neutral_buckets.setdefault(key, deque()).append((timestamp, row))
 
     selected: list[dict[str, Any]] = []
     used_timestamps: set[datetime] = set()
@@ -69,19 +85,17 @@ def select_hard_negatives(
         )
         if positive is None or positive.get("prior_volatility_quintile") is None:
             continue
-        month = start_ts.strftime("%Y-%m")
+        month = f"{start_ts.year:04d}-{start_ts.month:02d}"
         hour_block = start_ts.hour // 6
-        quintile = positive["prior_volatility_quintile"]
-        matches = [
-            row
-            for row in neutral_rows
-            if _coerce_timestamp(row["decision_ts"]) not in used_timestamps
-            and _coerce_timestamp(row["decision_ts"]).strftime("%Y-%m") == month
-            and _coerce_timestamp(row["decision_ts"]).hour // 6 == hour_block
-            and row.get("prior_volatility_quintile") == quintile
-        ]
-        for candidate in matches[:negatives_per_episode]:
-            timestamp = _coerce_timestamp(candidate["decision_ts"])
+        quintile = int(positive["prior_volatility_quintile"])
+        bucket = neutral_buckets.get(
+            (start_ts.year, start_ts.month, hour_block, quintile)
+        )
+        matched = 0
+        while bucket and matched < negatives_per_episode:
+            timestamp, candidate = bucket.popleft()
+            if timestamp in used_timestamps:
+                continue
             used_timestamps.add(timestamp)
             selected.append(
                 {
@@ -92,6 +106,7 @@ def select_hard_negatives(
                     "utc_hour_block": hour_block,
                 }
             )
+            matched += 1
     return selected
 
 
