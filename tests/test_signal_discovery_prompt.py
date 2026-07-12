@@ -116,3 +116,9 @@ def test_signal_engine_builder_skill_defines_outcome_first_discovery_rules() -> 
     assert "episode-level" in skill
     assert "directly against the frozen fixed-R target" in skill
     assert "no recurring causal mechanism" in skill
+    assert "signal_discovery_evidence_manifest.v1" in skill
+    assert "research_end" in skill
+    assert "arbitrary causal" in skill
+    assert "convenience baseline" in skill
+    assert "dataset ids" in skill
+    assert "production dependencies" in skill

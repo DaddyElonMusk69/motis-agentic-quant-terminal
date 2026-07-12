@@ -29,7 +29,6 @@ import {
   handoffSignalDiscoveryCandidate,
   runSignalDiscoveryAtlas,
   runSignalDiscoveryWalkForward,
-  type Dataset,
   type SignalDiscoveryPrompt,
   type SignalDiscoveryRResult,
   type SignalDiscoverySession
@@ -37,7 +36,7 @@ import {
 import { formatNumber, formatTimestamp } from "../app/format";
 import { queryClient } from "../app/queryClient";
 import { useAppRouter } from "../app/router";
-import { buildRiskGrid, formatRiskGrid } from "../app/signalDiscovery";
+import { buildDiscoveryTickers, buildRiskGrid, formatRiskGrid } from "../app/signalDiscovery";
 import { DataTable } from "../components/DataTable";
 import { FieldRow } from "../components/FieldRow";
 import { ListSkeleton } from "../components/ListSkeleton";
@@ -47,8 +46,7 @@ import { WorkerRuntimeNotice } from "../components/WorkerRuntimeNotice";
 
 type CreateState = {
   name: string;
-  datasetId: string;
-  oiDatasetId: string;
+  tickerKey: string;
   researchStart: string;
   researchEnd: string;
   walkForwardStart: string;
@@ -63,8 +61,7 @@ type CreateState = {
 
 const INITIAL_CREATE_STATE: CreateState = {
   name: "",
-  datasetId: "",
-  oiDatasetId: "",
+  tickerKey: "",
   researchStart: "2025-03-01",
   researchEnd: "2026-03-31",
   walkForwardStart: "2026-04-01",
@@ -214,34 +211,14 @@ export function ResearchSignalDiscoveryPage() {
     }
   });
 
-  const candleDatasets = useMemo(
-    () =>
-      (catalogQuery.data?.assets ?? [])
-        .flatMap((asset) => asset.datasets)
-        .filter(
-          (dataset) =>
-            dataset.storage_backend === "parquet" &&
-            dataset.data_type === "candles" &&
-            dataset.timeframe === "5m" &&
-            dataset.data_origin === "raw"
-        )
-        .sort((left, right) => left.asset.localeCompare(right.asset)),
+  const discoveryTickers = useMemo(
+    () => buildDiscoveryTickers(
+      (catalogQuery.data?.assets ?? []).flatMap((asset) => asset.datasets)
+    ),
     [catalogQuery.data?.assets]
   );
-  const selectedDataset = candleDatasets.find(
-    (dataset) => dataset.dataset_id === createState.datasetId
-  );
-  const oiDatasets = useMemo(
-    () =>
-      (catalogQuery.data?.assets ?? [])
-        .flatMap((asset) => asset.datasets)
-        .filter(
-          (dataset) =>
-            dataset.storage_backend === "parquet" &&
-            dataset.data_type === "open_interest" &&
-            (!selectedDataset || dataset.asset === selectedDataset.asset)
-        ),
-    [catalogQuery.data?.assets, selectedDataset]
+  const selectedTicker = discoveryTickers.find(
+    (ticker) => ticker.key === createState.tickerKey
   );
   const candidateSignalSets = useMemo(
     () =>
@@ -261,10 +238,10 @@ export function ResearchSignalDiscoveryPage() {
   const jobRunning = Boolean(job && ["queued", "running"].includes(job.status));
 
   useEffect(() => {
-    if (!createState.datasetId && candleDatasets[0]) {
-      setCreateState((current) => ({ ...current, datasetId: candleDatasets[0].dataset_id }));
+    if (!createState.tickerKey && discoveryTickers[0]) {
+      setCreateState((current) => ({ ...current, tickerKey: discoveryTickers[0].key }));
     }
-  }, [candleDatasets, createState.datasetId]);
+  }, [createState.tickerKey, discoveryTickers]);
 
   useEffect(() => {
     if (!session) {
@@ -380,15 +357,14 @@ export function ResearchSignalDiscoveryPage() {
   const walkForwardEvaluation = session?.evaluation.slices?.walk_forward;
 
   const submitCreate = () => {
-    if (!selectedDataset) {
+    if (!selectedTicker) {
       return;
     }
     const entryDelays = parseNumberList(createState.entryDelays).map((value) => Math.round(value));
     createMutation.mutate({
-      name: createState.name.trim() || `${selectedDataset.asset} Outcome-First`,
-      asset: selectedDataset.asset,
-      instrument: selectedDataset.instrument,
-      dataset_id: selectedDataset.dataset_id,
+      name: createState.name.trim() || `${selectedTicker.asset} Outcome-First`,
+      asset: selectedTicker.asset,
+      instrument: selectedTicker.instrument,
       research_start: dateStart(createState.researchStart),
       research_end: dateEnd(createState.researchEnd),
       walk_forward_start: dateStart(createState.walkForwardStart),
@@ -399,8 +375,7 @@ export function ResearchSignalDiscoveryPage() {
       horizon_hours: [Math.round(createState.maxHoldHours)],
       entry_delays_minutes: entryDelays,
       fee_bps_per_side: createState.feeBps,
-      slippage_bps_per_side: createState.slippageBps,
-      oi_dataset_id: createState.oiDatasetId || null
+      slippage_bps_per_side: createState.slippageBps
     });
   };
 
@@ -522,7 +497,7 @@ export function ResearchSignalDiscoveryPage() {
                   </button>
                 </header>
                 <div className="discovery-field-grid">
-                  <FieldRow label="Dataset" value={session.dataset_id} />
+                  <FieldRow label="Primary label source" value={session.dataset_id} />
                   <FieldRow label="Instrument" value={session.instrument} />
                   <FieldRow label="Training" value={`${dateOnly(session.research_start)} — ${dateOnly(session.research_end)}`} />
                   <FieldRow label="Walk-forward" value={`${dateOnly(session.walk_forward_start)} — ${dateOnly(session.walk_forward_end)}`} />
@@ -530,6 +505,12 @@ export function ResearchSignalDiscoveryPage() {
                   <FieldRow label="Max hold" value={`${Math.max(...session.config.horizon_hours)}h`} />
                   <FieldRow label="Entry delays" value={`${session.config.entry_delays_minutes.join(" / ")}m`} />
                   <FieldRow label="Round-trip costs" value={`${2 * (session.config.fee_bps_per_side + session.config.slippage_bps_per_side)} bps`} />
+                  {session.summary.evidence ? <FieldRow label="Evidence sources" value={`${formatNumber(session.summary.evidence.included_dataset_count)} datasets · ${session.summary.evidence.data_types.join(" / ")}`} /> : null}
+                  {session.summary.evidence ? <FieldRow label="Evidence cutoff" value={formatTimestamp(session.summary.evidence.authorized_end)} /> : null}
+                  {session.summary.evidence ? <FieldRow label="Evidence timeframes" value={session.summary.evidence.timeframes.join(" / ") || "n/a"} /> : null}
+                  {session.summary.evidence ? <FieldRow label="Evidence warnings" value={session.summary.evidence.warning_datasets.length ? session.summary.evidence.warning_datasets.map((row) => row.dataset_id).join(" / ") : "None"} /> : null}
+                  {session.summary.evidence ? <FieldRow label="Evidence exclusions" value={session.summary.evidence.excluded_datasets.length ? session.summary.evidence.excluded_datasets.map((row) => row.dataset_id).join(" / ") : "None"} /> : null}
+                  {session.summary.evidence ? <FieldRow label="Evidence hash" value={session.summary.evidence.manifest_hash.slice(0, 16)} /> : null}
                 </div>
               </section>
 
@@ -810,16 +791,9 @@ export function ResearchSignalDiscoveryPage() {
                   <input value={createState.name} onChange={(event) => setCreateState((current) => ({ ...current, name: event.target.value }))} placeholder="BTC fixed-R discovery" />
                 </label>
                 <label>
-                  Candle Dataset
-                  <select value={createState.datasetId} onChange={(event) => setCreateState((current) => ({ ...current, datasetId: event.target.value, oiDatasetId: "" }))}>
-                    {candleDatasets.map((dataset) => <DatasetOption dataset={dataset} key={dataset.dataset_id} />)}
-                  </select>
-                </label>
-                <label>
-                  Open Interest
-                  <select value={createState.oiDatasetId} onChange={(event) => setCreateState((current) => ({ ...current, oiDatasetId: event.target.value }))}>
-                    <option value="">None</option>
-                    {oiDatasets.map((dataset) => <DatasetOption dataset={dataset} key={dataset.dataset_id} />)}
+                  Ticker
+                  <select value={createState.tickerKey} onChange={(event) => setCreateState((current) => ({ ...current, tickerKey: event.target.value }))}>
+                    {discoveryTickers.map((ticker) => <option value={ticker.key} key={ticker.key}>{ticker.label}</option>)}
                   </select>
                 </label>
                 <label>
@@ -866,12 +840,12 @@ export function ResearchSignalDiscoveryPage() {
               {createMutation.error ? <div className="state-line state-line--error">{createMutation.error.message}</div> : null}
             </div>
             <footer className="terminal-modal__footer">
-              <span>{selectedDataset ? `${selectedDataset.asset} · ${selectedDataset.instrument}` : "Select a canonical 5m dataset"}</span>
+              <span>{selectedTicker ? selectedTicker.label : "Select a ticker with canonical 5m candles"}</span>
               <div className="modal-actions">
                 <button className="button button--secondary" onClick={() => setCreateOpen(false)} type="button">Cancel</button>
                 <button
                   className="button button--primary"
-                  disabled={!selectedDataset || configuredRiskValues.length === 0 || !Number.isInteger(createState.maxHoldHours) || createState.maxHoldHours <= 0 || createMutation.isPending}
+                  disabled={!selectedTicker || configuredRiskValues.length === 0 || !Number.isInteger(createState.maxHoldHours) || createState.maxHoldHours <= 0 || createMutation.isPending}
                   onClick={submitCreate}
                   type="button"
                 >
@@ -918,8 +892,4 @@ export function ResearchSignalDiscoveryPage() {
       ) : null}
     </div>
   );
-}
-
-function DatasetOption({ dataset }: { dataset: Dataset }) {
-  return <option value={dataset.dataset_id}>{dataset.asset} · {dataset.timeframe ?? dataset.data_type} · {dataset.dataset_id}</option>;
 }

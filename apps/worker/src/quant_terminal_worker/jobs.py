@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timedelta
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -26,10 +27,11 @@ from quant_terminal_worker.signal_discovery.features import (
     build_causal_feature_rows,
     select_hard_negatives,
 )
+from quant_terminal_worker.signal_discovery.evidence import build_evidence_manifest
 from quant_terminal_worker.signal_discovery.evaluation import evaluate_registered_engine
 from quant_terminal_worker.signal_discovery.handoff import handoff_accepted_candidate
 from quant_terminal_worker.signal_discovery.workspace import (
-    materialize_training_atlas,
+    TrainingAtlasWorkspace,
     materialize_walk_forward_atlas,
     write_session_manifest,
 )
@@ -255,6 +257,8 @@ def _execute_signal_discovery_atlas(
     )
     try:
         ref = _signal_discovery_data_ref(market_data_repository, session)
+        list_refs = getattr(market_data_repository, "list_refs", None)
+        evidence_refs = list_refs() if callable(list_refs) else [ref]
         config_value = session.get("config") or {}
         horizons = tuple(float(value) for value in config_value.get("horizon_hours", (48,)))
         delays = tuple(
@@ -281,22 +285,44 @@ def _execute_signal_discovery_atlas(
             outcome_end,
             session["walk_forward_start"] - timedelta(microseconds=1),
         )
+        artifact_root = _signal_discovery_artifact_root(
+            session,
+            workspace_root=workspace_root,
+        )
+        evidence_manifest = build_evidence_manifest(
+            workspace_root=workspace_root,
+            artifact_root=artifact_root,
+            session_id=session["session_id"],
+            asset=session["asset"],
+            instrument=session["instrument"],
+            primary_dataset_id=session["dataset_id"],
+            research_start=session["research_start"],
+            research_end=session["research_end"],
+            refs=evidence_refs,
+        )
         candles = read_candles_from_ref(
             ref,
             workspace_root=workspace_root,
             start=read_start,
             end=read_end,
         )
-        atlas = run_training_atlas(candles=candles, config=config)
         primary_delay = min(config.entry_delays_minutes)
         primary_horizon = min(config.horizon_hours)
         unique_decisions = sorted(
-            {row["decision_ts"] for row in atlas["timestamp_labels"]}
+            {
+                candle.timestamp.astimezone(UTC)
+                for candle in candles
+                if candle.confirm == 1
+                and config.research_start <= candle.timestamp.astimezone(UTC) <= config.research_end
+                and candle.timestamp.astimezone(UTC)
+                + timedelta(minutes=primary_delay, hours=primary_horizon)
+                < config.walk_forward_start
+            }
         )
         oi_rows = _signal_discovery_oi_rows(
             market_data_repository=market_data_repository,
             workspace_root=workspace_root,
-            config=config_value,
+            dataset_id=evidence_manifest.get("baseline_oi_dataset_id"),
             start=read_start,
             end=session["research_end"],
         )
@@ -313,20 +339,56 @@ def _execute_signal_discovery_atlas(
             row["decision_ts"]: {key: value for key, value in row.items() if key != "label"}
             for row in features_with_labels
         }
-        hard_negatives: list[dict[str, Any]] = []
-        for risk_pct in config.risk_values:
+        atlas_workspace = TrainingAtlasWorkspace(
+            artifact_root=artifact_root,
+            run_identity={
+                "evidence_manifest_hash": evidence_manifest["manifest_hash"],
+                "primary_dataset_id": session["dataset_id"],
+                "research_start": config.research_start,
+                "research_end": config.research_end,
+                "walk_forward_start": config.walk_forward_start,
+                "risk_values": config.risk_values,
+                "reward_multiple": config.reward_multiple,
+                "stop_multiple": config.stop_multiple,
+                "horizon_hours": config.horizon_hours,
+                "entry_delays_minutes": config.entry_delays_minutes,
+                "fee_bps_per_side": config.fee_bps_per_side,
+                "slippage_bps_per_side": config.slippage_bps_per_side,
+            },
+        )
+        completed_risks = set(atlas_workspace.completed_risk_values)
+        for risk_index, risk_pct in enumerate(config.risk_values):
+            if risk_pct in completed_risks:
+                continue
+            repository.heartbeat_job(
+                job["job_id"],
+                current_step=(
+                    f"signal_discovery_atlas:risk_{risk_index + 1}_of_"
+                    f"{len(config.risk_values)}"
+                ),
+            )
+            risk_atlas = run_training_atlas(
+                candles=candles,
+                config=replace(config, risk_values=(risk_pct,)),
+            )
+            episode_offset = atlas_workspace.completed_episode_count
+            risk_episodes = [
+                {
+                    **row,
+                    "episode_id": f"episode-{episode_offset + number:06d}",
+                }
+                for number, row in enumerate(risk_atlas["episodes"], start=1)
+            ]
             labels = [
                 row
-                for row in atlas["timestamp_labels"]
-                if row["risk_pct"] == risk_pct
-                and row["scenario_entry_delay_minutes"] == primary_delay
+                for row in risk_atlas["timestamp_labels"]
+                if row["scenario_entry_delay_minutes"] == primary_delay
                 and row["scenario_horizon_hours"] == primary_horizon
             ]
             episodes = [
                 row
-                for row in atlas["episodes"]
-                if row["risk_pct"] == risk_pct
-                and row["entry_delay_minutes"] == primary_delay
+                for row in risk_episodes
+                if row["entry_delay_minutes"] == primary_delay
                 and row["horizon_hours"] == primary_horizon
             ]
             scenario_features = [
@@ -337,41 +399,101 @@ def _execute_signal_discovery_atlas(
                 for row in labels
                 if row["decision_ts"] in features_by_timestamp
             ]
-            for negative in select_hard_negatives(
-                feature_rows=scenario_features,
-                episodes=episodes,
-            ):
-                hard_negatives.append(
-                    {
-                        **negative,
-                        "risk_pct": risk_pct,
-                        "entry_delay_minutes": primary_delay,
-                        "horizon_hours": primary_horizon,
-                    }
+            hard_negatives = [
+                {
+                    **negative,
+                    "risk_pct": risk_pct,
+                    "entry_delay_minutes": primary_delay,
+                    "horizon_hours": primary_horizon,
+                }
+                for negative in select_hard_negatives(
+                    feature_rows=scenario_features,
+                    episodes=episodes,
                 )
+            ]
+            atlas_workspace.write_risk_partition(
+                risk_index=risk_index,
+                risk_pct=risk_pct,
+                timestamp_labels=risk_atlas["timestamp_labels"],
+                episodes=risk_episodes,
+                hard_negatives=hard_negatives,
+                r_summary=risk_atlas["r_summaries"][0],
+                purged_decision_count=risk_atlas["purged_decision_count"],
+            )
 
+        summaries = atlas_workspace.r_summaries
+        neighboring = []
+        for lower, upper in zip(summaries, summaries[1:], strict=False):
+            neighboring.append(
+                {
+                    "lower_risk_pct": lower["risk_pct"],
+                    "upper_risk_pct": upper["risk_pct"],
+                    "primary_episode_count_delta": (
+                        upper["primary"]["episode_count"]
+                        - lower["primary"]["episode_count"]
+                    ),
+                    "primary_qualifying_timestamp_count_delta": (
+                        upper["primary"]["qualifying_timestamp_count"]
+                        - lower["primary"]["qualifying_timestamp_count"]
+                    ),
+                }
+            )
         feasibility = {
             "schema_version": "signal_discovery_r_feasibility.v1",
-            "r_summaries": atlas["r_summaries"],
-            "neighboring_r_diagnostics": atlas["neighboring_r_diagnostics"],
-            "purged_decision_count": atlas["purged_decision_count"],
+            "r_summaries": summaries,
+            "neighboring_r_diagnostics": neighboring,
+            "purged_decision_count": atlas_workspace.purged_decision_count,
         }
-        artifact_root = _signal_discovery_artifact_root(session, workspace_root=workspace_root)
-        artifact_paths = materialize_training_atlas(
-            artifact_root=artifact_root,
-            timestamp_labels=atlas["timestamp_labels"],
-            episodes=atlas["episodes"],
+        repository.heartbeat_job(
+            job["job_id"],
+            current_step="signal_discovery_atlas:finalizing",
+        )
+        artifact_paths = atlas_workspace.finalize(
             features=list(features_by_timestamp.values()),
-            hard_negatives=hard_negatives,
             r_feasibility=feasibility,
         )
         summary = {
             **feasibility,
-            "training_timestamp_label_count": len(atlas["timestamp_labels"]),
-            "training_episode_count": len(atlas["episodes"]),
+            "training_timestamp_label_count": (
+                atlas_workspace.completed_timestamp_label_count
+            ),
+            "training_episode_count": atlas_workspace.completed_episode_count,
             "training_feature_count": len(features_by_timestamp),
-            "training_hard_negative_count": len(hard_negatives),
+            "training_hard_negative_count": (
+                atlas_workspace.completed_hard_negative_count
+            ),
             "artifacts": {key: str(path) for key, path in artifact_paths.items()},
+            "evidence": {
+                "manifest_path": str(
+                    artifact_root / "evidence" / "evidence_manifest.json"
+                ),
+                "manifest_hash": evidence_manifest["manifest_hash"],
+                "authorized_end": evidence_manifest["authorized_end"],
+                "primary_label_dataset_id": evidence_manifest[
+                    "primary_label_dataset_id"
+                ],
+                "baseline_oi_dataset_id": evidence_manifest[
+                    "baseline_oi_dataset_id"
+                ],
+                "included_dataset_count": evidence_manifest[
+                    "included_dataset_count"
+                ],
+                "excluded_dataset_count": evidence_manifest[
+                    "excluded_dataset_count"
+                ],
+                "warning_count": evidence_manifest["warning_count"],
+                "warning_datasets": [
+                    {
+                        "dataset_id": row["dataset_id"],
+                        "warnings": row["warnings"],
+                    }
+                    for row in evidence_manifest["included_datasets"]
+                    if row["warnings"]
+                ],
+                "excluded_datasets": evidence_manifest["excluded_datasets"],
+                "data_types": evidence_manifest["data_types"],
+                "timeframes": evidence_manifest["timeframes"],
+            },
         }
         write_session_manifest(
             artifact_root=artifact_root,
@@ -380,6 +502,7 @@ def _execute_signal_discovery_atlas(
                 "status": "atlas_ready",
                 "dataset_id": session["dataset_id"],
                 "training_artifacts": summary["artifacts"],
+                "evidence": summary["evidence"],
             },
         )
         updated = repository.update_signal_discovery_session(
@@ -893,11 +1016,10 @@ def _signal_discovery_oi_rows(
     *,
     market_data_repository: Any,
     workspace_root: Path,
-    config: dict[str, Any],
+    dataset_id: Any,
     start: datetime,
     end: datetime,
 ) -> list[dict[str, Any]]:
-    dataset_id = config.get("oi_dataset_id")
     if not dataset_id:
         return []
     getter = getattr(market_data_repository, "get_ref", None)

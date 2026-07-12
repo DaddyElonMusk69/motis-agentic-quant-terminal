@@ -145,7 +145,8 @@ export type SignalDiscoveryConfig = {
   entry_delays_minutes: number[];
   fee_bps_per_side: number;
   slippage_bps_per_side: number;
-  oi_dataset_id?: string | null;
+  evidence_scope?: string;
+  deprecated_oi_dataset_id?: string | null;
 };
 
 export type SignalDiscoveryRResult = {
@@ -247,6 +248,20 @@ export type SignalDiscoverySession = {
     training_episode_count?: number;
     training_feature_count?: number;
     training_hard_negative_count?: number;
+    evidence?: {
+      manifest_path: string;
+      manifest_hash: string;
+      authorized_end: string;
+      primary_label_dataset_id: string;
+      baseline_oi_dataset_id?: string | null;
+      included_dataset_count: number;
+      excluded_dataset_count: number;
+      warning_count: number;
+      warning_datasets: Array<{ dataset_id: string; warnings: string[] }>;
+      excluded_datasets: Array<{ dataset_id: string; reason: string }>;
+      data_types: string[];
+      timeframes: string[];
+    };
     walk_forward?: Record<string, unknown>;
     last_error?: { message?: string; type?: string };
   };
@@ -1468,7 +1483,7 @@ export function createSignalDiscoverySession(request: {
   name: string;
   asset: string;
   instrument: string;
-  dataset_id: string;
+  dataset_id?: string;
   research_start: string;
   research_end: string;
   walk_forward_start: string;

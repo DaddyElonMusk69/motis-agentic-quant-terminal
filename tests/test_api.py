@@ -70,7 +70,6 @@ def test_signal_discovery_api_lifecycle_and_validation(tmp_path, monkeypatch):
         "name": "BTC Fixed-R Discovery",
         "asset": "BTC",
         "instrument": "BTC-USDT-SWAP",
-        "dataset_id": market_repository.ref["dataset_id"],
         "research_start": "2025-03-01T00:00:00Z",
         "research_end": "2026-03-29T23:55:00Z",
         "walk_forward_start": "2026-04-01T00:00:00Z",
@@ -93,6 +92,7 @@ def test_signal_discovery_api_lifecycle_and_validation(tmp_path, monkeypatch):
     session = create_response.json()["session"]
     assert session["status"] == "draft"
     assert session["asset"] == "BTC"
+    assert session["dataset_id"] == market_repository.ref["dataset_id"]
     assert session["config"]["risk_values"] == [0.6, 0.7, 0.8, 0.9, 1.0]
     assert session["config"]["horizon_hours"] == [72]
     assert client.get("/api/v1/research/signal-discovery-sessions").json()["sessions"][0][
@@ -277,12 +277,119 @@ class FakeDiscoveryMarketDataRepository:
             "data_type": "candles",
             "timeframe": "5m",
             "data_origin": "raw",
+            "start_ts": "2025-01-01T00:00:00Z",
+            "end_ts": "2026-06-03T01:00:00Z",
+            "row_count": 1000,
             "storage_backend": "parquet",
             "storage_uri": ".data/market-data/btc/5m",
         }
 
     def get_ref(self, dataset_id: str):
         return self.ref if dataset_id == self.ref["dataset_id"] else None
+
+    def list_refs(self):
+        return [self.ref]
+
+
+def test_signal_discovery_auto_resolution_rejects_insufficient_forward_coverage(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    market_repository = FakeDiscoveryMarketDataRepository()
+    market_repository.ref["end_ts"] = "2026-05-31T00:00:00Z"
+    client = TestClient(
+        create_app(
+            runtime_repository=repository,
+            market_data_repository=market_repository,
+        )
+    )
+
+    response = client.post(
+        "/api/v1/research/signal-discovery-sessions",
+        json={
+            "session_id": "discovery-insufficient-coverage",
+            "name": "BTC insufficient coverage",
+            "asset": "BTC",
+            "instrument": "BTC-USDT-SWAP",
+            "research_start": "2025-03-01T00:00:00Z",
+            "research_end": "2026-03-31T23:55:00Z",
+            "walk_forward_start": "2026-04-01T00:00:00Z",
+            "walk_forward_end": "2026-05-30T23:55:00Z",
+            "risk_values": [1.0],
+            "horizon_hours": [48],
+            "entry_delays_minutes": [5],
+        },
+    )
+
+    assert response.status_code == 400
+    assert "fully covers" in response.json()["detail"]
+
+
+def test_signal_discovery_prompt_drift_marks_session_failed(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    artifact_root = tmp_path / "dev/signal_discovery_sessions/discovery-drift"
+    repository.create_signal_discovery_session(
+        {
+            "session_id": "discovery-drift",
+            "name": "BTC drift",
+            "asset": "BTC",
+            "instrument": "BTC-USDT-SWAP",
+            "dataset_id": "btc-primary",
+            "research_start": "2025-03-01T00:00:00Z",
+            "research_end": "2026-03-31T23:55:00Z",
+            "walk_forward_start": "2026-04-01T00:00:00Z",
+            "walk_forward_end": "2026-05-30T23:55:00Z",
+            "artifact_root": str(artifact_root),
+            "config": {"risk_values": [1.0]},
+        }
+    )
+    repository.update_signal_discovery_session(
+        "discovery-drift",
+        status="atlas_ready",
+        summary={"evidence": {"manifest_hash": "abc"}},
+    )
+    repository.update_signal_discovery_session(
+        "discovery-drift",
+        status="target_frozen",
+        frozen_target={"config_hash": "abc", "selected_target": {}},
+        target_version=1,
+    )
+    evidence_path = artifact_root / "evidence/evidence_manifest.json"
+    evidence_path.parent.mkdir(parents=True)
+    evidence_path.write_text("{}\n")
+
+    def reject_drift(**_kwargs):
+        raise ValueError("signal discovery evidence source drift detected")
+
+    monkeypatch.setattr(api_main, "validate_evidence_manifest", reject_drift)
+    client = TestClient(
+        create_app(
+            runtime_repository=repository,
+            market_data_repository=FakeDiscoveryMarketDataRepository(),
+        )
+    )
+
+    response = client.post(
+        "/api/v1/research/signal-discovery-sessions/discovery-drift/engine-builder-prompt"
+    )
+
+    assert response.status_code == 409
+    assert repository.get_signal_discovery_session("discovery-drift")["status"] == "failed"
 
 
 class StubRuntimeRepository:

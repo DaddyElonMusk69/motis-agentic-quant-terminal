@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildRiskGrid, formatRiskGrid } from "../src/app/signalDiscovery.ts";
+import { buildDiscoveryTickers, buildRiskGrid, formatRiskGrid } from "../src/app/signalDiscovery.ts";
 
 test("buildRiskGrid expands an inclusive range in stable 0.1 increments", () => {
   assert.deepEqual(buildRiskGrid(0.6, 1.0), [0.6, 0.7, 0.8, 0.9, 1.0]);
@@ -16,4 +16,19 @@ test("buildRiskGrid rejects nonpositive and descending ranges", () => {
 test("formatRiskGrid compacts ranges without mislabeling legacy grids", () => {
   assert.equal(formatRiskGrid([0.6, 0.7, 0.8, 0.9, 1.0]), "0.6–1% R · 0.1% step");
   assert.equal(formatRiskGrid([0.75, 1.0, 1.25]), "0.75 / 1 / 1.25% R");
+});
+
+test("buildDiscoveryTickers exposes unique raw 5m instruments without dataset ids", () => {
+  const datasets = [
+    { dataset_id: "btc-a", asset: "BTC", instrument: "BTC-USDT-SWAP", data_type: "candles", timeframe: "5m", data_origin: "raw", storage_backend: "parquet" },
+    { dataset_id: "btc-b", asset: "BTC", instrument: "BTC-USDT-SWAP", data_type: "candles", timeframe: "5m", data_origin: "raw", storage_backend: "parquet" },
+    { dataset_id: "btc-oi", asset: "BTC", instrument: "BTCUSDT", data_type: "open_interest", timeframe: "5m", data_origin: "raw", storage_backend: "parquet" },
+    { dataset_id: "eth-derived", asset: "ETH", instrument: "ETH-USDT-SWAP", data_type: "candles", timeframe: "5m", data_origin: "derived", storage_backend: "parquet" },
+    { dataset_id: "sol", asset: "SOL", instrument: "SOL-USDT-SWAP", data_type: "candles", timeframe: "5m", data_origin: "raw", storage_backend: "parquet" },
+  ];
+
+  assert.deepEqual(buildDiscoveryTickers(datasets), [
+    { key: "BTC|BTC-USDT-SWAP", asset: "BTC", instrument: "BTC-USDT-SWAP", label: "BTC · BTC-USDT-SWAP" },
+    { key: "SOL|SOL-USDT-SWAP", asset: "SOL", instrument: "SOL-USDT-SWAP", label: "SOL · SOL-USDT-SWAP" },
+  ]);
 });

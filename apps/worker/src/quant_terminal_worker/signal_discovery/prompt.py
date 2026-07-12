@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,10 @@ def generate_engine_builder_prompt(
 
     prompt_path = root / "prompt" / "engine_builder_prompt.md"
     rationale_path = root / "prompt" / "engine_research_rationale.md"
+    evidence_manifest_path = root / "evidence" / "evidence_manifest.json"
+    evidence_manifest = (
+        json.loads(evidence_manifest_path.read_text()) if evidence_manifest_path.is_file() else None
+    )
     prompt = _render_engine_builder_prompt(
         session_id=str(target["session_id"]),
         target_config_hash=str(target["config_hash"]),
@@ -50,6 +55,8 @@ def generate_engine_builder_prompt(
         / "strategy_modules"
         / "src"
         / "quant_terminal_strategies",
+        evidence_manifest_path=(evidence_manifest_path if evidence_manifest is not None else None),
+        evidence_manifest=evidence_manifest,
     )
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     prompt_path.write_text(prompt)
@@ -73,8 +80,40 @@ def _render_engine_builder_prompt(
     registry_path: Path,
     engine_directory: Path,
     strategy_directory: Path,
+    evidence_manifest_path: Path | None = None,
+    evidence_manifest: dict[str, Any] | None = None,
 ) -> str:
     evidence_lines = [f"- `{path}`" for path in training_paths]
+    market_evidence_lines: list[str] = []
+    if evidence_manifest_path is not None and evidence_manifest is not None:
+        market_evidence_lines = [
+            "",
+            "## Authorized Canonical Market Evidence",
+            "",
+            f"Evidence manifest: `{evidence_manifest_path}`",
+            f"The row-level authorization cutoff is `research_end` = "
+            f"`{evidence_manifest['authorized_end']}`. Apply this cutoff when reading every source, "
+            "including shards that also contain later rows.",
+            "The manifest's included datasets are all fair game for evaluation. You may perform "
+            "arbitrary causal resampling and derive higher-timeframe candles or OI, trends, z-scores, "
+            "accelerations, interactions, and regime features.",
+            "`training_features.parquet` is a convenience baseline, not the feature-search boundary.",
+            "Derived datasets are research candidates, not proof of point-in-time safety. Verify "
+            "availability semantics before using them and prefer reproducible raw-source transformations "
+            "for production when possible.",
+            "",
+            "Authorized registered sources:",
+            *[
+                "- `{dataset_id}` | `{data_type}` | `{timeframe}` | `{data_origin}` | `{storage_uri}`".format(
+                    dataset_id=row.get("dataset_id"),
+                    data_type=row.get("data_type"),
+                    timeframe=row.get("timeframe") or "none",
+                    data_origin=row.get("data_origin"),
+                    storage_uri=row.get("storage_uri"),
+                )
+                for row in evidence_manifest.get("included_datasets", ())
+            ],
+        ]
     return "\n".join(
         [
             "# Outcome-First Signal Engine Builder Prompt",
@@ -93,6 +132,7 @@ def _render_engine_builder_prompt(
             "Do not inspect any walk-forward, validation, locked OOS, live-result, or future-outcome artifact.",
             "Do not reproduce timestamp-level outcome rows, exact opportunity timestamps, episode ids, "
             "or signal ids in source code, tests, rationale, or event rules.",
+            *market_evidence_lines,
             "",
             "## Assignment",
             "",
@@ -104,6 +144,8 @@ def _render_engine_builder_prompt(
             f"Write your evidence, competing hypotheses, stability checks, and decision to `{rationale_path}`. "
             "Reject the engine hypothesis when no coherent causal mechanism recurs; rejection is a valid "
             "result and must not be replaced by timestamp memorization, date-specific rules, or looser labels.",
+            "In the rationale, identify every dataset id and column used, all lookbacks and transformations, "
+            "the causal availability proof, rejected hypotheses, and the final engine's production data dependencies.",
             "",
             "If the hypothesis survives, implement exactly one candidate:",
             f"- Register it in `{registry_path}`.",

@@ -182,6 +182,101 @@ def test_signal_discovery_jobs_route_to_research_queue():
     assert queue_for_job("signal_discovery_handoff") == "research"
 
 
+def test_signal_discovery_atlas_retry_skips_checkpointed_risks(
+    tmp_path,
+    monkeypatch,
+):
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    dataset_id = "okx-btc-raw-5m-resume"
+    storage_uri = _write_discovery_candles(tmp_path)
+    market_repository = DiscoveryMarketDataRepository(
+        {
+            "dataset_id": dataset_id,
+            "asset": "BTC",
+            "instrument": "BTC-USDT-SWAP",
+            "data_type": "candles",
+            "timeframe": "5m",
+            "data_origin": "raw",
+            "storage_backend": "parquet",
+            "storage_uri": str(storage_uri),
+        }
+    )
+    repository.create_signal_discovery_session(
+        {
+            "session_id": "discovery-resume",
+            "name": "BTC resumable atlas",
+            "asset": "BTC",
+            "instrument": "BTC-USDT-SWAP",
+            "dataset_id": dataset_id,
+            "research_start": "2026-01-01T00:00:00Z",
+            "research_end": "2026-01-01T00:10:00Z",
+            "walk_forward_start": "2026-01-04T00:00:00Z",
+            "walk_forward_end": "2026-01-04T00:10:00Z",
+            "artifact_root": str(
+                tmp_path / "dev/signal_discovery_sessions/discovery-resume"
+            ),
+            "config": {
+                "risk_values": [1.0, 1.5],
+                "reward_multiple": 2.0,
+                "stop_multiple": 1.0,
+                "horizon_hours": [36],
+                "entry_delays_minutes": [5],
+            },
+        }
+    )
+    original_run_training_atlas = worker_jobs.run_training_atlas
+    first_attempt_risks = []
+
+    def fail_second_risk(*, candles, config):
+        first_attempt_risks.append(config.risk_values)
+        if config.risk_values == (1.5,):
+            raise RuntimeError("injected interruption")
+        return original_run_training_atlas(candles=candles, config=config)
+
+    monkeypatch.setattr(worker_jobs, "run_training_atlas", fail_second_risk)
+    repository.enqueue_job(
+        job_type="signal_discovery_atlas",
+        scope_key="signal_discovery:discovery-resume",
+        payload={"session_id": "discovery-resume"},
+    )
+    failed = run_claimed_job(
+        repository=repository,
+        job=repository.claim_next_job(worker_id="worker-discovery"),
+        workspace_root=tmp_path,
+        market_data_repository=market_repository,
+    )
+
+    assert failed["status"] == "failed"
+    assert first_attempt_risks == [(1.0,), (1.5,)]
+
+    retry_risks = []
+
+    def record_retry(*, candles, config):
+        retry_risks.append(config.risk_values)
+        return original_run_training_atlas(candles=candles, config=config)
+
+    monkeypatch.setattr(worker_jobs, "run_training_atlas", record_retry)
+    repository.enqueue_job(
+        job_type="signal_discovery_atlas",
+        scope_key="signal_discovery:discovery-resume",
+        payload={"session_id": "discovery-resume"},
+    )
+    completed = run_claimed_job(
+        repository=repository,
+        job=repository.claim_next_job(worker_id="worker-discovery"),
+        workspace_root=tmp_path,
+        market_data_repository=market_repository,
+    )
+
+    assert completed["status"] == "completed"
+    assert retry_risks == [(1.5,)]
+    assert repository.get_signal_discovery_session("discovery-resume")["status"] == (
+        "atlas_ready"
+    )
+
+
 def test_signal_discovery_engine_evaluation_job_persists_accepted_result(
     tmp_path,
     monkeypatch,
@@ -296,9 +391,9 @@ def test_signal_discovery_atlas_write_failure_never_marks_session_ready(
         payload={"session_id": "discovery-write-failure"},
     )
     monkeypatch.setattr(
-        worker_jobs,
-        "materialize_training_atlas",
-        lambda **_: (_ for _ in ()).throw(OSError("disk full")),
+        worker_jobs.TrainingAtlasWorkspace,
+        "finalize",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
     )
 
     failed = run_claimed_job(
@@ -320,6 +415,9 @@ class DiscoveryMarketDataRepository:
 
     def get_ref(self, dataset_id: str):
         return self.ref if dataset_id == self.ref["dataset_id"] else None
+
+    def list_refs(self):
+        return [self.ref]
 
 
 def _write_discovery_candles(tmp_path: Path) -> Path:

@@ -35,6 +35,9 @@ def test_fresh_discovery_session_reaches_stage1_without_artifact_surgery(
             "data_type": "candles",
             "timeframe": "5m",
             "data_origin": "raw",
+            "start_ts": "2025-12-25T00:00:00Z",
+            "end_ts": "2026-01-08T01:00:00Z",
+            "row_count": 4033,
             "storage_backend": "parquet",
             "storage_uri": str(storage_uri),
             "ingestion_version": "fixture-v1",
@@ -83,6 +86,11 @@ def test_fresh_discovery_session_reaches_stage1_without_artifact_surgery(
     )
     atlas_session = repository.get_signal_discovery_session(session_id)
     assert atlas_session["status"] == "atlas_ready"
+    evidence = atlas_session["summary"]["evidence"]
+    assert evidence["included_dataset_count"] == 1
+    assert evidence["primary_label_dataset_id"] == dataset_id
+    assert len(evidence["manifest_hash"]) == 64
+    assert (artifact_root / "evidence/evidence_manifest.json").is_file()
     feasibility = atlas_session["summary"]
     assert {row["risk_pct"] for row in feasibility["r_summaries"]} == {
         0.6,
@@ -109,6 +117,10 @@ def test_fresh_discovery_session_reaches_stage1_without_artifact_surgery(
     assert frozen["selected_target"]["stop_multiple"] == 1.0
     assert frozen["selected_target"]["entry_semantics"] == "next_5m_open"
     assert frozen["source_data"]["storage_backend"] == "parquet"
+    assert frozen["source_data"]["evidence_manifest_hash"] == evidence["manifest_hash"]
+    assert frozen["source_data"]["evidence_manifest_path"] == str(
+        artifact_root / "evidence/evidence_manifest.json"
+    )
 
     prompt_response = client.post(
         f"/api/v1/research/signal-discovery-sessions/{session_id}/engine-builder-prompt"
@@ -116,6 +128,9 @@ def test_fresh_discovery_session_reaches_stage1_without_artifact_surgery(
     assert prompt_response.status_code == 200
     prompt = prompt_response.json()["prompt"]
     assert "$signal-engine-builder" in prompt
+    assert str(artifact_root / "evidence/evidence_manifest.json") in prompt
+    assert "arbitrary causal resampling" in prompt
+    assert "research_end" in prompt
     assert "walk_forward_timestamp_labels.parquet" not in prompt
     assert "walk_forward_episodes.parquet" not in prompt
 
@@ -298,6 +313,9 @@ class _MarketDataRepository:
 
     def get_ref(self, dataset_id: str):
         return self.ref if dataset_id == self.ref["dataset_id"] else None
+
+    def list_refs(self):
+        return [self.ref]
 
 
 def _signal(*, signal_set_key: str, timestamp: datetime) -> dict[str, object]:

@@ -127,7 +127,7 @@ No production signal engine should be built before the opportunity atlas establi
 
 The terminal now exposes this sequence as a persisted Signal Discovery session:
 
-1. Create a session from a canonical Parquet 5-minute candle dataset, optional canonical OI dataset, ordered research/WF windows, an inclusive minimum/maximum R range expanded at fixed `0.1` percentage-point increments, a positive whole-hour maximum holding horizon, entry delays, and costs.
+1. Create a session from a ticker/instrument, ordered research/WF windows, an inclusive minimum/maximum R range expanded at fixed `0.1` percentage-point increments, a positive whole-hour maximum holding horizon, entry delays, and costs. The backend automatically resolves a fully covering canonical raw 5-minute label series.
 2. Run the training atlas to write timestamp labels, contiguous same-direction episodes, causal feature snapshots, matched hard negatives, neighboring-R feasibility, delay sensitivity, horizon sensitivity, and cost-in-R diagnostics.
 3. Freeze one selected target as immutable `signal_discovery_target.v1`, keyed by a SHA-256 config hash.
 4. Generate one training-only `$signal-engine-builder` prompt. The agent may reject the hypothesis or build one neutral engine plus paired directional strategy.
@@ -140,12 +140,14 @@ The session artifact root is `dev/signal_discovery_sessions/<session_id>/`. Larg
 
 ## Leakage Boundary
 
-Engine research is authorized to inspect only the frozen target plus these training artifacts:
+Engine research is authorized to inspect the frozen target, the session's `signal_discovery_evidence_manifest.v1`, and these training artifacts:
 
 - `atlas/training_timestamp_labels.parquet`
 - `atlas/training_episodes.parquet`
 - `atlas/training_features.parquet`
 - `atlas/training_hard_negatives.parquet`
+
+The evidence manifest references every readable same-asset Parquet registration across instruments, sources, data types, origins, and timeframes. All available history before the research window is valid feature warmup, but the authorization cutoff is exactly `research_end`; later rows remain forbidden even when they share a listed Parquet shard. The baseline feature file is not an exhaustive feature vocabulary. Agents may derive arbitrary causal horizons and transformations after proving point-in-time availability and recording the final production dependencies.
 
 The generated prompt does not expose walk-forward paths, exact opportunity timestamps, exact episode/signal ids, or embedded outcome rows. The agent must not inspect validation, walk-forward, locked OOS, live-result, or future-outcome artifacts. Walk-forward generation and candidate evaluation are terminal-owned operations after the engine id is attached.
 

@@ -56,6 +56,10 @@ from quant_terminal_worker.signal_discovery.workspace import (
     freeze_target_contract,
     write_session_manifest,
 )
+from quant_terminal_worker.signal_discovery.evidence import (
+    resolve_primary_label_ref,
+    validate_evidence_manifest,
+)
 from quant_terminal_worker.signal_discovery.prompt import generate_engine_builder_prompt
 from quant_terminal_worker.stage1.workspace import materialize_stage1_session_workspace
 from quant_terminal_worker.stage1.workspace import create_stage1_iteration_workspace
@@ -157,7 +161,7 @@ class SignalDiscoverySessionCreateRequest(BaseModel):
     name: str = Field(min_length=1)
     asset: str = Field(min_length=1)
     instrument: str = Field(min_length=1)
-    dataset_id: str = Field(min_length=1)
+    dataset_id: str | None = None
     research_start: datetime
     research_end: datetime
     walk_forward_start: datetime
@@ -833,17 +837,33 @@ def create_app(
         runtime = get_runtime_repository()
         if runtime.get_signal_discovery_session(request.session_id) is not None:
             raise HTTPException(status_code=409, detail="Signal discovery session already exists")
-        market_ref = _signal_discovery_api_data_ref(
-            get_market_data_repository(),
-            dataset_id=request.dataset_id,
-        )
-        if str(market_ref.get("asset") or "").upper() != request.asset.upper():
-            raise HTTPException(status_code=400, detail="Dataset asset does not match the session")
-        if str(market_ref.get("instrument") or "") != request.instrument:
-            raise HTTPException(status_code=400, detail="Dataset instrument does not match the session")
+        market_data = get_market_data_repository()
+        list_refs = getattr(market_data, "list_refs", None)
+        refs = list_refs() if callable(list_refs) else []
+        if request.dataset_id and not refs:
+            refs = [
+                _signal_discovery_api_data_ref(
+                    market_data,
+                    dataset_id=request.dataset_id,
+                )
+            ]
+        try:
+            market_ref = resolve_primary_label_ref(
+                refs=refs,
+                asset=request.asset,
+                instrument=request.instrument,
+                research_start=request.research_start,
+                walk_forward_end=request.walk_forward_end,
+                horizon_hours=request.horizon_hours,
+                entry_delays_minutes=request.entry_delays_minutes,
+                preferred_dataset_id=request.dataset_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        dataset_id = str(market_ref["dataset_id"])
         if request.oi_dataset_id:
             oi_ref = _signal_discovery_api_data_ref(
-                get_market_data_repository(),
+                market_data,
                 dataset_id=request.oi_dataset_id,
                 expected_data_type="open_interest",
                 expected_timeframe=None,
@@ -863,14 +883,15 @@ def create_app(
             "entry_delays_minutes": sorted(set(request.entry_delays_minutes)),
             "fee_bps_per_side": request.fee_bps_per_side,
             "slippage_bps_per_side": request.slippage_bps_per_side,
-            "oi_dataset_id": request.oi_dataset_id,
+            "evidence_scope": "all_asset_parquet_v1",
+            "deprecated_oi_dataset_id": request.oi_dataset_id,
         }
         session_value = {
             "session_id": request.session_id,
             "name": request.name,
             "asset": request.asset.upper(),
             "instrument": request.instrument,
-            "dataset_id": request.dataset_id,
+            "dataset_id": dataset_id,
             "research_start": _as_utc(request.research_start),
             "research_end": _as_utc(request.research_end),
             "walk_forward_start": _as_utc(request.walk_forward_start),
@@ -884,7 +905,7 @@ def create_app(
             manifest={
                 "session_id": request.session_id,
                 "status": "draft",
-                "dataset_id": request.dataset_id,
+                "dataset_id": dataset_id,
                 "asset": request.asset.upper(),
                 "config": config,
             },
@@ -960,6 +981,15 @@ def create_app(
             dataset_id=session["dataset_id"],
         )
         artifact_root = _signal_discovery_api_artifact_root(session)
+        evidence_summary = (session.get("summary") or {}).get("evidence") or {}
+        if evidence_summary:
+            try:
+                validate_evidence_manifest(
+                    workspace_root=Path.cwd(),
+                    artifact_root=artifact_root,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
         try:
             contract = freeze_target_contract(
                 artifact_root=artifact_root,
@@ -988,7 +1018,17 @@ def create_app(
                         "ingestion_version",
                     )
                     if market_ref.get(key) is not None
-                },
+                }
+                | (
+                    {
+                        "evidence_manifest_path": str(
+                            artifact_root / "evidence" / "evidence_manifest.json"
+                        ),
+                        "evidence_manifest_hash": evidence_summary["manifest_hash"],
+                    }
+                    if evidence_summary
+                    else {}
+                ),
                 splits={
                     "research_start": _iso_datetime(session["research_start"]),
                     "research_end": _iso_datetime(session["research_end"]),
@@ -1030,16 +1070,27 @@ def create_app(
         "/api/v1/research/signal-discovery-sessions/{session_id}/engine-builder-prompt"
     )
     def generate_signal_discovery_engine_builder_prompt(session_id: str) -> dict[str, Any]:
-        session = _signal_discovery_api_session(get_runtime_repository(), session_id)
+        runtime = get_runtime_repository()
+        session = _signal_discovery_api_session(runtime, session_id)
         if session.get("target_version") is None or not session.get("frozen_target"):
             raise HTTPException(
                 status_code=409,
                 detail="Target must be frozen before prompt generation",
             )
+        artifact_root = _signal_discovery_api_artifact_root(session)
+        if (artifact_root / "evidence" / "evidence_manifest.json").is_file():
+            try:
+                validate_evidence_manifest(
+                    workspace_root=Path.cwd(),
+                    artifact_root=artifact_root,
+                )
+            except ValueError as exc:
+                runtime.update_signal_discovery_session(session_id, status="failed")
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
         try:
             return generate_engine_builder_prompt(
                 workspace_root=Path.cwd(),
-                artifact_root=_signal_discovery_api_artifact_root(session),
+                artifact_root=artifact_root,
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1092,6 +1143,16 @@ def create_app(
         session = _signal_discovery_api_session(runtime, session_id)
         if session["status"] != "candidate_attached":
             raise HTTPException(status_code=409, detail="Attach an engine candidate before evaluation")
+        artifact_root = _signal_discovery_api_artifact_root(session)
+        if (artifact_root / "evidence" / "evidence_manifest.json").is_file():
+            try:
+                validate_evidence_manifest(
+                    workspace_root=Path.cwd(),
+                    artifact_root=artifact_root,
+                )
+            except ValueError as exc:
+                runtime.update_signal_discovery_session(session_id, status="failed")
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
         queued = enqueue_runtime_job(
             runtime,
             job_type="signal_discovery_engine_evaluation",

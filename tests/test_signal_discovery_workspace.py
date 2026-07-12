@@ -8,12 +8,169 @@ import pyarrow.parquet as pq
 import pytest
 
 from quant_terminal_worker.signal_discovery.workspace import (
+    TrainingAtlasWorkspace,
     discovery_artifact_root,
     freeze_target_contract,
     materialize_training_atlas,
     read_frozen_target,
     write_session_manifest,
 )
+
+
+def test_training_atlas_workspace_checkpoints_and_reloads_one_risk(tmp_path: Path) -> None:
+    artifact_root = discovery_artifact_root(
+        workspace_root=tmp_path,
+        session_id="btc-batched-atlas",
+    )
+    run_identity = {"evidence_manifest_hash": "abc123", "risk_values": [1.0, 1.5]}
+    workspace = TrainingAtlasWorkspace(
+        artifact_root=artifact_root,
+        run_identity=run_identity,
+    )
+
+    workspace.write_risk_partition(
+        risk_index=0,
+        risk_pct=1.0,
+        timestamp_labels=[
+            {
+                "decision_ts": _ts("2026-01-01T00:00:00Z"),
+                "label": "LONG",
+                "risk_pct": 1.0,
+            }
+        ],
+        episodes=[
+            {
+                "episode_id": "episode-000001",
+                "direction": "LONG",
+                "risk_pct": 1.0,
+            }
+        ],
+        hard_negatives=[],
+        r_summary={"risk_pct": 1.0, "primary": {"episode_count": 1}},
+        purged_decision_count=3,
+    )
+
+    resumed = TrainingAtlasWorkspace(
+        artifact_root=artifact_root,
+        run_identity=run_identity,
+    )
+
+    assert resumed.completed_risk_values == (1.0,)
+    assert resumed.completed_episode_count == 1
+    assert resumed.r_summaries == [
+        {"risk_pct": 1.0, "primary": {"episode_count": 1}}
+    ]
+    checkpoint = json.loads((artifact_root / "atlas/checkpoint.json").read_text())
+    assert checkpoint["schema_version"] == "signal_discovery_atlas_checkpoint.v1"
+    assert checkpoint["completed_risks"][0]["timestamp_label_count"] == 1
+
+
+def test_training_atlas_workspace_rejects_identity_or_part_drift(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "atlas-session"
+    workspace = TrainingAtlasWorkspace(
+        artifact_root=artifact_root,
+        run_identity={"evidence_manifest_hash": "original"},
+    )
+    workspace.write_risk_partition(
+        risk_index=0,
+        risk_pct=1.0,
+        timestamp_labels=[{"decision_ts": _ts("2026-01-01T00:00:00Z"), "label": "NEUTRAL"}],
+        episodes=[],
+        hard_negatives=[],
+        r_summary={"risk_pct": 1.0},
+        purged_decision_count=0,
+    )
+
+    with pytest.raises(ValueError, match="run identity"):
+        TrainingAtlasWorkspace(
+            artifact_root=artifact_root,
+            run_identity={"evidence_manifest_hash": "changed"},
+        )
+
+    label_part = next((artifact_root / "atlas/.work").glob("risk-*/timestamp_labels.parquet"))
+    label_part.write_bytes(label_part.read_bytes() + b"drift")
+    with pytest.raises(ValueError, match="fingerprint"):
+        TrainingAtlasWorkspace(
+            artifact_root=artifact_root,
+            run_identity={"evidence_manifest_hash": "original"},
+        )
+
+
+def test_training_atlas_workspace_streams_parts_to_legacy_final_paths(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "atlas-session"
+    workspace = TrainingAtlasWorkspace(
+        artifact_root=artifact_root,
+        run_identity={"evidence_manifest_hash": "abc123", "risk_values": [1.0, 1.5]},
+    )
+    for risk_index, risk_pct in enumerate((1.0, 1.5)):
+        workspace.write_risk_partition(
+            risk_index=risk_index,
+            risk_pct=risk_pct,
+            timestamp_labels=[
+                {
+                    "decision_ts": _ts("2026-01-01T00:00:00Z"),
+                    "label": "LONG",
+                    "risk_pct": risk_pct,
+                    "first_touch_ts": (
+                        None
+                        if risk_index == 0
+                        else _ts("2026-01-01T00:05:00Z")
+                    ),
+                    "long": {
+                        "outcome": "TIMEOUT" if risk_index == 0 else "TP",
+                        "first_touch_ts": (
+                            None
+                            if risk_index == 0
+                            else _ts("2026-01-01T00:05:00Z")
+                        ),
+                    },
+                }
+            ],
+            episodes=[
+                {
+                    "episode_id": f"episode-{risk_index + 1:06d}",
+                    "direction": "LONG",
+                    "risk_pct": risk_pct,
+                }
+            ],
+            hard_negatives=[
+                {
+                    "decision_ts": _ts("2026-01-02T00:00:00Z"),
+                    "risk_pct": risk_pct,
+                }
+            ],
+            r_summary={"risk_pct": risk_pct},
+            purged_decision_count=2,
+        )
+
+    paths = workspace.finalize(
+        features=[
+            {
+                "decision_ts": _ts("2026-01-01T00:00:00Z"),
+                "return_4h_pct": 1.25,
+            }
+        ],
+        r_feasibility={"r_summaries": workspace.r_summaries},
+    )
+
+    assert set(paths) == {
+        "training_timestamp_labels",
+        "training_episodes",
+        "training_features",
+        "training_hard_negatives",
+        "r_feasibility",
+    }
+    assert [
+        row["risk_pct"]
+        for row in pq.read_table(paths["training_timestamp_labels"]).to_pylist()
+    ] == [1.0, 1.5]
+    assert [
+        row["episode_id"]
+        for row in pq.read_table(paths["training_episodes"]).to_pylist()
+    ] == ["episode-000001", "episode-000002"]
+    assert paths["training_timestamp_labels"] == (
+        artifact_root / "atlas/training_timestamp_labels.parquet"
+    )
 
 
 def test_training_atlas_materializes_the_complete_training_only_layout(tmp_path: Path) -> None:

@@ -141,7 +141,9 @@ The immutable target uses schema `signal_discovery_target.v1`:
   "source_data": {
     "dataset_id": "canonical-raw-5m",
     "storage_backend": "parquet",
-    "storage_uri": ".data/market-data/..."
+    "storage_uri": ".data/market-data/...",
+    "evidence_manifest_path": "dev/signal_discovery_sessions/.../evidence/evidence_manifest.json",
+    "evidence_manifest_hash": "sha256"
   },
   "splits": {
     "research_start": "2025-03-01T00:00:00Z",
@@ -164,6 +166,7 @@ Session artifacts live under `dev/signal_discovery_sessions/<session_id>/`:
 
 ```text
 manifest.json
+evidence/evidence_manifest.json
 atlas/training_timestamp_labels.parquet
 atlas/training_episodes.parquet
 atlas/training_features.parquet
@@ -181,7 +184,7 @@ handoff/stage0/scores/ground_truth_summary.json
 handoff/stage0/scores/ground_truth/*.json
 ```
 
-The leakage boundary is enforced by artifact role. Before target freeze, only training labels, episodes, causal features, hard negatives, and R feasibility exist. The engine-builder prompt may name those training artifacts and `target/frozen_target.json`; it must not name or embed walk-forward labels, exact opportunity timestamps, exact episode/signal ids, or outcome rows. Walk-forward artifacts are created only by the terminal after the target is frozen and are never authorized evidence for the engine-building agent.
+The leakage boundary is enforced by artifact role and agent policy. Before target freeze, only training labels, episodes, causal features, hard negatives, R feasibility, and the optional `signal_discovery_evidence_manifest.v1` exist. The manifest references every eligible same-asset canonical Parquet source and authorizes rows only through `research_end`, with all earlier history available as warmup; it does not copy the underlying data. The engine-builder prompt may name those sources and training artifacts, but it must not authorize later rows, walk-forward labels, exact opportunity timestamps, exact episode/signal ids, or outcome rows. Walk-forward artifacts are created only by the terminal after the target is frozen and are never authorized evidence for the engine-building agent.
 
 The generated prompt requires `$signal-engine-builder`. The agent must either reject the hypothesis or register one neutral `signal_packet.v2` engine and a directional paired strategy, write `engine_research_rationale.md`, and prove point-in-time safety, cadence parity, packet-consumer compatibility, and direct training-target scoring.
 

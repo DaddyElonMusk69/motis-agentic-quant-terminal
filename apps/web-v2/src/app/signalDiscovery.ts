@@ -1,3 +1,43 @@
+export type DiscoveryDataset = {
+  asset: string;
+  instrument: string;
+  data_type: string;
+  timeframe: string | null;
+  data_origin: string;
+  storage_backend: string;
+};
+
+export type DiscoveryTicker = {
+  key: string;
+  asset: string;
+  instrument: string;
+  label: string;
+};
+
+export function buildDiscoveryTickers(datasets: DiscoveryDataset[]): DiscoveryTicker[] {
+  const tickers = new Map<string, DiscoveryTicker>();
+  for (const dataset of datasets) {
+    if (
+      dataset.storage_backend !== "parquet" ||
+      dataset.data_type !== "candles" ||
+      dataset.timeframe !== "5m" ||
+      dataset.data_origin !== "raw"
+    ) {
+      continue;
+    }
+    const key = `${dataset.asset}|${dataset.instrument}`;
+    tickers.set(key, {
+      key,
+      asset: dataset.asset,
+      instrument: dataset.instrument,
+      label: `${dataset.asset} · ${dataset.instrument}`
+    });
+  }
+  return Array.from(tickers.values()).sort((left, right) => (
+    left.asset.localeCompare(right.asset) || left.instrument.localeCompare(right.instrument)
+  ));
+}
+
 export function buildRiskGrid(minimum: number, maximum: number): number[] {
   if (!Number.isFinite(minimum) || !Number.isFinite(maximum) || minimum <= 0 || maximum <= 0) {
     throw new Error("R range values must be finite and positive");
