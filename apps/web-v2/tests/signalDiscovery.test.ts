@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { buildDiscoveryTickers, buildRiskGrid, formatRiskGrid } from "../src/app/signalDiscovery.ts";
 import {
+  atlasChartPalette,
   clipEpisodeToRange,
   episodeFill,
   sortAtlasLanes
@@ -60,6 +61,13 @@ test("episodeFill only colors directional opportunities", () => {
   assert.equal(episodeFill("SHORT"), "var(--atlas-short-fill)");
   assert.equal(episodeFill("AMBIGUOUS"), "transparent");
   assert.equal(episodeFill("NEUTRAL"), "transparent");
+});
+
+test("atlas chart palette only uses colors supported by Lightweight Charts", () => {
+  for (const color of Object.values(atlasChartPalette)) {
+    assert.equal(typeof color, "string");
+    assert.doesNotMatch(color, /oklch|color-mix|var\(/i);
+  }
 });
 
 test("sortAtlasLanes orders horizon before entry delay", () => {

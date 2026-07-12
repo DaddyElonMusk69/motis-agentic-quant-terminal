@@ -7,6 +7,7 @@ import {
   type UTCTimestamp
 } from "lightweight-charts";
 import {
+  atlasChartPalette,
   clipEpisodeToRange,
   episodeFill,
   sortAtlasLanes,
@@ -57,42 +58,41 @@ export function OpportunityAtlasChart({
       return;
     }
     setVisibleRange(initialRange(visualization));
-    const styles = getComputedStyle(document.documentElement);
     const chart = createChart(host, {
       autoSize: false,
       width: Math.max(320, host.clientWidth),
       height: Math.max(360, host.clientHeight),
       layout: {
-        background: { type: ColorType.Solid, color: styles.getPropertyValue("--surface-panel").trim() },
-        textColor: styles.getPropertyValue("--ink-muted").trim()
+        background: { type: ColorType.Solid, color: atlasChartPalette.background },
+        textColor: atlasChartPalette.text
       },
       grid: {
-        vertLines: { color: styles.getPropertyValue("--line-subtle").trim() },
-        horzLines: { color: styles.getPropertyValue("--line-subtle").trim() }
+        vertLines: { color: atlasChartPalette.grid },
+        horzLines: { color: atlasChartPalette.grid }
       },
       rightPriceScale: {
-        borderColor: styles.getPropertyValue("--line-subtle").trim(),
+        borderColor: atlasChartPalette.border,
         minimumWidth: 72
       },
       timeScale: {
-        borderColor: styles.getPropertyValue("--line-subtle").trim(),
+        borderColor: atlasChartPalette.border,
         rightOffset: 4,
         timeVisible: true,
         secondsVisible: false
       },
       crosshair: {
-        vertLine: { color: styles.getPropertyValue("--ink-muted").trim(), labelVisible: true },
-        horzLine: { color: styles.getPropertyValue("--ink-muted").trim(), labelVisible: true }
+        vertLine: { color: atlasChartPalette.crosshair, labelVisible: true },
+        horzLine: { color: atlasChartPalette.crosshair, labelVisible: true }
       }
     });
     chartRef.current = chart;
     const series = chart.addSeries(CandlestickSeries, {
-      upColor: "#2f9e74",
-      downColor: "#c95858",
-      borderUpColor: "#2f9e74",
-      borderDownColor: "#c95858",
-      wickUpColor: "#2f9e74",
-      wickDownColor: "#c95858"
+      upColor: atlasChartPalette.up,
+      downColor: atlasChartPalette.down,
+      borderUpColor: atlasChartPalette.up,
+      borderDownColor: atlasChartPalette.down,
+      wickUpColor: atlasChartPalette.up,
+      wickDownColor: atlasChartPalette.down
     });
     series.setData(
       visualization.candles.map((candle) => ({

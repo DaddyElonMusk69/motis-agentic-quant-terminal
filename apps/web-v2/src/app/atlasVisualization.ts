@@ -3,6 +3,16 @@ export type AtlasVisibleRange = {
   to: number;
 };
 
+export const atlasChartPalette = {
+  background: "#122326",
+  text: "#82979b",
+  grid: "rgba(55, 78, 82, 0.55)",
+  border: "#374e52",
+  crosshair: "#82979b",
+  up: "#2f9e74",
+  down: "#c95858"
+} as const;
+
 type AtlasEpisodeRange = {
   start_ts: string;
   end_ts: string;
