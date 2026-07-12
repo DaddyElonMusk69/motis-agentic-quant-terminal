@@ -7,6 +7,8 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
 
+import pyarrow.parquet as pq
+
 from quant_terminal_sdk.market_data_reader import read_candles_from_ref
 from quant_terminal_worker.signal_discovery.atlas import label_fixed_r_timestamps
 
@@ -71,6 +73,17 @@ def handoff_accepted_candidate(
         decision_timestamps=timestamps,
         selected_target=selected_target,
     )
+    bracket_contract = target_contract.get("bracket_policy") or {}
+    brackets_by_split: dict[str, list[dict[str, Any]]] = {}
+    if bracket_contract:
+        brackets_by_split = {
+            "training": pq.read_table(
+                artifact_root / str(bracket_contract["training_brackets_path"])
+            ).to_pylist(),
+            "walk_forward_test": pq.read_table(
+                artifact_root / "walk_forward" / "walk_forward_brackets.parquet"
+            ).to_pylist(),
+        }
 
     records: list[dict[str, Any]] = []
     artifact_records: list[dict[str, str]] = []
@@ -78,11 +91,22 @@ def handoff_accepted_candidate(
     for signal, label in zip(signals, labels, strict=True):
         signal_id = str(signal["signal_id"])
         file_stem = _unique_file_stem(signal_id=signal_id, used_names=used_names)
+        timestamp = _coerce_timestamp(signal["timestamp"])
+        sample_role = (
+            "training"
+            if timestamp <= _coerce_timestamp(session["research_end"])
+            else "walk_forward_test"
+        )
+        approved_direction = _approved_bracket_direction(
+            timestamp=timestamp,
+            brackets=brackets_by_split.get(sample_role, ()),
+        )
         record = _ground_truth_record(
             signal=signal,
             label=label,
             session=session,
             target_contract=target_contract,
+            approved_direction=(approved_direction if bracket_contract else None),
         )
         ground_truth_path = ground_truth_root / f"{file_stem}.json"
         packet_path = packet_root / f"{file_stem}.json"
@@ -229,8 +253,11 @@ def _ground_truth_record(
     label: Mapping[str, Any],
     session: Mapping[str, Any],
     target_contract: Mapping[str, Any],
+    approved_direction: str | None = None,
 ) -> dict[str, Any]:
-    natural_direction = str(label["label"]).upper()
+    natural_direction = approved_direction or (
+        "NEUTRAL" if target_contract.get("bracket_policy") else str(label["label"]).upper()
+    )
     status = (
         "triggered"
         if natural_direction in {"LONG", "SHORT"}
@@ -262,6 +289,20 @@ def _ground_truth_record(
         "source_discovery_session_id": str(session["session_id"]),
         "target_config_hash": str(target_contract.get("config_hash") or ""),
     }
+
+
+def _approved_bracket_direction(
+    *, timestamp: datetime, brackets: Any
+) -> str | None:
+    for bracket in brackets:
+        if (
+            _coerce_timestamp(bracket["start_ts"])
+            <= timestamp
+            <= _coerce_timestamp(bracket["end_ts"])
+        ):
+            direction = str(bracket.get("direction") or "").upper()
+            return direction if direction in {"LONG", "SHORT"} else None
+    return None
 
 
 def _unique_file_stem(*, signal_id: str, used_names: set[str]) -> str:

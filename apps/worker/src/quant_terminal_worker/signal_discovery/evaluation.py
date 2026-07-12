@@ -204,13 +204,24 @@ def evaluate_registered_engine(
         end=read_end,
     )
     artifact_root = _artifact_root(session=session, workspace_root=root)
+    bracket_contract = target.get("bracket_policy") or {}
+    training_episode_path = (
+        artifact_root / str(bracket_contract["training_brackets_path"])
+        if bracket_contract
+        else artifact_root / "atlas" / "training_episodes.parquet"
+    )
+    walk_forward_episode_path = (
+        artifact_root / "walk_forward" / "walk_forward_brackets.parquet"
+        if bracket_contract
+        else artifact_root / "walk_forward" / "walk_forward_episodes.parquet"
+    )
     episodes_by_split = {
         "training": _read_selected_episodes(
-            artifact_root / "atlas" / "training_episodes.parquet",
-            selected_target=selected_target,
+            training_episode_path,
+            selected_target=(None if bracket_contract else selected_target),
         ),
         "walk_forward": _read_selected_episodes(
-            artifact_root / "walk_forward" / "walk_forward_episodes.parquet",
+            walk_forward_episode_path,
             selected_target=None,
         ),
     }
@@ -289,13 +300,29 @@ def _score_slice(
         target = row["target"]
         target_label = str(target["label"]).upper()
         predicted = str(row["predicted_direction"]).upper()
+        timestamp = _coerce_timestamp(row["timestamp"])
+        matching_episode = next(
+            (
+                episode
+                for episode in episodes
+                if _coerce_timestamp(episode["start_ts"])
+                <= timestamp
+                <= _coerce_timestamp(episode["end_ts"])
+            ),
+            None,
+        )
+        approved_direction = (
+            str(matching_episode.get("direction") or "").upper()
+            if matching_episode is not None
+            else None
+        )
         target_counts[target_label] += 1
         decision_counts[predicted] += 1
-        if target_label in {"LONG", "SHORT"}:
+        if approved_direction in {"LONG", "SHORT"} and predicted == approved_direction:
             qualifying += 1
         if target_label != "AMBIGUOUS":
             directional_denominator += 1
-            directional_matches += int(predicted == target_label)
+            directional_matches += int(predicted == approved_direction)
         if predicted not in {"LONG", "SHORT"}:
             continue
         entered_count += 1
@@ -309,15 +336,16 @@ def _score_slice(
         else:
             net_r -= stop_multiple + cost_in_r
 
-    timestamps = [row["timestamp"] for row in rows]
     recalled_episodes = sum(
         1
         for episode in episodes
         if any(
             _coerce_timestamp(episode["start_ts"])
-            <= timestamp
+            <= _coerce_timestamp(row["timestamp"])
             <= _coerce_timestamp(episode["end_ts"])
-            for timestamp in timestamps
+            and str(row["predicted_direction"]).upper()
+            == str(episode.get("direction") or "").upper()
+            for row in rows
         )
     )
     emitted_count = len(rows)

@@ -363,6 +363,13 @@ export function ResearchSignalDiscoveryPage() {
   const target = session && "selected_target" in session.frozen_target
     ? session.frozen_target
     : null;
+  const approvedBracketPolicy = session?.summary.bracket_cleanup?.policy;
+  const bracketsApprovedForSelection = Boolean(
+    approvedBracketPolicy
+    && approvedBracketPolicy.risk_pct === selectedRisk
+    && approvedBracketPolicy.horizon_hours === selectedHorizon
+    && approvedBracketPolicy.entry_delay_minutes === selectedDelay
+  );
   const trainingEvaluation = session?.evaluation.slices?.training;
   const walkForwardEvaluation = session?.evaluation.slices?.walk_forward;
 
@@ -608,7 +615,7 @@ export function ResearchSignalDiscoveryPage() {
                 <header>
                   <div>
                     <span className="eyebrow">Frozen Target</span>
-                    <h2>2R Before 1R</h2>
+                    <h2>{session.config.reward_multiple}R Before 1R</h2>
                   </div>
                   <div className="discovery-action-row">
                     <button
@@ -662,7 +669,7 @@ export function ResearchSignalDiscoveryPage() {
                     </label>
                     <button
                       className="button button--primary"
-                      disabled={session.status !== "atlas_ready" || freezeMutation.isPending}
+                      disabled={session.status !== "atlas_ready" || !bracketsApprovedForSelection || freezeMutation.isPending}
                       onClick={() => freezeMutation.mutate({
                         session_id: session.session_id,
                         selected_risk_pct: selectedRisk,
@@ -674,6 +681,9 @@ export function ResearchSignalDiscoveryPage() {
                       <Snowflake aria-hidden="true" />
                       Freeze Target
                     </button>
+                    {!bracketsApprovedForSelection ? (
+                      <span className="state-line">Approve brackets for this target first.</span>
+                    ) : null}
                   </div>
                 )}
               </section>
@@ -796,6 +806,9 @@ export function ResearchSignalDiscoveryPage() {
           <OpportunityAtlasModal
             candidate={atlasCandidate}
             onClose={() => setAtlasCandidate(null)}
+            onApproved={(updated) => refreshSessions(updated.session_id)}
+            selectedEntryDelayMinutes={selectedDelay}
+            selectedHorizonHours={selectedHorizon}
             session={session}
           />
         </Suspense>

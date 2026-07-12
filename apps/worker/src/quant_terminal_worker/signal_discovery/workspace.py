@@ -229,6 +229,8 @@ def materialize_walk_forward_atlas(
     timestamp_labels: Sequence[Mapping[str, Any]],
     episodes: Sequence[Mapping[str, Any]],
     summary: Mapping[str, Any],
+    approved_brackets: Sequence[Mapping[str, Any]] | None = None,
+    bracket_summary: Mapping[str, Any] | None = None,
 ) -> dict[str, Path]:
     root = Path(artifact_root) / "walk_forward"
     paths = {
@@ -236,9 +238,17 @@ def materialize_walk_forward_atlas(
         "walk_forward_episodes": root / "walk_forward_episodes.parquet",
         "walk_forward_summary": root / "walk_forward_summary.json",
     }
+    if approved_brackets is not None:
+        paths["walk_forward_brackets"] = root / "walk_forward_brackets.parquet"
+    if bracket_summary is not None:
+        paths["walk_forward_bracket_summary"] = root / "walk_forward_bracket_summary.json"
     _atomic_write_parquet(paths["walk_forward_timestamp_labels"], timestamp_labels)
     _atomic_write_parquet(paths["walk_forward_episodes"], episodes)
     _atomic_write_json(paths["walk_forward_summary"], summary)
+    if approved_brackets is not None:
+        _atomic_write_parquet(paths["walk_forward_brackets"], approved_brackets)
+    if bracket_summary is not None:
+        _atomic_write_json(paths["walk_forward_bracket_summary"], bracket_summary)
     return paths
 
 
@@ -249,6 +259,7 @@ def freeze_target_contract(
     selected_target: Mapping[str, Any],
     source_data: Mapping[str, Any],
     splits: Mapping[str, Any],
+    bracket_contract: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     root = Path(artifact_root)
     target_path = root / "target" / "frozen_target.json"
@@ -259,6 +270,11 @@ def freeze_target_contract(
         "selected_target": _normalize_for_json(selected_target),
         "source_data": _normalize_for_json(source_data),
         "splits": _normalize_for_json(splits),
+        **(
+            {"bracket_policy": _normalize_for_json(bracket_contract)}
+            if bracket_contract is not None
+            else {}
+        ),
     }
     payload["config_hash"] = _sha256_payload(payload)
 

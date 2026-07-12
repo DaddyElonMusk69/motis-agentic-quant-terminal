@@ -7,6 +7,15 @@ from quant_terminal_worker.signal_discovery.atlas import (
     run_training_atlas,
     summarize_r_candidate,
 )
+from quant_terminal_worker.signal_discovery.brackets import (
+    apply_bracket_policy,
+    approve_training_brackets,
+    build_bracket_preview,
+    build_policy_scenario_labels,
+    load_training_bracket_preview,
+    normalize_bracket_policy,
+    read_approved_bracket_contract,
+)
 from quant_terminal_worker.signal_discovery.features import (
     build_causal_feature_rows,
     select_hard_negatives,
@@ -35,5 +44,12 @@ __all__ = [
     "run_fixed_target_window",
     "select_hard_negatives",
     "summarize_r_candidate",
+    "apply_bracket_policy",
+    "approve_training_brackets",
+    "build_bracket_preview",
+    "build_policy_scenario_labels",
+    "load_training_bracket_preview",
+    "normalize_bracket_policy",
+    "read_approved_bracket_contract",
     "write_session_manifest",
 ]

@@ -23,6 +23,10 @@ from quant_terminal_worker.signal_discovery.atlas import (
     run_fixed_target_window,
     run_training_atlas,
 )
+from quant_terminal_worker.signal_discovery.brackets import (
+    apply_bracket_policy,
+    build_policy_scenario_labels,
+)
 from quant_terminal_worker.signal_discovery.features import (
     build_causal_feature_rows,
     select_hard_negatives,
@@ -540,9 +544,16 @@ def _execute_signal_discovery_walk_forward(
         if contract.get("source_data", {}).get("dataset_id") != session["dataset_id"]:
             raise ValueError("frozen target dataset does not match the discovery session")
         selected_target = contract["selected_target"]
+        bracket_contract = contract.get("bracket_policy") or {}
+        bracket_policy = bracket_contract.get("policy") or {}
+        required_delay = (
+            max((session.get("config") or {}).get("entry_delays_minutes", ()))
+            if bracket_policy.get("require_delay_stability")
+            else int(selected_target["entry_delay_minutes"])
+        )
         read_end = session["walk_forward_end"] + timedelta(
             hours=float(selected_target["horizon_hours"]),
-            minutes=int(selected_target["entry_delay_minutes"]),
+            minutes=required_delay,
         )
         candles = read_candles_from_ref(
             ref,
@@ -556,12 +567,42 @@ def _execute_signal_discovery_walk_forward(
             window_end=session["walk_forward_end"],
             selected_target=selected_target,
         )
+        bracket_result = None
+        if bracket_contract:
+            policy = bracket_contract["policy"]
+            scenario_labels = build_policy_scenario_labels(
+                candles=candles,
+                decision_timestamps=[row["decision_ts"] for row in result["timestamp_labels"]],
+                selected_target=selected_target,
+                risk_values=(session.get("config") or {}).get("risk_values", ()),
+                entry_delays=(session.get("config") or {}).get(
+                    "entry_delays_minutes", ()
+                ),
+                policy=policy,
+            )
+            bracket_result = apply_bracket_policy(
+                labels=scenario_labels,
+                risk_values=(session.get("config") or {}).get("risk_values", ()),
+                entry_delays=(session.get("config") or {}).get(
+                    "entry_delays_minutes", ()
+                ),
+                policy=policy,
+            )
         artifact_root = _signal_discovery_artifact_root(session, workspace_root=workspace_root)
         artifact_paths = materialize_walk_forward_atlas(
             artifact_root=artifact_root,
             timestamp_labels=result["timestamp_labels"],
             episodes=result["episodes"],
             summary=result["summary"],
+            approved_brackets=(bracket_result or {}).get("brackets"),
+            bracket_summary=(
+                {
+                    "policy_hash": bracket_contract.get("policy_hash"),
+                    "diagnostics": bracket_result["diagnostics"],
+                }
+                if bracket_result is not None
+                else None
+            ),
         )
         summary = {
             **(session.get("summary") or {}),

@@ -10,8 +10,10 @@ import {
 import {
   atlasChartPalette,
   clipEpisodeToRange,
+  createDefaultBracketPolicy,
   episodeFill,
   positionEpisodeOnLogicalRange,
+  replaceActiveAtlasLane,
   sortAtlasLanes
 } from "../src/app/atlasVisualization.ts";
 
@@ -104,4 +106,35 @@ test("sortAtlasLanes orders horizon before entry delay", () => {
     sortAtlasLanes(lanes).map((lane) => [lane.entry_delay_minutes, lane.horizon_hours]),
     [[5, 36], [10, 36], [10, 48]]
   );
+});
+
+test("default bracket policy preserves raw cleanup behavior", () => {
+  assert.deepEqual(createDefaultBracketPolicy(1, 5, 36), {
+    risk_pct: 1,
+    entry_delay_minutes: 5,
+    horizon_hours: 36,
+    require_r_stability: false,
+    require_delay_stability: false,
+    bridge_neutral_gap_intervals: 0,
+    minimum_persistence_timestamps: 1,
+    one_active_opportunity: false
+  });
+});
+
+test("bracket preview replaces only the active scenario lane", () => {
+  const visualization = {
+    lanes: [
+      { entry_delay_minutes: 5, horizon_hours: 36, episodes: [{ episode_id: "raw-active" }] },
+      { entry_delay_minutes: 10, horizon_hours: 36, episodes: [{ episode_id: "raw-context" }] }
+    ]
+  };
+  const updated = replaceActiveAtlasLane(
+    visualization,
+    [{ episode_id: "preview" }],
+    5,
+    36
+  );
+  assert.deepEqual(updated.lanes[0].episodes, [{ episode_id: "preview" }]);
+  assert.deepEqual(updated.lanes[1].episodes, [{ episode_id: "raw-context" }]);
+  assert.deepEqual(visualization.lanes[0].episodes, [{ episode_id: "raw-active" }]);
 });

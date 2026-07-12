@@ -20,6 +20,8 @@ import type {
 
 type OpportunityAtlasChartProps = {
   visualization: SignalDiscoveryAtlasVisualization;
+  activeEntryDelayMinutes: number;
+  activeHorizonHours: number;
   selectedEpisodeId: string | null;
   onEpisodeSelect: (episode: SignalDiscoveryAtlasEpisode) => void;
 };
@@ -37,6 +39,8 @@ function initialLogicalRange(visualization: SignalDiscoveryAtlasVisualization): 
 
 export function OpportunityAtlasChart({
   visualization,
+  activeEntryDelayMinutes,
+  activeHorizonHours,
   selectedEpisodeId,
   onEpisodeSelect
 }: OpportunityAtlasChartProps) {
@@ -51,9 +55,12 @@ export function OpportunityAtlasChart({
     () => visualization.candles.map((candle) => epochSeconds(candle.timestamp)),
     [visualization.candles]
   );
-  const allEpisodes = useMemo(
-    () => lanes.flatMap((lane) => lane.episodes),
-    [lanes]
+  const activeEpisodes = useMemo(
+    () => lanes.find(
+      (lane) => lane.entry_delay_minutes === activeEntryDelayMinutes
+        && lane.horizon_hours === activeHorizonHours
+    )?.episodes ?? [],
+    [activeEntryDelayMinutes, activeHorizonHours, lanes]
   );
 
   useEffect(() => {
@@ -140,7 +147,7 @@ export function OpportunityAtlasChart({
       <div className="opportunity-atlas-chart__plot">
         <div className="opportunity-atlas-chart__host" ref={chartHostRef} />
         <div className="opportunity-atlas-chart__bands" aria-hidden="true">
-          {allEpisodes.map((episode) => {
+          {activeEpisodes.map((episode) => {
             const position = positionEpisodeOnLogicalRange(
               episode,
               candleTimes,

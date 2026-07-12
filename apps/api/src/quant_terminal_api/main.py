@@ -56,6 +56,11 @@ from quant_terminal_worker.signal_discovery.workspace import (
     freeze_target_contract,
     write_session_manifest,
 )
+from quant_terminal_worker.signal_discovery.brackets import (
+    approve_training_brackets,
+    load_training_bracket_preview,
+    read_approved_bracket_contract,
+)
 from quant_terminal_worker.signal_discovery.evidence import (
     resolve_primary_label_ref,
     validate_evidence_manifest,
@@ -184,6 +189,17 @@ class SignalDiscoveryFreezeRequest(BaseModel):
     selected_risk_pct: float = Field(gt=0)
     horizon_hours: int = Field(gt=0)
     entry_delay_minutes: int = Field(ge=0)
+
+
+class SignalDiscoveryBracketPolicyRequest(BaseModel):
+    risk_pct: float = Field(gt=0)
+    entry_delay_minutes: int = Field(ge=0)
+    horizon_hours: int = Field(gt=0)
+    require_r_stability: bool = False
+    require_delay_stability: bool = False
+    bridge_neutral_gap_intervals: int = Field(default=0, ge=0, le=12)
+    minimum_persistence_timestamps: int = Field(default=1, ge=1, le=24)
+    one_active_opportunity: bool = False
 
 
 class SignalDiscoveryCandidateRequest(BaseModel):
@@ -1032,6 +1048,63 @@ def create_app(
             raise HTTPException(status_code=501, detail="Discovery job queue is unavailable")
         return queued
 
+    @app.post(
+        "/api/v1/research/signal-discovery-sessions/{session_id}/"
+        "bracket-cleanup/preview"
+    )
+    def preview_signal_discovery_brackets(
+        session_id: str,
+        request: SignalDiscoveryBracketPolicyRequest,
+    ) -> dict[str, Any]:
+        session = _signal_discovery_api_session(get_runtime_repository(), session_id)
+        if session["status"] != "atlas_ready" and not (
+            session.get("target_version") is not None
+            and (session.get("summary") or {}).get("bracket_cleanup")
+        ):
+            raise HTTPException(status_code=409, detail="Bracket preview requires a ready atlas")
+        policy = _signal_discovery_bracket_policy(session=session, request=request)
+        config = session.get("config") or {}
+        try:
+            return load_training_bracket_preview(
+                artifact_root=_signal_discovery_api_artifact_root(session),
+                risk_values=config.get("risk_values", ()),
+                entry_delays=config.get("entry_delays_minutes", ()),
+                policy=policy,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/research/signal-discovery-sessions/{session_id}/"
+        "bracket-cleanup/approve"
+    )
+    def approve_signal_discovery_brackets(
+        session_id: str,
+        request: SignalDiscoveryBracketPolicyRequest,
+    ) -> dict[str, Any]:
+        runtime = get_runtime_repository()
+        session = _signal_discovery_api_session(runtime, session_id)
+        if session["status"] != "atlas_ready":
+            raise HTTPException(status_code=409, detail="Bracket approval requires a ready atlas")
+        policy = _signal_discovery_bracket_policy(session=session, request=request)
+        config = session.get("config") or {}
+        try:
+            result = approve_training_brackets(
+                artifact_root=_signal_discovery_api_artifact_root(session),
+                session_id=session_id,
+                risk_values=config.get("risk_values", ()),
+                entry_delays=config.get("entry_delays_minutes", ()),
+                policy=policy,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        summary = {
+            **(session.get("summary") or {}),
+            "bracket_cleanup": result["approval"],
+        }
+        updated = runtime.update_signal_discovery_session(session_id, summary=summary)
+        return {**result, "session": updated}
+
     @app.post("/api/v1/research/signal-discovery-sessions/{session_id}/freeze")
     def freeze_signal_discovery_target(
         session_id: str,
@@ -1059,6 +1132,51 @@ def create_app(
             dataset_id=session["dataset_id"],
         )
         artifact_root = _signal_discovery_api_artifact_root(session)
+        bracket_contract = (session.get("summary") or {}).get("bracket_cleanup")
+        if bracket_contract is None:
+            try:
+                implicit = approve_training_brackets(
+                    artifact_root=artifact_root,
+                    session_id=session_id,
+                    risk_values=config.get("risk_values", ()),
+                    entry_delays=config.get("entry_delays_minutes", ()),
+                    policy={
+                        "risk_pct": request.selected_risk_pct,
+                        "entry_delay_minutes": request.entry_delay_minutes,
+                        "horizon_hours": request.horizon_hours,
+                    },
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            bracket_contract = implicit["approval"]
+            session = runtime.update_signal_discovery_session(
+                session_id,
+                summary={
+                    **(session.get("summary") or {}),
+                    "bracket_cleanup": bracket_contract,
+                },
+            )
+        else:
+            approved_policy = bracket_contract.get("policy") or {}
+            expected_coordinates = (
+                float(request.selected_risk_pct),
+                int(request.entry_delay_minutes),
+                float(request.horizon_hours),
+            )
+            approved_coordinates = (
+                float(approved_policy.get("risk_pct") or 0),
+                int(approved_policy.get("entry_delay_minutes") or -1),
+                float(approved_policy.get("horizon_hours") or 0),
+            )
+            if approved_coordinates != expected_coordinates:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Approved bracket policy does not match the selected target",
+                )
+            try:
+                bracket_contract = read_approved_bracket_contract(artifact_root=artifact_root)
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
         evidence_summary = (session.get("summary") or {}).get("evidence") or {}
         if evidence_summary:
             try:
@@ -1113,6 +1231,7 @@ def create_app(
                     "walk_forward_start": _iso_datetime(session["walk_forward_start"]),
                     "walk_forward_end": _iso_datetime(session["walk_forward_end"]),
                 },
+                bracket_contract=bracket_contract,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2920,6 +3039,27 @@ def _validate_signal_discovery_create_request(
             status_code=400,
             detail="Research and walk-forward windows must be ordered and non-overlapping",
         )
+
+
+def _signal_discovery_bracket_policy(
+    *,
+    session: Mapping[str, Any],
+    request: SignalDiscoveryBracketPolicyRequest,
+) -> dict[str, Any]:
+    config = session.get("config") or {}
+    if float(request.risk_pct) not in {
+        float(value) for value in config.get("risk_values", ())
+    }:
+        raise HTTPException(status_code=400, detail="Bracket R was not in the training grid")
+    if int(request.entry_delay_minutes) not in {
+        int(value) for value in config.get("entry_delays_minutes", ())
+    }:
+        raise HTTPException(status_code=400, detail="Bracket delay was not predeclared")
+    if int(request.horizon_hours) not in {
+        int(value) for value in config.get("horizon_hours", ())
+    }:
+        raise HTTPException(status_code=400, detail="Bracket horizon was not predeclared")
+    return request.model_dump()
 
 
 def _signal_discovery_api_data_ref(

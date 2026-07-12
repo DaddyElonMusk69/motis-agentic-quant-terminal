@@ -7,7 +7,7 @@ from typing import Any
 from quant_terminal_worker.signal_discovery.workspace import read_frozen_target
 
 
-_TRAINING_ARTIFACT_NAMES = (
+_LEGACY_TRAINING_ARTIFACT_NAMES = (
     "training_timestamp_labels.parquet",
     "training_episodes.parquet",
     "training_features.parquet",
@@ -24,7 +24,16 @@ def generate_engine_builder_prompt(
     root = Path(artifact_root).resolve()
     target = read_frozen_target(artifact_root=root)
     atlas_root = root / "atlas"
-    training_paths = tuple(atlas_root / name for name in _TRAINING_ARTIFACT_NAMES)
+    bracket_contract = target.get("bracket_policy") or {}
+    training_paths = (
+        (
+            root / str(bracket_contract["training_brackets_path"]),
+            atlas_root / "training_features.parquet",
+            root / str(bracket_contract["training_hard_negatives_path"]),
+        )
+        if bracket_contract
+        else tuple(atlas_root / name for name in _LEGACY_TRAINING_ARTIFACT_NAMES)
+    )
     missing = [str(path) for path in training_paths if not path.is_file()]
     if missing:
         raise ValueError(

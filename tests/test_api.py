@@ -113,7 +113,19 @@ def test_signal_discovery_api_lifecycle_and_validation(tmp_path, monkeypatch):
     artifact_root = Path(session["artifact_root"])
     materialize_training_atlas(
         artifact_root=artifact_root,
-        timestamp_labels=[],
+        timestamp_labels=[
+            {
+                "decision_ts": datetime(2026, 3, 1, tzinfo=UTC),
+                "entry_ts": datetime(2026, 3, 1, 0, 5, tzinfo=UTC),
+                "horizon_end_ts": datetime(2026, 3, 4, 0, 5, tzinfo=UTC),
+                "label": "LONG",
+                "risk_pct": 1.0,
+                "scenario_entry_delay_minutes": 5,
+                "scenario_horizon_hours": 72.0,
+                "long": {"first_touch_ts": datetime(2026, 3, 1, 6, tzinfo=UTC)},
+                "short": {"first_touch_ts": None},
+            }
+        ],
         episodes=[],
         features=[],
         hard_negatives=[],
@@ -401,6 +413,7 @@ def test_signal_discovery_prompt_drift_marks_session_failed(tmp_path, monkeypatc
     )
 
     assert response.status_code == 409
+    assert "episodes are unavailable" in response.json()["detail"]
     assert repository.get_signal_discovery_session("discovery-drift")["status"] == "failed"
 
 
@@ -554,7 +567,117 @@ def test_signal_discovery_atlas_visualization_reports_missing_artifacts(
     )
 
     assert response.status_code == 409
-    assert "episodes are unavailable" in response.json()["detail"]
+
+
+def test_signal_discovery_bracket_preview_and_approval_are_reversible_before_freeze(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    market_repository = FakeDiscoveryMarketDataRepository()
+    artifact_root = tmp_path / "dev/signal_discovery_sessions/discovery-brackets"
+    repository.create_signal_discovery_session(
+        {
+            "session_id": "discovery-brackets",
+            "name": "BTC brackets",
+            "asset": "BTC",
+            "instrument": "BTC-USDT-SWAP",
+            "dataset_id": market_repository.ref["dataset_id"],
+            "research_start": "2026-01-01T00:00:00Z",
+            "research_end": "2026-01-31T23:55:00Z",
+            "walk_forward_start": "2026-02-01T00:00:00Z",
+            "walk_forward_end": "2026-02-28T23:55:00Z",
+            "artifact_root": str(artifact_root),
+            "status": "draft",
+            "config": {
+                "risk_values": [0.9, 1.0],
+                "reward_multiple": 2.0,
+                "stop_multiple": 1.0,
+                "horizon_hours": [36],
+                "entry_delays_minutes": [5, 10],
+            },
+            "summary": {"r_summaries": [{"risk_pct": 1.0}]},
+        }
+    )
+    repository.update_signal_discovery_session(
+        "discovery-brackets",
+        status="atlas_ready",
+    )
+    preview = {
+        "schema_version": "signal_discovery_bracket_preview.v1",
+        "policy": {"risk_pct": 1.0},
+        "policy_hash": "policy-hash",
+        "brackets": [{"bracket_id": "bracket-000001", "direction": "LONG"}],
+        "diagnostics": {"preview_total_brackets": 1},
+    }
+    approval = {
+        **preview,
+        "approval": {
+            "schema_version": "signal_discovery_bracket_policy.v1",
+            "policy": {"risk_pct": 1.0, "entry_delay_minutes": 5, "horizon_hours": 36.0},
+            "policy_hash": "policy-hash",
+            "source_atlas_hash": "atlas-hash",
+            "training_brackets_path": "brackets/training_brackets.parquet",
+            "training_brackets_hash": "brackets-hash",
+            "training_hard_negatives_path": "brackets/training_hard_negatives.parquet",
+            "training_hard_negatives_hash": "negative-hash",
+            "diagnostics": {"preview_total_brackets": 1},
+        },
+    }
+    monkeypatch.setattr(api_main, "load_training_bracket_preview", lambda **_kwargs: preview)
+    monkeypatch.setattr(api_main, "approve_training_brackets", lambda **_kwargs: approval)
+    client = TestClient(
+        create_app(
+            runtime_repository=repository,
+            market_data_repository=market_repository,
+        )
+    )
+    request = {
+        "risk_pct": 1.0,
+        "entry_delay_minutes": 5,
+        "horizon_hours": 36,
+        "require_r_stability": True,
+        "require_delay_stability": False,
+        "bridge_neutral_gap_intervals": 1,
+        "minimum_persistence_timestamps": 2,
+        "one_active_opportunity": True,
+    }
+
+    preview_response = client.post(
+        "/api/v1/research/signal-discovery-sessions/discovery-brackets/bracket-cleanup/preview",
+        json=request,
+    )
+    assert preview_response.status_code == 200
+    assert repository.get_signal_discovery_session("discovery-brackets")["summary"].get(
+        "bracket_cleanup"
+    ) is None
+
+    approve_response = client.post(
+        "/api/v1/research/signal-discovery-sessions/discovery-brackets/bracket-cleanup/approve",
+        json=request,
+    )
+    assert approve_response.status_code == 200
+    stored = repository.get_signal_discovery_session("discovery-brackets")
+    assert stored["summary"]["bracket_cleanup"]["policy_hash"] == "policy-hash"
+
+    repository.update_signal_discovery_session(
+        "discovery-brackets",
+        status="target_frozen",
+        frozen_target={"config_hash": "frozen"},
+        target_version=1,
+    )
+    blocked = client.post(
+        "/api/v1/research/signal-discovery-sessions/discovery-brackets/bracket-cleanup/approve",
+        json=request,
+    )
+    assert blocked.status_code == 409
 
 
 class StubRuntimeRepository:

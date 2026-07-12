@@ -157,6 +157,39 @@ def test_signal_discovery_engine_scoring_rejects_directional_packets() -> None:
         )
 
 
+def test_signal_discovery_scoring_uses_cleaned_brackets_as_opportunity_target() -> None:
+    first = _ts("2026-01-01")
+    second = _ts("2026-01-03")
+    outcomes = {first: "LONG", second: "LONG"}
+
+    result = score_candidate_signals(
+        signals=[_signal(first, state_code="A"), _signal(second, state_code="A")],
+        candles=_candles_with_outcomes(outcomes),
+        strategy_module=SimpleNamespace(decide=_decide),
+        selected_target={
+            "selected_risk_pct": 1.0,
+            "reward_multiple": 2.0,
+            "stop_multiple": 1.0,
+            "horizon_hours": 36,
+            "entry_delay_minutes": 5,
+        },
+        split_windows={"training": (first, second)},
+        episodes_by_split={
+            "training": [_episode("approved-first", "LONG", first)],
+        },
+        cadence={
+            "training_dedupe_window_minutes": 240,
+            "live_dedupe_window_minutes": 240,
+        },
+    )
+
+    metrics = result["slices"]["training"]
+    assert metrics["opportunity_precision"] == 0.5
+    assert metrics["directional_accuracy"] == 0.5
+    assert metrics["recalled_episode_count"] == 1
+    assert metrics["episode_recall"] == 1.0
+
+
 def test_signal_discovery_engine_registered_evaluation_fills_and_persists(
     tmp_path: Path,
     monkeypatch,

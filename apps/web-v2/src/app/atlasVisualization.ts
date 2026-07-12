@@ -23,6 +23,48 @@ export type AtlasRelativePosition = {
   width: number;
 };
 
+export type AtlasBracketPolicy = {
+  risk_pct: number;
+  entry_delay_minutes: number;
+  horizon_hours: number;
+  require_r_stability: boolean;
+  require_delay_stability: boolean;
+  bridge_neutral_gap_intervals: number;
+  minimum_persistence_timestamps: number;
+  one_active_opportunity: boolean;
+};
+
+export function createDefaultBracketPolicy(
+  riskPct: number,
+  entryDelayMinutes: number,
+  horizonHours: number
+): AtlasBracketPolicy {
+  return {
+    risk_pct: riskPct,
+    entry_delay_minutes: entryDelayMinutes,
+    horizon_hours: horizonHours,
+    require_r_stability: false,
+    require_delay_stability: false,
+    bridge_neutral_gap_intervals: 0,
+    minimum_persistence_timestamps: 1,
+    one_active_opportunity: false
+  };
+}
+
+export function replaceActiveAtlasLane<
+  T extends { lanes: Array<{ entry_delay_minutes: number; horizon_hours: number; episodes: unknown[] }> },
+  E
+>(visualization: T, episodes: E[], entryDelayMinutes: number, horizonHours: number): T {
+  return {
+    ...visualization,
+    lanes: visualization.lanes.map((lane) => (
+      lane.entry_delay_minutes === entryDelayMinutes && lane.horizon_hours === horizonHours
+        ? { ...lane, episodes }
+        : lane
+    ))
+  };
+}
+
 type AtlasLaneLike = {
   entry_delay_minutes: number;
   horizon_hours: number;

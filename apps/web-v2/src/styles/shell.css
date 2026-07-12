@@ -5504,6 +5504,120 @@
   padding-top: var(--space-3);
 }
 
+.opportunity-atlas-cleanup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+}
+
+.opportunity-atlas-cleanup__counts {
+  border-bottom: 1px solid var(--line-subtle);
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding-bottom: var(--space-3);
+}
+
+.opportunity-atlas-cleanup__counts > div {
+  min-width: 0;
+  padding: 5px 6px;
+}
+
+.opportunity-atlas-cleanup__counts strong,
+.opportunity-atlas-cleanup__counts span {
+  display: block;
+}
+
+.opportunity-atlas-cleanup__counts strong {
+  color: var(--ink-primary);
+  font-size: 13px;
+}
+
+.opportunity-atlas-cleanup__counts span {
+  color: var(--ink-muted);
+  font-size: 9px;
+  margin-top: 2px;
+  text-transform: uppercase;
+}
+
+.opportunity-atlas-cleanup__controls {
+  display: flex;
+  flex-direction: column;
+}
+
+.opportunity-atlas-cleanup .toggle-row {
+  align-items: center;
+  border-bottom: 1px solid color-mix(in oklch, var(--line-subtle) 58%, transparent);
+  display: flex;
+  font-size: 11px;
+  justify-content: space-between;
+  min-height: 34px;
+}
+
+.opportunity-atlas-cleanup .toggle-row input {
+  accent-color: var(--status-live);
+  height: 16px;
+  width: 16px;
+}
+
+.opportunity-atlas-cleanup .slider-row {
+  display: grid;
+  gap: 6px;
+  padding: 8px 0 10px;
+}
+
+.opportunity-atlas-cleanup .slider-row span {
+  color: var(--ink-muted);
+  display: flex;
+  font-size: 10px;
+  justify-content: space-between;
+}
+
+.opportunity-atlas-cleanup .slider-row strong {
+  color: var(--ink-primary);
+}
+
+.opportunity-atlas-cleanup .slider-row input {
+  accent-color: var(--status-live);
+  margin: 0;
+  width: 100%;
+}
+
+.opportunity-atlas-cleanup__actions {
+  display: grid;
+  gap: var(--space-2);
+  grid-template-columns: 1fr 1.35fr;
+}
+
+.opportunity-atlas-cleanup__actions .button {
+  width: 100%;
+}
+
+.opportunity-atlas-cleanup__status {
+  color: var(--ink-muted);
+  font-size: 9px;
+  overflow-wrap: anywhere;
+}
+
+.opportunity-atlas-episode-detail {
+  border-top: 1px solid var(--line-subtle);
+  margin-top: var(--space-2);
+  padding-top: var(--space-3);
+}
+
+.opportunity-atlas-episode-detail > header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: var(--space-3);
+}
+
+.opportunity-atlas-episode-detail > header svg {
+  color: var(--ink-muted);
+  height: 16px;
+  width: 16px;
+}
+
 .opportunity-atlas-inspector__fields .field-row {
   align-items: flex-start;
 }

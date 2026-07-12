@@ -204,6 +204,45 @@ export type SignalDiscoveryAtlasEpisode = {
   risk_pct: number;
   entry_delay_minutes: number;
   horizon_hours: number;
+  inherited_timestamp_count?: number;
+  resolution_ts?: string;
+};
+
+export type SignalDiscoveryBracketPolicy = {
+  risk_pct: number;
+  entry_delay_minutes: number;
+  horizon_hours: number;
+  require_r_stability: boolean;
+  require_delay_stability: boolean;
+  bridge_neutral_gap_intervals: number;
+  minimum_persistence_timestamps: number;
+  one_active_opportunity: boolean;
+};
+
+export type SignalDiscoveryBracketDiagnostics = {
+  raw_total_brackets: number;
+  preview_total_brackets: number;
+  raw_direction_counts: Record<string, number>;
+  preview_direction_counts: Record<string, number>;
+  removed_bracket_count: number;
+  stability_rejected_timestamp_count: number;
+  merged_gap_count: number;
+  persistence_removed_count: number;
+  overlap_suppressed_count: number;
+  raw_monthly_bracket_counts: Record<string, number>;
+  monthly_bracket_counts: Record<string, number>;
+};
+
+export type SignalDiscoveryBracketPreview = {
+  schema_version: string;
+  policy: SignalDiscoveryBracketPolicy;
+  policy_hash: string;
+  brackets: SignalDiscoveryAtlasEpisode[];
+  diagnostics: SignalDiscoveryBracketDiagnostics;
+  approval?: {
+    revision: number;
+    policy_hash: string;
+  };
 };
 
 export type SignalDiscoveryAtlasLane = {
@@ -320,6 +359,12 @@ export type SignalDiscoverySession = {
       timeframes: string[];
     };
     walk_forward?: Record<string, unknown>;
+    bracket_cleanup?: {
+      revision?: number;
+      policy?: SignalDiscoveryBracketPolicy;
+      policy_hash?: string;
+      diagnostics?: SignalDiscoveryBracketDiagnostics;
+    };
     last_error?: { message?: string; type?: string };
   };
   frozen_target: SignalDiscoveryTarget | Record<string, never>;
@@ -1606,6 +1651,34 @@ export function fetchSignalDiscoveryAtlasEpisode(request: {
   const params = new URLSearchParams({ risk_pct: String(request.risk_pct) });
   return requestJson(
     `/api/v1/research/signal-discovery-sessions/${request.session_id}/atlas-episodes/${encodeURIComponent(request.episode_id)}?${params.toString()}`
+  );
+}
+
+export function previewSignalDiscoveryBrackets(request: {
+  session_id: string;
+  policy: SignalDiscoveryBracketPolicy;
+}): Promise<SignalDiscoveryBracketPreview> {
+  return requestJson(
+    `/api/v1/research/signal-discovery-sessions/${request.session_id}/bracket-cleanup/preview`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request.policy)
+    }
+  );
+}
+
+export function approveSignalDiscoveryBrackets(request: {
+  session_id: string;
+  policy: SignalDiscoveryBracketPolicy;
+}): Promise<SignalDiscoveryBracketPreview & { session: SignalDiscoverySession }> {
+  return requestJson(
+    `/api/v1/research/signal-discovery-sessions/${request.session_id}/bracket-cleanup/approve`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request.policy)
+    }
   );
 }
 

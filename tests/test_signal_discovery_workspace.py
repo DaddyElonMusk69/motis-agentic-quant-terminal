@@ -273,12 +273,19 @@ def test_frozen_target_is_versioned_hashed_idempotent_and_immutable(tmp_path: Pa
         "walk_forward_end": "2026-05-30T23:55:00Z",
     }
 
+    bracket_contract = {
+        "schema_version": "signal_discovery_bracket_policy.v1",
+        "policy_hash": "policy-hash",
+        "training_brackets_path": "brackets/training_brackets.parquet",
+        "training_brackets_hash": "brackets-hash",
+    }
     contract = freeze_target_contract(
         artifact_root=artifact_root,
         session_id="btc-fixed-r-v1",
         selected_target=selected_target,
         source_data=source_data,
         splits=splits,
+        bracket_contract=bracket_contract,
     )
     same_contract = freeze_target_contract(
         artifact_root=artifact_root,
@@ -286,6 +293,7 @@ def test_frozen_target_is_versioned_hashed_idempotent_and_immutable(tmp_path: Pa
         selected_target=selected_target,
         source_data=source_data,
         splits=splits,
+        bracket_contract=bracket_contract,
     )
 
     assert contract == same_contract == read_frozen_target(artifact_root=artifact_root)
@@ -293,6 +301,7 @@ def test_frozen_target_is_versioned_hashed_idempotent_and_immutable(tmp_path: Pa
     assert contract["target_version"] == 1
     assert contract["source_data"]["dataset_id"] == "okx-btc-raw-5m-v7"
     assert contract["selected_target"]["reward_multiple"] == 1.5
+    assert contract["bracket_policy"]["policy_hash"] == "policy-hash"
     assert contract["splits"]["walk_forward_start"] == "2026-04-01T00:00:00Z"
     assert len(contract["config_hash"]) == 64
     assert (artifact_root / "target/frozen_target.json").is_file()
