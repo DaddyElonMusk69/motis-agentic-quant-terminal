@@ -36,7 +36,12 @@ import {
 import { formatNumber, formatTimestamp } from "../app/format";
 import { queryClient } from "../app/queryClient";
 import { useAppRouter } from "../app/router";
-import { buildDiscoveryTickers, buildRiskGrid, formatRiskGrid } from "../app/signalDiscovery";
+import {
+  buildDiscoveryTickers,
+  buildRiskGrid,
+  formatRiskGrid,
+  isValidRewardMultiple
+} from "../app/signalDiscovery";
 import { DataTable } from "../components/DataTable";
 import { FieldRow } from "../components/FieldRow";
 import { ListSkeleton } from "../components/ListSkeleton";
@@ -55,6 +60,7 @@ type CreateState = {
   walkForwardEnd: string;
   riskMinimum: number;
   riskMaximum: number;
+  targetMultiple: number;
   maxHoldHours: number;
   entryDelays: string;
   feeBps: number;
@@ -70,6 +76,7 @@ const INITIAL_CREATE_STATE: CreateState = {
   walkForwardEnd: "2026-05-30",
   riskMinimum: 0.6,
   riskMaximum: 1.4,
+  targetMultiple: 2,
   maxHoldHours: 48,
   entryDelays: "5, 10",
   feeBps: 5,
@@ -373,7 +380,7 @@ export function ResearchSignalDiscoveryPage() {
       walk_forward_start: dateStart(createState.walkForwardStart),
       walk_forward_end: dateEnd(createState.walkForwardEnd),
       risk_values: configuredRiskValues,
-      reward_multiple: 2,
+      reward_multiple: createState.targetMultiple,
       stop_multiple: 1,
       horizon_hours: [Math.round(createState.maxHoldHours)],
       entry_delays_minutes: entryDelays,
@@ -819,12 +826,16 @@ export function ResearchSignalDiscoveryPage() {
                   </select>
                 </label>
                 <label>
-                  Minimum R (%)
+                  Minimum stop distance (%)
                   <input min={0.1} step={0.1} type="number" value={createState.riskMinimum} onChange={(event) => setCreateState((current) => ({ ...current, riskMinimum: Number(event.target.value) }))} />
                 </label>
                 <label>
-                  Maximum R (%)
+                  Maximum stop distance (%)
                   <input min={0.1} step={0.1} type="number" value={createState.riskMaximum} onChange={(event) => setCreateState((current) => ({ ...current, riskMaximum: Number(event.target.value) }))} />
+                </label>
+                <label>
+                  Target multiple (R)
+                  <input min={0} step="any" type="number" value={createState.targetMultiple} onChange={(event) => setCreateState((current) => ({ ...current, targetMultiple: Number(event.target.value) }))} />
                 </label>
                 <label>
                   Research Start
@@ -867,7 +878,7 @@ export function ResearchSignalDiscoveryPage() {
                 <button className="button button--secondary" onClick={() => setCreateOpen(false)} type="button">Cancel</button>
                 <button
                   className="button button--primary"
-                  disabled={!selectedTicker || configuredRiskValues.length === 0 || !Number.isInteger(createState.maxHoldHours) || createState.maxHoldHours <= 0 || createMutation.isPending}
+                  disabled={!selectedTicker || configuredRiskValues.length === 0 || !isValidRewardMultiple(createState.targetMultiple) || !Number.isInteger(createState.maxHoldHours) || createState.maxHoldHours <= 0 || createMutation.isPending}
                   onClick={submitCreate}
                   type="button"
                 >

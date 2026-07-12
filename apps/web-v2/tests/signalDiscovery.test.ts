@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildDiscoveryTickers, buildRiskGrid, formatRiskGrid } from "../src/app/signalDiscovery.ts";
+import {
+  buildDiscoveryTickers,
+  buildRiskGrid,
+  formatRiskGrid,
+  isValidRewardMultiple
+} from "../src/app/signalDiscovery.ts";
 import {
   atlasChartPalette,
   clipEpisodeToRange,
@@ -18,6 +23,15 @@ test("buildRiskGrid expands an inclusive range in stable 0.1 increments", () => 
 test("buildRiskGrid rejects nonpositive and descending ranges", () => {
   assert.throws(() => buildRiskGrid(0, 1), /positive/);
   assert.throws(() => buildRiskGrid(1.2, 0.8), /minimum/);
+});
+
+test("discovery target multiple accepts only finite positive values", () => {
+  assert.equal(isValidRewardMultiple(0.75), true);
+  assert.equal(isValidRewardMultiple(3.25), true);
+  assert.equal(isValidRewardMultiple(0), false);
+  assert.equal(isValidRewardMultiple(-1), false);
+  assert.equal(isValidRewardMultiple(Number.NaN), false);
+  assert.equal(isValidRewardMultiple(Number.POSITIVE_INFINITY), false);
 });
 
 test("formatRiskGrid compacts ranges without mislabeling legacy grids", () => {

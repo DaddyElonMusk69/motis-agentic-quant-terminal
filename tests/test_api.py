@@ -75,7 +75,7 @@ def test_signal_discovery_api_lifecycle_and_validation(tmp_path, monkeypatch):
         "walk_forward_start": "2026-04-01T00:00:00Z",
         "walk_forward_end": "2026-05-30T23:55:00Z",
         "risk_values": [0.6, 0.7, 0.8, 0.9, 1.0],
-        "reward_multiple": 2.0,
+        "reward_multiple": 1.5,
         "stop_multiple": 1.0,
         "horizon_hours": [72],
         "entry_delays_minutes": [5, 10],
@@ -94,6 +94,7 @@ def test_signal_discovery_api_lifecycle_and_validation(tmp_path, monkeypatch):
     assert session["asset"] == "BTC"
     assert session["dataset_id"] == market_repository.ref["dataset_id"]
     assert session["config"]["risk_values"] == [0.6, 0.7, 0.8, 0.9, 1.0]
+    assert session["config"]["reward_multiple"] == 1.5
     assert session["config"]["horizon_hours"] == [72]
     assert client.get("/api/v1/research/signal-discovery-sessions").json()["sessions"][0][
         "session_id"
@@ -144,6 +145,7 @@ def test_signal_discovery_api_lifecycle_and_validation(tmp_path, monkeypatch):
     frozen = freeze_response.json()["session"]
     assert frozen["status"] == "target_frozen"
     assert frozen["frozen_target"]["selected_target"]["selected_risk_pct"] == 1.0
+    assert frozen["frozen_target"]["selected_target"]["reward_multiple"] == 1.5
     assert frozen["frozen_target"]["selected_target"]["horizon_hours"] == 72
     assert (artifact_root / "target/frozen_target.json").is_file()
     assert not (artifact_root / "walk_forward").exists()
@@ -242,6 +244,16 @@ def test_signal_discovery_api_lifecycle_and_validation(tmp_path, monkeypatch):
         },
     )
     assert invalid_response.status_code in {400, 422}
+
+    invalid_stop_response = client.post(
+        "/api/v1/research/signal-discovery-sessions",
+        json={
+            **create_payload,
+            "session_id": "discovery-invalid-stop",
+            "stop_multiple": 1.25,
+        },
+    )
+    assert invalid_stop_response.status_code == 400
 
     default_horizon_payload = {
         key: value for key, value in create_payload.items() if key != "horizon_hours"

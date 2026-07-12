@@ -2905,8 +2905,8 @@ def _validate_signal_discovery_create_request(
         raise HTTPException(status_code=400, detail="session_id must be a path-safe identifier")
     if any(value <= 0 for value in request.risk_values):
         raise HTTPException(status_code=400, detail="risk_values must be positive")
-    if request.reward_multiple != 2.0 or request.stop_multiple != 1.0:
-        raise HTTPException(status_code=400, detail="Outcome-First v1 requires 2R/1R barriers")
+    if request.stop_multiple != 1.0:
+        raise HTTPException(status_code=400, detail="Outcome-First v1 requires a 1R stop barrier")
     if any(value <= 0 for value in request.horizon_hours):
         raise HTTPException(status_code=400, detail="horizon_hours must be positive whole hours")
     if any(value < 0 for value in request.entry_delays_minutes):

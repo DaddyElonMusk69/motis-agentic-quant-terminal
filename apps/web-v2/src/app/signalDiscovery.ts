@@ -14,6 +14,10 @@ export type DiscoveryTicker = {
   label: string;
 };
 
+export function isValidRewardMultiple(value: number): boolean {
+  return Number.isFinite(value) && value > 0;
+}
+
 export function buildDiscoveryTickers(datasets: DiscoveryDataset[]): DiscoveryTicker[] {
   const tickers = new Map<string, DiscoveryTicker>();
   for (const dataset of datasets) {

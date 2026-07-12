@@ -316,8 +316,8 @@ def _validate_target_payload(
         raise ValueError(f"selected target is missing fields: {', '.join(missing_target)}")
     if float(selected_target["selected_risk_pct"]) <= 0:
         raise ValueError("selected_risk_pct must be positive")
-    if float(selected_target["reward_multiple"]) != 2.0:
-        raise ValueError("Outcome-First v1 requires a 2R reward barrier")
+    if float(selected_target["reward_multiple"]) <= 0:
+        raise ValueError("reward_multiple must be positive")
     if float(selected_target["stop_multiple"]) != 1.0:
         raise ValueError("Outcome-First v1 requires a 1R stop barrier")
     horizon_hours = float(selected_target["horizon_hours"])

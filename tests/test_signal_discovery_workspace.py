@@ -252,7 +252,7 @@ def test_frozen_target_is_versioned_hashed_idempotent_and_immutable(tmp_path: Pa
     )
     selected_target = {
         "selected_risk_pct": 1.0,
-        "reward_multiple": 2.0,
+        "reward_multiple": 1.5,
         "stop_multiple": 1.0,
         "horizon_hours": 72,
         "entry_delay_minutes": 5,
@@ -292,6 +292,7 @@ def test_frozen_target_is_versioned_hashed_idempotent_and_immutable(tmp_path: Pa
     assert contract["schema_version"] == "signal_discovery_target.v1"
     assert contract["target_version"] == 1
     assert contract["source_data"]["dataset_id"] == "okx-btc-raw-5m-v7"
+    assert contract["selected_target"]["reward_multiple"] == 1.5
     assert contract["splits"]["walk_forward_start"] == "2026-04-01T00:00:00Z"
     assert len(contract["config_hash"]) == 64
     assert (artifact_root / "target/frozen_target.json").is_file()
@@ -319,6 +320,42 @@ def test_freeze_requires_a_materialized_training_atlas(tmp_path: Path) -> None:
             selected_target={
                 "selected_risk_pct": 1.0,
                 "reward_multiple": 2.0,
+                "stop_multiple": 1.0,
+                "horizon_hours": 36,
+                "entry_delay_minutes": 5,
+                "entry_semantics": "next_5m_open",
+            },
+            source_data={"dataset_id": "btc", "storage_backend": "parquet"},
+            splits={
+                "research_start": "2025-01-01T00:00:00Z",
+                "research_end": "2025-12-31T00:00:00Z",
+                "walk_forward_start": "2026-01-01T00:00:00Z",
+                "walk_forward_end": "2026-02-01T00:00:00Z",
+            },
+        )
+
+
+def test_frozen_target_rejects_nonpositive_reward_multiple(tmp_path: Path) -> None:
+    artifact_root = discovery_artifact_root(
+        workspace_root=tmp_path,
+        session_id="btc-invalid-reward-v1",
+    )
+    materialize_training_atlas(
+        artifact_root=artifact_root,
+        timestamp_labels=[],
+        episodes=[],
+        features=[],
+        hard_negatives=[],
+        r_feasibility={"r_summaries": [{"risk_pct": 1.0}]},
+    )
+
+    with pytest.raises(ValueError, match="reward_multiple must be positive"):
+        freeze_target_contract(
+            artifact_root=artifact_root,
+            session_id="btc-invalid-reward-v1",
+            selected_target={
+                "selected_risk_pct": 1.0,
+                "reward_multiple": 0.0,
                 "stop_multiple": 1.0,
                 "horizon_hours": 36,
                 "entry_delay_minutes": 5,
