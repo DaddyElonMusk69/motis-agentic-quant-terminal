@@ -18,6 +18,11 @@ type AtlasEpisodeRange = {
   end_ts: string;
 };
 
+export type AtlasRelativePosition = {
+  left: number;
+  width: number;
+};
+
 type AtlasLaneLike = {
   entry_delay_minutes: number;
   horizon_hours: number;
@@ -32,6 +37,59 @@ export function clipEpisodeToRange(
   const from = Math.max(episodeStart, range.from);
   const to = Math.min(episodeEnd, range.to);
   return from <= to ? { from, to } : null;
+}
+
+function timestampToLogicalPosition(
+  timestamp: number,
+  candleTimes: readonly number[]
+): number | null {
+  if (candleTimes.length === 0 || !Number.isFinite(timestamp)) {
+    return null;
+  }
+  if (candleTimes.length === 1) {
+    return 0;
+  }
+
+  let low = 0;
+  let high = candleTimes.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (candleTimes[middle] < timestamp) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  if (low < candleTimes.length && candleTimes[low] === timestamp) {
+    return low;
+  }
+
+  const rightIndex = Math.min(Math.max(low, 1), candleTimes.length - 1);
+  const leftIndex = rightIndex - 1;
+  const interval = candleTimes[rightIndex] - candleTimes[leftIndex];
+  if (interval <= 0) {
+    return leftIndex;
+  }
+  return leftIndex + (timestamp - candleTimes[leftIndex]) / interval;
+}
+
+export function positionEpisodeOnLogicalRange(
+  episode: AtlasEpisodeRange,
+  candleTimes: readonly number[],
+  range: AtlasVisibleRange
+): AtlasRelativePosition | null {
+  const span = range.to - range.from;
+  const start = timestampToLogicalPosition(Date.parse(episode.start_ts) / 1000, candleTimes);
+  const end = timestampToLogicalPosition(Date.parse(episode.end_ts) / 1000, candleTimes);
+  if (span <= 0 || start === null || end === null || end < range.from || start > range.to) {
+    return null;
+  }
+  const clippedStart = Math.max(start, range.from);
+  const clippedEnd = Math.min(end, range.to);
+  return {
+    left: (clippedStart - range.from) / span,
+    width: Math.max(0, (clippedEnd - clippedStart) / span)
+  };
 }
 
 export function episodeFill(direction: string): string {

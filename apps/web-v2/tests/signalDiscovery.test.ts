@@ -6,6 +6,7 @@ import {
   atlasChartPalette,
   clipEpisodeToRange,
   episodeFill,
+  positionEpisodeOnLogicalRange,
   sortAtlasLanes
 } from "../src/app/atlasVisualization.ts";
 
@@ -54,6 +55,15 @@ test("clipEpisodeToRange clips overlapping episodes and rejects invisible ones",
     ),
     null
   );
+});
+
+test("atlas episodes retain their scale when the viewport extends beyond candle data", () => {
+  const position = positionEpisodeOnLogicalRange(
+    { start_ts: "2026-01-01T00:00:00Z", end_ts: "2026-01-01T01:00:00Z" },
+    [1767225600, 1767229200, 1767232800],
+    { from: -1, to: 3 }
+  );
+  assert.deepEqual(position, { left: 0.25, width: 0.25 });
 });
 
 test("episodeFill only colors directional opportunities", () => {

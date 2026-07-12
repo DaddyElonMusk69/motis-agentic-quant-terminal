@@ -8,8 +8,8 @@ import {
 } from "lightweight-charts";
 import {
   atlasChartPalette,
-  clipEpisodeToRange,
   episodeFill,
+  positionEpisodeOnLogicalRange,
   sortAtlasLanes,
   type AtlasVisibleRange
 } from "../app/atlasVisualization";
@@ -28,10 +28,10 @@ function epochSeconds(value: string): number {
   return Date.parse(value) / 1000;
 }
 
-function initialRange(visualization: SignalDiscoveryAtlasVisualization): AtlasVisibleRange {
+function initialLogicalRange(visualization: SignalDiscoveryAtlasVisualization): AtlasVisibleRange {
   return {
-    from: epochSeconds(visualization.window_start),
-    to: epochSeconds(visualization.window_end)
+    from: 0,
+    to: Math.max(1, visualization.candles.length - 1)
   };
 }
 
@@ -42,11 +42,15 @@ export function OpportunityAtlasChart({
 }: OpportunityAtlasChartProps) {
   const chartHostRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const [visibleRange, setVisibleRange] = useState<AtlasVisibleRange>(() =>
-    initialRange(visualization)
+  const [visibleLogicalRange, setVisibleLogicalRange] = useState<AtlasVisibleRange>(() =>
+    initialLogicalRange(visualization)
   );
-  const [crosshairTime, setCrosshairTime] = useState<number | null>(null);
+  const [crosshairLogical, setCrosshairLogical] = useState<number | null>(null);
   const lanes = useMemo(() => sortAtlasLanes(visualization.lanes), [visualization.lanes]);
+  const candleTimes = useMemo(
+    () => visualization.candles.map((candle) => epochSeconds(candle.timestamp)),
+    [visualization.candles]
+  );
   const allEpisodes = useMemo(
     () => lanes.flatMap((lane) => lane.episodes),
     [lanes]
@@ -57,7 +61,7 @@ export function OpportunityAtlasChart({
     if (!host) {
       return;
     }
-    setVisibleRange(initialRange(visualization));
+    setVisibleLogicalRange(initialLogicalRange(visualization));
     const chart = createChart(host, {
       autoSize: false,
       width: Math.max(320, host.clientWidth),
@@ -103,17 +107,18 @@ export function OpportunityAtlasChart({
         close: candle.close
       }))
     );
-    chart.timeScale().fitContent();
     const handleRange = (range: { from: unknown; to: unknown } | null) => {
       if (range && typeof range.from === "number" && typeof range.to === "number") {
-        setVisibleRange({ from: range.from, to: range.to });
+        setVisibleLogicalRange({ from: range.from, to: range.to });
       }
     };
-    const handleCrosshair = (param: { time?: unknown }) => {
-      setCrosshairTime(typeof param.time === "number" ? param.time : null);
+    const handleCrosshair = (param: { logical?: unknown }) => {
+      setCrosshairLogical(typeof param.logical === "number" ? param.logical : null);
     };
-    chart.timeScale().subscribeVisibleTimeRangeChange(handleRange);
+    chart.timeScale().subscribeVisibleLogicalRangeChange(handleRange);
     chart.subscribeCrosshairMove(handleCrosshair);
+    chart.timeScale().fitContent();
+    handleRange(chart.timeScale().getVisibleLogicalRange());
     const resizeObserver = new ResizeObserver(() => {
       chart.applyOptions({
         width: Math.max(320, host.clientWidth),
@@ -123,7 +128,7 @@ export function OpportunityAtlasChart({
     resizeObserver.observe(host);
     return () => {
       resizeObserver.disconnect();
-      chart.timeScale().unsubscribeVisibleTimeRangeChange(handleRange);
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleRange);
       chart.unsubscribeCrosshairMove(handleCrosshair);
       chart.remove();
       chartRef.current = null;
@@ -136,19 +141,22 @@ export function OpportunityAtlasChart({
         <div className="opportunity-atlas-chart__host" ref={chartHostRef} />
         <div className="opportunity-atlas-chart__bands" aria-hidden="true">
           {allEpisodes.map((episode) => {
-            const clipped = clipEpisodeToRange(episode, visibleRange);
+            const position = positionEpisodeOnLogicalRange(
+              episode,
+              candleTimes,
+              visibleLogicalRange
+            );
             const fill = episodeFill(episode.direction);
-            if (!clipped || fill === "transparent") {
+            if (!position || fill === "transparent") {
               return null;
             }
-            const span = Math.max(1, visibleRange.to - visibleRange.from);
             return (
               <span
                 key={episode.episode_id}
                 style={{
                   background: fill,
-                  left: `${((clipped.from - visibleRange.from) / span) * 100}%`,
-                  width: `${Math.max(0.18, ((clipped.to - clipped.from) / span) * 100)}%`
+                  left: `${position.left * 100}%`,
+                  width: `${Math.max(0.18, position.width * 100)}%`
                 }}
               />
             );
@@ -164,12 +172,15 @@ export function OpportunityAtlasChart({
             <span>{lane.entry_delay_minutes}m / {lane.horizon_hours}h</span>
             <div className="opportunity-atlas-lane__track">
               {lane.episodes.map((episode) => {
-                const clipped = clipEpisodeToRange(episode, visibleRange);
+                const position = positionEpisodeOnLogicalRange(
+                  episode,
+                  candleTimes,
+                  visibleLogicalRange
+                );
                 const fill = episodeFill(episode.direction);
-                if (!clipped || fill === "transparent") {
+                if (!position || fill === "transparent") {
                   return null;
                 }
-                const span = Math.max(1, visibleRange.to - visibleRange.from);
                 return (
                   <button
                     aria-label={`${episode.direction} episode from ${episode.start_ts} to ${episode.end_ts}`}
@@ -178,19 +189,22 @@ export function OpportunityAtlasChart({
                     onClick={() => onEpisodeSelect(episode)}
                     style={{
                       background: fill,
-                      left: `${((clipped.from - visibleRange.from) / span) * 100}%`,
-                      width: `${Math.max(0.3, ((clipped.to - clipped.from) / span) * 100)}%`
+                      left: `${position.left * 100}%`,
+                      width: `${Math.max(0.3, position.width * 100)}%`
                     }}
                     title={`${episode.direction} · ${episode.timestamp_count} timestamps`}
                     type="button"
                   />
                 );
               })}
-              {crosshairTime !== null && crosshairTime >= visibleRange.from && crosshairTime <= visibleRange.to ? (
+              {crosshairLogical !== null &&
+              crosshairLogical >= visibleLogicalRange.from &&
+              crosshairLogical <= visibleLogicalRange.to ? (
                 <i
                   aria-hidden="true"
                   style={{
-                    left: `${((crosshairTime - visibleRange.from) / Math.max(1, visibleRange.to - visibleRange.from)) * 100}%`
+                    left: `${((crosshairLogical - visibleLogicalRange.from) /
+                      Math.max(1, visibleLogicalRange.to - visibleLogicalRange.from)) * 100}%`
                   }}
                 />
               ) : null}
