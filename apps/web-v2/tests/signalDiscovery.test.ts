@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { buildDiscoveryTickers, buildRiskGrid, formatRiskGrid } from "../src/app/signalDiscovery.ts";
+import {
+  clipEpisodeToRange,
+  episodeFill,
+  sortAtlasLanes
+} from "../src/app/atlasVisualization.ts";
 
 test("buildRiskGrid expands an inclusive range in stable 0.1 increments", () => {
   assert.deepEqual(buildRiskGrid(0.6, 1.0), [0.6, 0.7, 0.8, 0.9, 1.0]);
@@ -31,4 +36,40 @@ test("buildDiscoveryTickers exposes unique raw 5m instruments without dataset id
     { key: "BTC|BTC-USDT-SWAP", asset: "BTC", instrument: "BTC-USDT-SWAP", label: "BTC · BTC-USDT-SWAP" },
     { key: "SOL|SOL-USDT-SWAP", asset: "SOL", instrument: "SOL-USDT-SWAP", label: "SOL · SOL-USDT-SWAP" },
   ]);
+});
+
+test("clipEpisodeToRange clips overlapping episodes and rejects invisible ones", () => {
+  assert.deepEqual(
+    clipEpisodeToRange(
+      { start_ts: "2026-01-01T00:00:00Z", end_ts: "2026-01-01T02:00:00Z" },
+      { from: 1767229200, to: 1767236400 }
+    ),
+    { from: 1767229200, to: 1767232800 }
+  );
+  assert.equal(
+    clipEpisodeToRange(
+      { start_ts: "2026-01-01T00:00:00Z", end_ts: "2026-01-01T00:30:00Z" },
+      { from: 1767232800, to: 1767236400 }
+    ),
+    null
+  );
+});
+
+test("episodeFill only colors directional opportunities", () => {
+  assert.equal(episodeFill("LONG"), "var(--atlas-long-fill)");
+  assert.equal(episodeFill("SHORT"), "var(--atlas-short-fill)");
+  assert.equal(episodeFill("AMBIGUOUS"), "transparent");
+  assert.equal(episodeFill("NEUTRAL"), "transparent");
+});
+
+test("sortAtlasLanes orders horizon before entry delay", () => {
+  const lanes = [
+    { entry_delay_minutes: 10, horizon_hours: 48, episodes: [] },
+    { entry_delay_minutes: 10, horizon_hours: 36, episodes: [] },
+    { entry_delay_minutes: 5, horizon_hours: 36, episodes: [] }
+  ];
+  assert.deepEqual(
+    sortAtlasLanes(lanes).map((lane) => [lane.entry_delay_minutes, lane.horizon_hours]),
+    [[5, 36], [10, 36], [10, 48]]
+  );
 });

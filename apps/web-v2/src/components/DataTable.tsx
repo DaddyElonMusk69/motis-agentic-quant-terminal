@@ -62,7 +62,19 @@ export function DataTable<T>({
             </tr>
           ) : (
             rows.map((row) => (
-              <tr className={getRowClassName?.(row)} key={getRowKey(row)} onClick={onRowClick ? () => onRowClick(row) : undefined}>
+              <tr
+                className={getRowClassName?.(row)}
+                key={getRowKey(row)}
+                onClick={onRowClick ? () => onRowClick(row) : undefined}
+                onKeyDown={onRowClick ? (event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onRowClick(row);
+                  }
+                } : undefined}
+                role={onRowClick ? "button" : undefined}
+                tabIndex={onRowClick ? 0 : undefined}
+              >
                 {columns.map((column) => (
                   <td className={column.align ? `is-${column.align}` : undefined} key={column.key}>
                     {column.render(row)}

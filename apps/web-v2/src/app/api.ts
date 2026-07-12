@@ -186,6 +186,63 @@ export type SignalDiscoveryScenarioResult = SignalDiscoveryScenarioMetrics & {
   episode_retention?: number | null;
 };
 
+export type SignalDiscoveryAtlasCandle = {
+  timestamp: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+};
+
+export type SignalDiscoveryAtlasEpisode = {
+  episode_id: string;
+  direction: "LONG" | "SHORT" | "AMBIGUOUS" | string;
+  start_ts: string;
+  end_ts: string;
+  timestamp_count: number;
+  duration_minutes: number;
+  risk_pct: number;
+  entry_delay_minutes: number;
+  horizon_hours: number;
+};
+
+export type SignalDiscoveryAtlasLane = {
+  entry_delay_minutes: number;
+  horizon_hours: number;
+  episodes: SignalDiscoveryAtlasEpisode[];
+};
+
+export type SignalDiscoveryAtlasVisualization = {
+  risk_pct: number;
+  window_start: string;
+  window_end: string;
+  source_candle_count: number;
+  candle_interval_minutes: number;
+  downsampled: boolean;
+  candles: SignalDiscoveryAtlasCandle[];
+  lanes: SignalDiscoveryAtlasLane[];
+};
+
+export type SignalDiscoveryAtlasEpisodeDetail = {
+  episode: SignalDiscoveryAtlasEpisode;
+  snapshot: {
+    decision_ts: string;
+    entry_ts: string | null;
+    entry_price: number | null;
+    label: string;
+    path: {
+      direction: string;
+      outcome: string;
+      target_price: number;
+      stop_price: number;
+      first_touch_ts: string | null;
+      mfe_pct: number;
+      mae_pct: number;
+      terminal_return_pct: number;
+    };
+  };
+};
+
 export type SignalDiscoveryTarget = {
   schema_version: string;
   target_version: number;
@@ -1517,6 +1574,39 @@ export function deleteSignalDiscoverySession(sessionId: string): Promise<{ statu
 
 export function runSignalDiscoveryAtlas(sessionId: string): Promise<AsyncJobResponse> {
   return requestJson(`/api/v1/research/signal-discovery-sessions/${sessionId}/atlas`, { method: "POST" });
+}
+
+export function fetchSignalDiscoveryAtlasVisualization(request: {
+  session_id: string;
+  risk_pct: number;
+  start?: string;
+  end?: string;
+  max_candles?: number;
+}): Promise<SignalDiscoveryAtlasVisualization> {
+  const params = new URLSearchParams({
+    risk_pct: String(request.risk_pct),
+    max_candles: String(request.max_candles ?? 4_000)
+  });
+  if (request.start) {
+    params.set("start", request.start);
+  }
+  if (request.end) {
+    params.set("end", request.end);
+  }
+  return requestJson(
+    `/api/v1/research/signal-discovery-sessions/${request.session_id}/atlas-visualization?${params.toString()}`
+  );
+}
+
+export function fetchSignalDiscoveryAtlasEpisode(request: {
+  session_id: string;
+  risk_pct: number;
+  episode_id: string;
+}): Promise<SignalDiscoveryAtlasEpisodeDetail> {
+  const params = new URLSearchParams({ risk_pct: String(request.risk_pct) });
+  return requestJson(
+    `/api/v1/research/signal-discovery-sessions/${request.session_id}/atlas-episodes/${encodeURIComponent(request.episode_id)}?${params.toString()}`
+  );
 }
 
 export function freezeSignalDiscoveryTarget(request: {

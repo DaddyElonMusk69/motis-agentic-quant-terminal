@@ -1,5 +1,5 @@
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -390,6 +390,159 @@ def test_signal_discovery_prompt_drift_marks_session_failed(tmp_path, monkeypatc
 
     assert response.status_code == 409
     assert repository.get_signal_discovery_session("discovery-drift")["status"] == "failed"
+
+
+def test_signal_discovery_atlas_visualization_routes_clip_and_validate(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    market_repository = FakeDiscoveryMarketDataRepository()
+    artifact_root = tmp_path / "dev/signal_discovery_sessions/discovery-visualization"
+    repository.create_signal_discovery_session(
+        {
+            "session_id": "discovery-visualization",
+            "name": "BTC visualization",
+            "asset": "BTC",
+            "instrument": "BTC-USDT-SWAP",
+            "dataset_id": market_repository.ref["dataset_id"],
+            "research_start": "2026-01-01T00:00:00Z",
+            "research_end": "2026-01-31T23:55:00Z",
+            "walk_forward_start": "2026-02-01T00:00:00Z",
+            "walk_forward_end": "2026-02-28T23:55:00Z",
+            "artifact_root": str(artifact_root),
+            "status": "draft",
+            "config": {
+                "risk_values": [1.0],
+                "horizon_hours": [36],
+                "entry_delays_minutes": [5],
+            },
+        }
+    )
+    repository.update_signal_discovery_session(
+        "discovery-visualization",
+        status="atlas_ready",
+        summary={"r_summaries": [{"risk_pct": 1.0}]},
+    )
+    calls = {}
+
+    def build_visualization(**kwargs):
+        calls["visualization"] = kwargs
+        return {
+            "risk_pct": kwargs["risk_pct"],
+            "window_start": kwargs["window_start"],
+            "window_end": kwargs["window_end"],
+            "candles": [],
+            "lanes": [],
+        }
+
+    monkeypatch.setattr(api_main, "read_candles_from_ref", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(api_main, "build_atlas_visualization", build_visualization)
+    monkeypatch.setattr(
+        api_main,
+        "read_atlas_episode_detail",
+        lambda **kwargs: calls.setdefault("episode", kwargs) or {},
+    )
+    client = TestClient(
+        create_app(
+            runtime_repository=repository,
+            market_data_repository=market_repository,
+        )
+    )
+
+    response = client.get(
+        "/api/v1/research/signal-discovery-sessions/discovery-visualization/"
+        "atlas-visualization",
+        params={
+            "risk_pct": 1.0,
+            "start": "2025-12-01T00:00:00Z",
+            "end": "2026-02-15T00:00:00Z",
+            "max_candles": 800,
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls["visualization"]["window_start"] == datetime(
+        2026, 1, 1, tzinfo=UTC
+    )
+    assert calls["visualization"]["window_end"] == datetime(
+        2026, 1, 31, 23, 55, tzinfo=UTC
+    )
+    assert calls["visualization"]["max_candles"] == 800
+    assert client.get(
+        "/api/v1/research/signal-discovery-sessions/discovery-visualization/"
+        "atlas-visualization",
+        params={"risk_pct": 1.5},
+    ).status_code == 400
+    assert client.get(
+        "/api/v1/research/signal-discovery-sessions/discovery-visualization/"
+        "atlas-episodes/episode-000001",
+        params={"risk_pct": 1.5},
+    ).status_code == 400
+    detail_response = client.get(
+        "/api/v1/research/signal-discovery-sessions/discovery-visualization/"
+        "atlas-episodes/episode-000001",
+        params={"risk_pct": 1.0},
+    )
+    assert detail_response.status_code == 200
+    assert calls["episode"]["episode_id"] == "episode-000001"
+
+
+def test_signal_discovery_atlas_visualization_reports_missing_artifacts(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    market_repository = FakeDiscoveryMarketDataRepository()
+    repository.create_signal_discovery_session(
+        {
+            "session_id": "discovery-missing-atlas",
+            "name": "BTC missing atlas",
+            "asset": "BTC",
+            "instrument": "BTC-USDT-SWAP",
+            "dataset_id": market_repository.ref["dataset_id"],
+            "research_start": "2026-01-01T00:00:00Z",
+            "research_end": "2026-01-31T23:55:00Z",
+            "walk_forward_start": "2026-02-01T00:00:00Z",
+            "walk_forward_end": "2026-02-28T23:55:00Z",
+            "artifact_root": str(tmp_path / "missing"),
+            "config": {"risk_values": [1.0]},
+        }
+    )
+    repository.update_signal_discovery_session(
+        "discovery-missing-atlas",
+        status="atlas_ready",
+    )
+    monkeypatch.setattr(api_main, "read_candles_from_ref", lambda *_args, **_kwargs: [])
+    client = TestClient(
+        create_app(
+            runtime_repository=repository,
+            market_data_repository=market_repository,
+        )
+    )
+
+    response = client.get(
+        "/api/v1/research/signal-discovery-sessions/discovery-missing-atlas/"
+        "atlas-visualization",
+        params={"risk_pct": 1.0},
+    )
+
+    assert response.status_code == 409
+    assert "episodes are unavailable" in response.json()["detail"]
 
 
 class StubRuntimeRepository:

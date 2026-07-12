@@ -29,7 +29,7 @@ from quant_terminal_sdk.engine_contracts import (
     validate_execution_bundle_contract,
     validate_strategy_module,
 )
-from quant_terminal_sdk.market_data_reader import MarketDataReader
+from quant_terminal_sdk.market_data_reader import MarketDataReader, read_candles_from_ref
 from quant_terminal_worker.adapters.exchange import ExchangeAdapterError, build_exchange_adapter
 from quant_terminal_worker.adapters.binance import BinanceCLIAdapter
 from quant_terminal_worker.adapters.okx import OKXAdapter
@@ -61,6 +61,10 @@ from quant_terminal_worker.signal_discovery.evidence import (
     validate_evidence_manifest,
 )
 from quant_terminal_worker.signal_discovery.prompt import generate_engine_builder_prompt
+from quant_terminal_worker.signal_discovery.visualization import (
+    build_atlas_visualization,
+    read_atlas_episode_detail,
+)
 from quant_terminal_worker.stage1.workspace import materialize_stage1_session_workspace
 from quant_terminal_worker.stage1.workspace import create_stage1_iteration_workspace
 from quant_terminal_worker.stage1.workspace import build_stage1_gate_summary
@@ -932,6 +936,80 @@ def create_app(
             shutil.rmtree(artifact_root)
         runtime.delete_signal_discovery_session(session_id)
         return {"status": "deleted", "session_id": session_id}
+
+    @app.get(
+        "/api/v1/research/signal-discovery-sessions/{session_id}/atlas-visualization"
+    )
+    def get_signal_discovery_atlas_visualization(
+        session_id: str,
+        risk_pct: float,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        max_candles: int = 4_000,
+    ) -> dict[str, Any]:
+        session = _signal_discovery_api_session(
+            get_runtime_repository(),
+            session_id,
+        )
+        _validate_signal_discovery_visualization_risk(session, risk_pct)
+        if not 200 <= max_candles <= 10_000:
+            raise HTTPException(
+                status_code=400,
+                detail="max_candles must be between 200 and 10000",
+            )
+        research_start = _as_utc(session["research_start"])
+        research_end = _as_utc(session["research_end"])
+        window_start = max(research_start, _as_utc(start) if start else research_start)
+        window_end = min(research_end, _as_utc(end) if end else research_end)
+        if window_start > window_end:
+            raise HTTPException(
+                status_code=400,
+                detail="Visualization window does not overlap the research period",
+            )
+        market_ref = _signal_discovery_api_data_ref(
+            get_market_data_repository(),
+            dataset_id=session["dataset_id"],
+        )
+        candles = read_candles_from_ref(
+            market_ref,
+            workspace_root=Path.cwd(),
+            start=window_start,
+            end=window_end,
+        )
+        try:
+            return build_atlas_visualization(
+                artifact_root=_signal_discovery_api_artifact_root(session),
+                candles=candles,
+                risk_pct=risk_pct,
+                window_start=window_start,
+                window_end=window_end,
+                max_candles=max_candles,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/research/signal-discovery-sessions/{session_id}/"
+        "atlas-episodes/{episode_id}"
+    )
+    def get_signal_discovery_atlas_episode(
+        session_id: str,
+        episode_id: str,
+        risk_pct: float,
+    ) -> dict[str, Any]:
+        session = _signal_discovery_api_session(
+            get_runtime_repository(),
+            session_id,
+        )
+        _validate_signal_discovery_visualization_risk(session, risk_pct)
+        try:
+            return read_atlas_episode_detail(
+                artifact_root=_signal_discovery_api_artifact_root(session),
+                risk_pct=risk_pct,
+                episode_id=episode_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/v1/research/signal-discovery-sessions/{session_id}/atlas")
     def run_signal_discovery_atlas(session_id: str) -> dict[str, Any]:
@@ -2869,6 +2947,20 @@ def _signal_discovery_api_session(repository: Any, session_id: str) -> dict[str,
     if session is None:
         raise HTTPException(status_code=404, detail="Signal discovery session not found")
     return session
+
+
+def _validate_signal_discovery_visualization_risk(
+    session: Mapping[str, Any],
+    risk_pct: float,
+) -> None:
+    configured = {
+        float(value) for value in (session.get("config") or {}).get("risk_values", ())
+    }
+    if risk_pct not in configured:
+        raise HTTPException(
+            status_code=400,
+            detail="Selected R was not in the training grid",
+        )
 
 
 def _signal_discovery_api_artifact_root(session: Mapping[str, Any]) -> Path:

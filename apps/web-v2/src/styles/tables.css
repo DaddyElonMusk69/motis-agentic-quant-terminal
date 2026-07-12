@@ -89,8 +89,13 @@
   background: color-mix(in oklch, var(--surface-selected) 62%, transparent);
 }
 
-.data-table tbody tr[onClick] {
+.data-table tbody tr[role="button"] {
   cursor: pointer;
+}
+
+.data-table tbody tr[role="button"]:focus-visible {
+  outline: 2px solid color-mix(in oklch, var(--status-live) 72%, white);
+  outline-offset: -2px;
 }
 
 .data-table tr:last-child td {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   ArrowRight,
@@ -43,6 +43,8 @@ import { ListSkeleton } from "../components/ListSkeleton";
 import { SplitPane } from "../components/SplitPane";
 import { StatusBadge } from "../components/StatusBadge";
 import { WorkerRuntimeNotice } from "../components/WorkerRuntimeNotice";
+
+const OpportunityAtlasModal = lazy(() => import("../components/OpportunityAtlasModal"));
 
 type CreateState = {
   name: string;
@@ -168,6 +170,7 @@ export function ResearchSignalDiscoveryPage() {
   const [prompt, setPrompt] = useState<SignalDiscoveryPrompt | null>(null);
   const [copiedPrompt, setCopiedPrompt] = useState(false);
   const [selectedRisk, setSelectedRisk] = useState(0);
+  const [atlasCandidate, setAtlasCandidate] = useState<SignalDiscoveryRResult | null>(null);
   const [selectedHorizon, setSelectedHorizon] = useState(48);
   const [selectedDelay, setSelectedDelay] = useState(5);
   const [candidateEngineId, setCandidateEngineId] = useState("");
@@ -534,7 +537,10 @@ export function ResearchSignalDiscoveryPage() {
                   rows={rSummaries}
                   getRowKey={(row) => String(row.risk_pct)}
                   getRowClassName={(row) => row.risk_pct === selectedRResult?.risk_pct ? "is-selected" : undefined}
-                  onRowClick={(row) => setSelectedRisk(row.risk_pct)}
+                  onRowClick={(row) => {
+                    setSelectedRisk(row.risk_pct);
+                    setAtlasCandidate(row);
+                  }}
                   emptyLabel="Run the atlas to compare fixed R candidates."
                 />
                 {selectedRResult ? (
@@ -771,6 +777,22 @@ export function ResearchSignalDiscoveryPage() {
           )
         }
       />
+
+      {atlasCandidate && session ? (
+        <Suspense
+          fallback={(
+            <div className="terminal-modal-backdrop" role="presentation">
+              <div className="opportunity-atlas-chart-state">Loading atlas chart…</div>
+            </div>
+          )}
+        >
+          <OpportunityAtlasModal
+            candidate={atlasCandidate}
+            onClose={() => setAtlasCandidate(null)}
+            session={session}
+          />
+        </Suspense>
+      ) : null}
 
       {createOpen ? (
         <div className="modal-backdrop" role="presentation">

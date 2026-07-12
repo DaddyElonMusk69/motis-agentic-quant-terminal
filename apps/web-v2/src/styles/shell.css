@@ -5285,6 +5285,235 @@
   margin-bottom: var(--space-2);
 }
 
+.has-modal-open {
+  overflow: hidden;
+}
+
+.opportunity-atlas-modal {
+  --atlas-long-fill: color-mix(in oklch, var(--status-pass) 13%, transparent);
+  --atlas-short-fill: color-mix(in oklch, var(--status-risk) 13%, transparent);
+  height: min(920px, calc(100vh - 32px));
+  max-height: calc(100vh - 32px);
+  max-width: 1600px;
+  min-width: min(1480px, calc(100vw - 32px));
+}
+
+.opportunity-atlas-modal__header h2 {
+  font-size: 14px;
+  margin: 3px 0 0;
+}
+
+.opportunity-atlas-modal__actions {
+  align-items: center;
+  display: flex;
+  gap: var(--space-2);
+}
+
+.opportunity-atlas-summary {
+  align-items: center;
+  background: var(--surface-muted);
+  border-bottom: 1px solid var(--line-subtle);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+  min-height: 46px;
+  padding: var(--space-2) var(--space-4);
+}
+
+.opportunity-atlas-summary span {
+  color: var(--ink-muted);
+  font-size: 10px;
+}
+
+.opportunity-atlas-summary strong {
+  color: var(--ink-primary);
+  font-size: 12px;
+  margin-right: 4px;
+}
+
+.terminal-modal__body.opportunity-atlas-modal__body {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+}
+
+.terminal-modal__body.opportunity-atlas-modal__body.has-inspector {
+  grid-template-columns: minmax(0, 1fr) 310px;
+}
+
+.opportunity-atlas-modal__visualization {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.opportunity-atlas-chart {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.opportunity-atlas-chart__plot {
+  flex: 1 1 auto;
+  min-height: 380px;
+  position: relative;
+}
+
+.opportunity-atlas-chart__host {
+  height: 100%;
+  inset: 0;
+  position: absolute;
+  width: 100%;
+}
+
+.opportunity-atlas-chart__bands {
+  inset: 0 72px 0 0;
+  overflow: hidden;
+  pointer-events: none;
+  position: absolute;
+  z-index: 2;
+}
+
+.opportunity-atlas-chart__bands > span {
+  bottom: 28px;
+  position: absolute;
+  top: 0;
+}
+
+.opportunity-atlas-lanes {
+  border-top: 1px solid var(--line-subtle);
+  flex: 0 0 auto;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: var(--space-2) 72px var(--space-2) 0;
+}
+
+.opportunity-atlas-lane {
+  align-items: center;
+  display: grid;
+  gap: var(--space-2);
+  grid-template-columns: 86px minmax(0, 1fr);
+  min-height: 30px;
+}
+
+.opportunity-atlas-lane > span {
+  color: var(--ink-muted);
+  font-size: 10px;
+  padding-left: var(--space-3);
+  white-space: nowrap;
+}
+
+.opportunity-atlas-lane__track {
+  background: color-mix(in oklch, var(--surface-muted) 76%, transparent);
+  border: 1px solid var(--line-subtle);
+  height: 22px;
+  overflow: hidden;
+  position: relative;
+}
+
+.opportunity-atlas-lane__track button {
+  border: 0;
+  border-radius: 2px;
+  bottom: 2px;
+  cursor: pointer;
+  min-width: 2px;
+  padding: 0;
+  position: absolute;
+  top: 2px;
+}
+
+.opportunity-atlas-lane__track button:hover {
+  filter: saturate(1.7);
+}
+
+.opportunity-atlas-lane__track button.is-selected {
+  outline: 1px solid var(--ink-primary);
+  outline-offset: 1px;
+}
+
+.opportunity-atlas-lane__track i {
+  background: color-mix(in oklch, var(--ink-primary) 52%, transparent);
+  bottom: 0;
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  width: 1px;
+  z-index: 3;
+}
+
+.opportunity-atlas-window-meta {
+  align-items: center;
+  border-top: 1px solid var(--line-subtle);
+  color: var(--ink-muted);
+  display: flex;
+  font-size: 10px;
+  justify-content: space-between;
+  min-height: 34px;
+  padding: 0 var(--space-3);
+}
+
+.opportunity-atlas-chart-state {
+  align-items: center;
+  color: var(--ink-muted);
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-3);
+  justify-content: center;
+  min-height: 520px;
+}
+
+.opportunity-atlas-chart-state.is-error {
+  color: var(--status-risk);
+}
+
+.opportunity-atlas-inspector {
+  border-left: 1px solid var(--line-subtle);
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-4);
+}
+
+.opportunity-atlas-inspector > header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: var(--space-3);
+}
+
+.opportunity-atlas-inspector > header h3 {
+  font-size: 14px;
+  margin: 3px 0 0;
+}
+
+.opportunity-atlas-inspector > header svg {
+  color: var(--ink-muted);
+  height: 16px;
+  width: 16px;
+}
+
+.opportunity-atlas-inspector h4 {
+  border-top: 1px solid var(--line-subtle);
+  font-size: 11px;
+  margin: var(--space-4) 0 var(--space-2);
+  padding-top: var(--space-3);
+}
+
+.opportunity-atlas-inspector__fields .field-row {
+  align-items: flex-start;
+}
+
+.opportunity-atlas-inspector__fields .field-row strong {
+  max-width: 58%;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
 .discovery-create-modal {
   max-width: 1120px;
   width: min(1120px, calc(100vw - 48px));
@@ -5334,6 +5563,39 @@
   .discovery-freeze-controls .button,
   .discovery-candidate-controls .button {
     width: 100%;
+  }
+}
+
+@media (max-width: 900px) {
+  .opportunity-atlas-modal-backdrop {
+    padding: 0;
+  }
+
+  .opportunity-atlas-modal {
+    border-radius: 0;
+    height: 100vh;
+    max-height: 100vh;
+    min-width: 100vw;
+    width: 100vw;
+  }
+
+  .terminal-modal__body.opportunity-atlas-modal__body.has-inspector {
+    grid-template-columns: minmax(0, 1fr);
+    overflow-y: auto;
+  }
+
+  .opportunity-atlas-modal__visualization {
+    min-height: 560px;
+  }
+
+  .opportunity-atlas-inspector {
+    border-left: 0;
+    border-top: 1px solid var(--line-subtle);
+    overflow: visible;
+  }
+
+  .opportunity-atlas-summary {
+    gap: var(--space-3);
   }
 }
 
@@ -5394,5 +5656,32 @@
 
   .discovery-create-modal {
     width: calc(100vw - 16px);
+  }
+
+  .opportunity-atlas-modal__header {
+    align-items: flex-start;
+    gap: var(--space-2);
+  }
+
+  .opportunity-atlas-modal__actions .button {
+    font-size: 0;
+    padding: 0;
+    width: 30px;
+  }
+
+  .opportunity-atlas-modal__actions .button svg {
+    margin: 0;
+  }
+
+  .opportunity-atlas-chart__plot {
+    min-height: 330px;
+  }
+
+  .opportunity-atlas-lanes {
+    padding-right: 56px;
+  }
+
+  .opportunity-atlas-lane {
+    grid-template-columns: 72px minmax(0, 1fr);
   }
 }
