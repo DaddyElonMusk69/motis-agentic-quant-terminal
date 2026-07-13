@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
+from quant_terminal_api import main as api_main
 from quant_terminal_api.main import create_app
 
 
@@ -147,6 +148,35 @@ def test_market_data_feature_refresh_endpoint_queues_worker_job():
     assert response.json()["job"]["job_type"] == "market_data_feature_refresh"
     assert response.json()["job"]["scope_key"] == "asset:BTC:feature:bollinger"
     assert response.json()["job"]["payload"] == {"asset": "BTC", "family": "bollinger"}
+
+
+def test_market_data_open_interest_feature_refresh_uses_specialized_fallback(monkeypatch):
+    calls = []
+
+    def fake_enrich_open_interest_regime_datasets(**kwargs):
+        calls.append(kwargs)
+        return {
+            "status": "enriched",
+            "asset": kwargs["asset"],
+            "family": "open_interest_regime",
+            "feature_count": 1,
+            "features": [],
+        }
+
+    monkeypatch.setattr(api_main, "enrich_open_interest_regime_datasets", fake_enrich_open_interest_regime_datasets)
+    client = TestClient(
+        create_app(
+            market_data_repository=FakeMarketDataRepository(),
+            runtime_repository=object(),
+        )
+    )
+
+    response = client.post("/api/v1/market-data/assets/btc/features/open_interest_regime/refresh")
+
+    assert response.status_code == 200
+    assert response.json()["family"] == "open_interest_regime"
+    assert calls[0]["asset"] == "BTC"
+    assert "family" not in calls[0]
 
 
 def test_market_data_refresh_endpoint_fills_dataset():

@@ -15,6 +15,10 @@ from quant_terminal_worker.adapters.okx import OKXAdapter
 from quant_terminal_worker.adapters.binance import BinanceCLIAdapter
 from quant_terminal_worker.ingestion.ema_enrichment import enrich_derived_ema_datasets
 from quant_terminal_worker.ingestion.feature_enrichment import enrich_feature_family_datasets
+from quant_terminal_worker.ingestion.open_interest_feature_enrichment import (
+    FEATURE_FAMILY as OPEN_INTEREST_FEATURE_FAMILY,
+    enrich_open_interest_regime_datasets,
+)
 from quant_terminal_worker.ingestion.raw_candle_fill import fill_raw_candle_dataset
 from quant_terminal_worker.ingestion.binance_open_interest import fill_raw_open_interest_dataset
 from quant_terminal_worker.ingestion.signal_pool_extension import extend_signal_pool_from_local_candles
@@ -211,6 +215,12 @@ def _execute_market_data_feature_refresh(
     payload = job.get("payload") or {}
     asset = str(payload["asset"]).upper()
     family = str(payload["family"])
+    if family == OPEN_INTEREST_FEATURE_FAMILY:
+        return enrich_open_interest_regime_datasets(
+            repository=market_data_repository,
+            asset=asset,
+            target_root=workspace_root / ".data" / "market-data",
+        )
     return enrich_feature_family_datasets(
         repository=market_data_repository,
         asset=asset,

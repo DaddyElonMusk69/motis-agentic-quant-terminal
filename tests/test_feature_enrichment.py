@@ -8,6 +8,7 @@ import pyarrow.parquet as pq
 from quant_terminal_sdk.parquet_store import read_candles
 from quant_terminal_worker.ingestion.feature_enrichment import (
     FEATURE_FAMILIES,
+    TIMEFRAMES,
     build_feature_rows,
     enrich_feature_family_datasets,
 )
@@ -25,6 +26,10 @@ class FakeRepository:
         self.upserted.append(registration)
 
 
+def test_default_feature_timeframes_cover_v6_context() -> None:
+    assert TIMEFRAMES == ("5m", "2h", "8h", "12h", "1d")
+
+
 def test_build_feature_rows_computes_base_candle_and_bollinger_features():
     rows = [_row(f"2026-06-01T00:{minute:02d}:00Z", close=100 + minute, volume=10 + minute) for minute in range(25)]
 
@@ -38,6 +43,21 @@ def test_build_feature_rows_computes_base_candle_and_bollinger_features():
     assert bollinger_rows[-1]["bb_upper_20_2"] is not None
     assert bollinger_rows[-1]["bb_position_pct"] is not None
     assert bollinger_rows[-1]["bb_bandwidth_pct"] is not None
+
+
+def test_build_feature_rows_records_causal_availability_and_source_window() -> None:
+    rows = [
+        _row(f"2026-06-{1 + index // 12:02d}T{(index % 12) * 2:02d}:00:00Z", close=100 + index, volume=10 + index)
+        for index in range(50)
+    ]
+
+    feature_rows = build_feature_rows(rows, family="volume", timeframe="2h")
+
+    assert feature_rows[-1]["available_at"] == "2026-06-05T04:00:00Z"
+    assert feature_rows[-1]["complete"] is True
+    assert feature_rows[-1]["source_row_count"] == 48
+    assert feature_rows[-1]["source_window_start_ts"] == rows[-48]["timestamp"]
+    assert feature_rows[-1]["source_window_end_ts"] == rows[-1]["timestamp"]
 
 
 def test_enrich_feature_family_datasets_writes_feature_refs_for_timeframes(tmp_path: Path):
@@ -78,9 +98,11 @@ def test_enrich_feature_family_datasets_writes_feature_refs_for_timeframes(tmp_p
     assert result["feature_count"] == 1
     assert repository.upserted[0]["data_type"] == FEATURE_FAMILIES["bollinger"].data_type
     assert repository.upserted[0]["schema_descriptor"]["feature_family"] == "bollinger"
+    assert "available_at" in repository.upserted[0]["schema_descriptor"]["columns"]
     feature_path = Path(repository.upserted[0]["storage_uri"]) / "year=2026/month=06/data.parquet"
     written_rows = read_candles(feature_path)
     assert written_rows[-1]["bb_mid_20"] is not None
+    assert written_rows[-1]["available_at"] == "2026-06-01T00:29:00Z"
 
 
 def _write_parquet(path: Path, rows: list[dict[str, object]]) -> None:

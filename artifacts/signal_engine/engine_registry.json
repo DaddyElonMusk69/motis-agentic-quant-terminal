@@ -1,90 +1,4 @@
 {
-  "bollinger": {
-    "code_ref": {
-      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/bollinger_base.py",
-      "path": "apps/worker/src/quant_terminal_worker/signal_engines/bollinger.py"
-    },
-    "configuration_schema": {
-      "default_parameters": {
-        "bb_period": 20,
-        "bb_stddev": "2",
-        "context_bars": 80,
-        "dedupe_window_minutes": 120,
-        "proximity_threshold": "0.002",
-        "timeframes": [
-          "4h",
-          "8h",
-          "12h",
-          "1d"
-        ],
-        "vote_threshold": 2,
-        "watched_bands": [
-          "upper",
-          "lower"
-        ]
-      }
-    },
-    "description": "Multi-timeframe Bollinger band proximity signal engine.",
-    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.bollinger:scan_live_signal",
-    "name": "Bollinger Bands",
-    "output_envelope_version": "signal_packet.v2",
-    "required_data": [
-      {
-        "data_type": "candles",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 20000,
-        "origin": "raw",
-        "timeframe": "5m"
-      },
-      {
-        "data_type": "candles",
-        "lookback_bars": 80,
-        "origin": "derived",
-        "source": {
-          "data_type": "candles",
-          "origin": "raw",
-          "timeframe": "5m"
-        },
-        "timeframe": "4h"
-      },
-      {
-        "data_type": "candles",
-        "lookback_bars": 80,
-        "origin": "derived",
-        "source": {
-          "data_type": "candles",
-          "origin": "raw",
-          "timeframe": "5m"
-        },
-        "timeframe": "8h"
-      },
-      {
-        "data_type": "candles",
-        "lookback_bars": 80,
-        "origin": "derived",
-        "source": {
-          "data_type": "candles",
-          "origin": "raw",
-          "timeframe": "5m"
-        },
-        "timeframe": "12h"
-      },
-      {
-        "data_type": "candles",
-        "lookback_bars": 80,
-        "origin": "derived",
-        "source": {
-          "data_type": "candles",
-          "origin": "raw",
-          "timeframe": "5m"
-        },
-        "timeframe": "1d"
-      }
-    ],
-    "runtime_entrypoint": "quant_terminal_worker.signal_engines.bollinger:generate_training_signals",
-    "signal_engine_id": "bollinger",
-    "version": "0.1"
-  },
   "compression_participation_release_4h_v1": {
     "code_ref": {
       "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/compression_participation_release_v1_base.py",
@@ -178,37 +92,6 @@
     ],
     "runtime_entrypoint": "quant_terminal_worker.signal_engines.compression_participation_release_v1:generate_training_signals",
     "signal_engine_id": "compression_participation_release_v1",
-    "version": "0.1"
-  },
-  "liquidity_sweep_v1": {
-    "code_ref": {
-      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/liquidity_sweep_v1_base.py",
-      "path": "apps/worker/src/quant_terminal_worker/signal_engines/liquidity_sweep_v1.py"
-    },
-    "configuration_schema": {
-      "default_parameters": {
-        "atr_period": 14,
-        "context_bars": 144,
-        "cooldown_hours": 2,
-        "min_sweep_atr": 0.2,
-        "reference_window_hours": 12
-      }
-    },
-    "description": "Lean 5m liquidity sweep event engine using raw candle data only.",
-    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.liquidity_sweep_v1:scan_live_signal",
-    "name": "Liquidity Sweep v1",
-    "output_envelope_version": "signal_packet.v2",
-    "required_data": [
-      {
-        "data_type": "candles",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 20000,
-        "origin": "raw",
-        "timeframe": "5m"
-      }
-    ],
-    "runtime_entrypoint": "quant_terminal_worker.signal_engines.liquidity_sweep_v1:generate_training_signals",
-    "signal_engine_id": "liquidity_sweep_v1",
     "version": "0.1"
   },
   "oi_compression_v1": {
@@ -567,19 +450,20 @@
     "signal_engine_id": "vegas_5m_cluster_v5",
     "version": "0.1"
   },
-  "vegas_5m_cluster_v5_oi": {
+  "vegas_5m_cluster_v6": {
     "code_ref": {
-      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/vegas_ema_5m_hft_v5_oi_base.py",
-      "path": "apps/worker/src/quant_terminal_worker/signal_engines/vegas_5m_cluster_v5_oi.py"
+      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/vegas_ema_5m_hft_v6_base.py",
+      "path": "apps/worker/src/quant_terminal_worker/signal_engines/vegas_5m_cluster_v6.py"
     },
     "configuration_schema": {
       "default_parameters": {
+        "bollinger_context_bars": 20,
         "context_bars": 80,
-        "context_mode": "candles_only_integrated_forming_with_oi_features",
+        "context_mode": "candles_only_integrated_forming_with_bollinger_1d_and_oi_regime",
         "context_timeframes": [
           "2h",
           "8h",
-          "1d"
+          "12h"
         ],
         "dedupe_window_minutes": 120,
         "ema_columns": [
@@ -591,15 +475,13 @@
           "ema_676"
         ],
         "ema_mode": "precomputed_5m_ema_cluster",
-        "oi_aggregate_context_bars": 24,
-        "oi_context_bars": 80,
         "proximity_threshold": "0.002",
         "vote_threshold": 3
       }
     },
-    "description": "Experimental Vegas 5m Cluster v5 replica that preserves v5 EMA trigger behavior and adds confirmed 5m open-interest context, OI aggregate charts, and OI feature summaries to emitted packets.",
-    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.vegas_5m_cluster_v5_oi:scan_live_signal",
-    "name": "Vegas 5m Cluster v5 + OI",
+    "description": "Confirmed-close 5m Vegas EMA rail cluster engine with point-in-time-safe completed and forming 2h/8h/12h context plus diagnostic 1d Bollinger and 15m open-interest regime evidence.",
+    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.vegas_5m_cluster_v6:scan_live_signal",
+    "name": "Vegas 5m Cluster v6",
     "output_envelope_version": "signal_packet.v2",
     "required_data": [
       {
@@ -611,7 +493,7 @@
       },
       {
         "data_type": "open_interest",
-        "freshness_tolerance_seconds": 300,
+        "freshness_tolerance_seconds": 900,
         "lookback_bars": 20000,
         "origin": "raw",
         "timeframe": "5m"
@@ -690,11 +572,76 @@
           "origin": "raw",
           "timeframe": "5m"
         },
+        "timeframe": "12h"
+      },
+      {
+        "data_type": "candles",
+        "lookback_bars": 40,
+        "origin": "derived",
+        "source": {
+          "data_type": "candles",
+          "origin": "raw",
+          "timeframe": "5m"
+        },
         "timeframe": "1d"
+      },
+      {
+        "data_type": "feature_bollinger",
+        "lookback_bars": 40,
+        "origin": "derived",
+        "required_columns": [
+          "bb_mid_20",
+          "bb_upper_20_2",
+          "bb_lower_20_2",
+          "bb_position_pct",
+          "bb_bandwidth_pct",
+          "bb_zscore"
+        ],
+        "source": {
+          "data_type": "candles",
+          "origin": "derived",
+          "timeframe": "1d"
+        },
+        "timeframe": "1d"
+      },
+      {
+        "data_type": "feature_open_interest_regime",
+        "lookback_bars": 1,
+        "origin": "derived",
+        "required_columns": [
+          "oi_return_pct_2h",
+          "oi_return_pct_8h",
+          "oi_return_pct_24h",
+          "oi_change_2h_zscore_7d",
+          "general_long_short_ratio",
+          "taker_long_short_ratio_avg_2h",
+          "available_at",
+          "complete",
+          "source_window_start_ts",
+          "source_window_end_ts",
+          "source_row_count"
+        ],
+        "source": {
+          "data_type": "open_interest",
+          "origin": "derived",
+          "timeframe": "15m"
+        },
+        "timeframe": "15m"
+      },
+      {
+        "data_type": "open_interest",
+        "lookback_bars": 1000,
+        "origin": "derived",
+        "source": {
+          "data_type": "open_interest",
+          "origin": "raw",
+          "timeframe": "5m"
+        },
+        "timeframe": "15m"
       }
     ],
-    "runtime_entrypoint": "quant_terminal_worker.signal_engines.vegas_5m_cluster_v5_oi:generate_training_signals",
-    "signal_engine_id": "vegas_5m_cluster_v5_oi",
+    "runtime_entrypoint": "quant_terminal_worker.signal_engines.vegas_5m_cluster_v6:generate_training_signals",
+    "signal_engine_id": "vegas_5m_cluster_v6",
     "version": "0.1"
   },
   "vegas_ema": {

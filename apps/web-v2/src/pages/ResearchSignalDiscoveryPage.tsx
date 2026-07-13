@@ -1,7 +1,8 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   ArrowRight,
+  Check,
   Clipboard,
   FileCode2,
   FlaskConical,
@@ -39,8 +40,12 @@ import { useAppRouter } from "../app/router";
 import {
   buildDiscoveryTickers,
   buildRiskGrid,
+  formatOpportunityGap,
   formatRiskGrid,
-  isValidRewardMultiple
+  getApprovedBracketCount,
+  isApprovedBracketTarget,
+  isValidRewardMultiple,
+  shouldDisableAtlasRun
 } from "../app/signalDiscovery";
 import { DataTable } from "../components/DataTable";
 import { FieldRow } from "../components/FieldRow";
@@ -182,6 +187,7 @@ export function ResearchSignalDiscoveryPage() {
   const [selectedDelay, setSelectedDelay] = useState(5);
   const [candidateEngineId, setCandidateEngineId] = useState("");
   const [candidateSignalSetKey, setCandidateSignalSetKey] = useState("");
+  const atlasSubmissionRef = useRef(false);
 
   const sessionsQuery = useQuery({
     queryKey: ["signal-discovery-sessions"],
@@ -311,7 +317,10 @@ export function ResearchSignalDiscoveryPage() {
   });
   const atlasMutation = useMutation({
     mutationFn: runSignalDiscoveryAtlas,
-    onSuccess: (result) => setActiveJobId(result.job.job_id)
+    onSuccess: (result) => setActiveJobId(result.job.job_id),
+    onSettled: () => {
+      atlasSubmissionRef.current = false;
+    }
   });
   const freezeMutation = useMutation({
     mutationFn: freezeSignalDiscoveryTarget,
@@ -364,11 +373,11 @@ export function ResearchSignalDiscoveryPage() {
     ? session.frozen_target
     : null;
   const approvedBracketPolicy = session?.summary.bracket_cleanup?.policy;
-  const bracketsApprovedForSelection = Boolean(
-    approvedBracketPolicy
-    && approvedBracketPolicy.risk_pct === selectedRisk
-    && approvedBracketPolicy.horizon_hours === selectedHorizon
-    && approvedBracketPolicy.entry_delay_minutes === selectedDelay
+  const bracketsApprovedForSelection = isApprovedBracketTarget(
+    approvedBracketPolicy,
+    selectedRisk,
+    selectedDelay,
+    selectedHorizon
   );
   const trainingEvaluation = session?.evaluation.slices?.training;
   const walkForwardEvaluation = session?.evaluation.slices?.walk_forward;
@@ -394,6 +403,14 @@ export function ResearchSignalDiscoveryPage() {
       fee_bps_per_side: createState.feeBps,
       slippage_bps_per_side: createState.slippageBps
     });
+  };
+
+  const submitAtlas = () => {
+    if (!session || atlasSubmissionRef.current || atlasMutation.isPending || activeJobId) {
+      return;
+    }
+    atlasSubmissionRef.current = true;
+    atlasMutation.mutate(session.session_id);
   };
 
   return (
@@ -505,12 +522,17 @@ export function ResearchSignalDiscoveryPage() {
                   </div>
                   <button
                     className="button button--secondary button--compact"
-                    disabled={jobRunning || session.target_version !== null && session.target_version !== undefined || !["draft", "atlas_ready", "failed"].includes(session.status)}
-                    onClick={() => atlasMutation.mutate(session.session_id)}
+                    disabled={shouldDisableAtlasRun({
+                      isSubmitting: atlasMutation.isPending,
+                      hasActiveJob: Boolean(activeJobId) || jobRunning,
+                      targetFrozen: session.target_version !== null && session.target_version !== undefined,
+                      status: session.status
+                    })}
+                    onClick={submitAtlas}
                     type="button"
                   >
-                    <Play aria-hidden="true" />
-                    {rSummaries.length ? "Rebuild Atlas" : "Run Atlas"}
+                    {atlasMutation.isPending ? <RefreshCw className="spin-icon" aria-hidden="true" /> : <Play aria-hidden="true" />}
+                    {atlasMutation.isPending ? "Starting Atlas" : rSummaries.length ? "Rebuild Atlas" : "Run Atlas"}
                   </button>
                 </header>
                 <div className="discovery-field-grid">
@@ -542,18 +564,68 @@ export function ResearchSignalDiscoveryPage() {
                 <DataTable
                   columns={[
                     { key: "risk", header: "R", render: (row) => <strong>{row.risk_pct}%</strong> },
-                    { key: "episodes", header: "Episodes", align: "right", render: (row) => formatNumber(primaryEpisodes(row)) },
+                    {
+                      key: "episodes",
+                      header: "Raw",
+                      align: "right",
+                      render: (row) => (
+                        <span className="discovery-atlas-bracket-metrics">
+                          <strong>{formatNumber(primaryEpisodes(row))} brackets</strong>
+                          <small>{formatOpportunityGap(row.primary?.max_opportunity_gap_minutes)} max gap</small>
+                        </span>
+                      )
+                    },
                     { key: "qualifying", header: "Qualifying", align: "right", render: (row) => formatNumber(row.primary?.qualifying_timestamp_count) },
                     { key: "neutral", header: "Neutral", align: "right", render: (row) => formatNumber(row.primary?.neutral_count) },
                     { key: "scenario", header: "Scenario", align: "right", render: (row) => `${row.primary_scenario?.entry_delay_minutes ?? "n/a"}m / ${row.primary_scenario?.horizon_hours ?? "n/a"}h` },
-                    { key: "cost", header: "Cost", align: "right", render: (row) => `${decimal(row.cost?.cost_in_r)}R` }
+                    { key: "cost", header: "Cost", align: "right", render: (row) => `${decimal(row.cost?.cost_in_r)}R` },
+                    {
+                      key: "brackets",
+                      header: "Approved",
+                      align: "center",
+                      render: (row) => {
+                        const approvedCount = getApprovedBracketCount(
+                          approvedBracketPolicy,
+                          row.risk_pct,
+                          session.summary.bracket_cleanup?.diagnostics
+                        );
+                        return approvedCount !== undefined ? (
+                          <span className="discovery-atlas-approved">
+                            <span className="discovery-atlas-bracket-metrics">
+                              <strong>{formatNumber(approvedCount)} brackets</strong>
+                              <small>{formatOpportunityGap(session.summary.bracket_cleanup?.diagnostics?.max_opportunity_gap_minutes)} max gap</small>
+                            </span>
+                            <StatusBadge tone="pass"><Check aria-hidden="true" /> Approved</StatusBadge>
+                          </span>
+                        ) : <span className="discovery-atlas-unapproved">—</span>;
+                      }
+                    },
+                    {
+                      key: "open",
+                      header: "",
+                      align: "right",
+                      render: (row) => (
+                        <button
+                          className="button button--secondary button--compact discovery-atlas-open-button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setSelectedRisk(row.risk_pct);
+                            setAtlasCandidate(row);
+                          }}
+                          onKeyDown={(event) => event.stopPropagation()}
+                          title={`Open ${row.risk_pct}% R bracket cleanup`}
+                          type="button"
+                        >
+                          Open
+                        </button>
+                      )
+                    }
                   ]}
                   rows={rSummaries}
                   getRowKey={(row) => String(row.risk_pct)}
                   getRowClassName={(row) => row.risk_pct === selectedRResult?.risk_pct ? "is-selected" : undefined}
                   onRowClick={(row) => {
                     setSelectedRisk(row.risk_pct);
-                    setAtlasCandidate(row);
                   }}
                   emptyLabel="Run the atlas to compare fixed R candidates."
                 />

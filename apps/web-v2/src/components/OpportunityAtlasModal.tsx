@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Check, Focus, RotateCcw, SlidersHorizontal, X } from "lucide-react";
+import { Check, Focus, LoaderCircle, RotateCcw, SlidersHorizontal, X } from "lucide-react";
 import {
   approveSignalDiscoveryBrackets,
   fetchSignalDiscoveryAtlasEpisode,
@@ -13,9 +13,11 @@ import {
 } from "../app/api";
 import {
   createDefaultBracketPolicy,
-  replaceActiveAtlasLane
+  replaceActiveAtlasLane,
+  shouldShowBracketPreviewLoading
 } from "../app/atlasVisualization";
 import { formatNumber, formatTimestamp } from "../app/format";
+import { formatOpportunityGap } from "../app/signalDiscovery";
 import { FieldRow } from "./FieldRow";
 import { OpportunityAtlasChart } from "./OpportunityAtlasChart";
 
@@ -76,7 +78,7 @@ export default function OpportunityAtlasModal({
     && approvedPolicy.risk_pct === candidate.risk_pct
     && approvedPolicy.entry_delay_minutes === selectedEntryDelayMinutes
     && approvedPolicy.horizon_hours === selectedHorizonHours
-      ? approvedPolicy
+      ? { ...defaultPolicy, ...approvedPolicy }
       : defaultPolicy
   ));
   const [previewPolicy, setPreviewPolicy] = useState<SignalDiscoveryBracketPolicy>(policy);
@@ -139,6 +141,10 @@ export default function OpportunityAtlasModal({
       )
     : [];
   const previewBrackets = previewQuery.data?.brackets;
+  const isPreviewUpdating = shouldShowBracketPreviewLoading(
+    Boolean(visualizationQuery.data),
+    previewQuery.isFetching
+  );
   const previewVisualization = useMemo(
     () => visualizationQuery.data && previewBrackets
       ? replaceActiveAtlasLane(
@@ -207,7 +213,7 @@ export default function OpportunityAtlasModal({
       && approvedPolicy.risk_pct === candidate.risk_pct
       && approvedPolicy.entry_delay_minutes === selectedEntryDelayMinutes
       && approvedPolicy.horizon_hours === selectedHorizonHours
-        ? approvedPolicy
+        ? { ...defaultPolicy, ...approvedPolicy }
         : defaultPolicy
     );
   }, [
@@ -279,11 +285,27 @@ export default function OpportunityAtlasModal({
           <span><strong>{primaryScenario?.entry_delay_minutes ?? "n/a"}m</strong> entry delay</span>
           <span><strong>{primaryScenario?.horizon_hours ?? "n/a"}h</strong> horizon</span>
           <span><strong>{formatNumber(diagnostics?.preview_total_brackets ?? candidate.primary?.episode_count)}</strong> brackets</span>
+          <span><strong>{formatOpportunityGap(diagnostics?.max_opportunity_gap_minutes ?? candidate.primary?.max_opportunity_gap_minutes)}</strong> max gap</span>
           <span><strong>{formatNumber(diagnostics?.preview_direction_counts.LONG ?? directionCounts.LONG)}</strong> long</span>
           <span><strong>{formatNumber(diagnostics?.preview_direction_counts.SHORT ?? directionCounts.SHORT)}</strong> short</span>
         </div>
         <div className="terminal-modal__body opportunity-atlas-modal__body has-inspector">
-          <div className="opportunity-atlas-modal__visualization">
+          <div
+            aria-busy={isPreviewUpdating}
+            className={`opportunity-atlas-modal__visualization${isPreviewUpdating ? " is-preview-updating" : ""}`}
+          >
+            {isPreviewUpdating ? (
+              <div
+                aria-live="polite"
+                className="opportunity-atlas-preview-loading"
+                role="status"
+              >
+                <div>
+                  <LoaderCircle aria-hidden="true" />
+                  <span>Updating brackets</span>
+                </div>
+              </div>
+            ) : null}
             {visualizationQuery.isPending ? (
               <div className="opportunity-atlas-chart-state">Loading atlas window…</div>
             ) : visualizationQuery.isError ? (
@@ -316,6 +338,7 @@ export default function OpportunityAtlasModal({
               <div>
                 <span className="eyebrow">Bracket Cleanup</span>
                 <h3>{previewQuery.isFetching ? "Updating preview" : "Opportunity target"}</h3>
+                <p>Shape noisy timestamp labels into continuous, repeatable opportunity windows.</p>
               </div>
               <SlidersHorizontal aria-hidden="true" />
             </header>
@@ -330,81 +353,150 @@ export default function OpportunityAtlasModal({
             </div>
 
             <div className="opportunity-atlas-cleanup__controls">
-              <label className="toggle-row">
-                <span>Require R stability</span>
-                <input
-                  checked={policy.require_r_stability}
-                  disabled={session.config.risk_values.length < 2 || session.status !== "atlas_ready"}
-                  onChange={(event) => setPolicy((current) => ({ ...current, require_r_stability: event.target.checked }))}
-                  type="checkbox"
-                />
-              </label>
-              <label className="toggle-row">
-                <span>Require delay stability</span>
-                <input
-                  checked={policy.require_delay_stability}
-                  disabled={session.config.entry_delays_minutes.length < 2 || session.status !== "atlas_ready"}
-                  onChange={(event) => setPolicy((current) => ({ ...current, require_delay_stability: event.target.checked }))}
-                  type="checkbox"
-                />
-              </label>
-              <label className="toggle-row">
-                <span>Bridge neutral gaps</span>
-                <input
-                  checked={policy.bridge_neutral_gap_intervals > 0}
-                  disabled={session.status !== "atlas_ready"}
-                  onChange={(event) => setPolicy((current) => ({
-                    ...current,
-                    bridge_neutral_gap_intervals: event.target.checked ? 1 : 0
-                  }))}
-                  type="checkbox"
-                />
-              </label>
-              {policy.bridge_neutral_gap_intervals > 0 ? (
-                <label className="slider-row">
-                  <span>Maximum gap <strong>{policy.bridge_neutral_gap_intervals * 5}m</strong></span>
+              <div className="opportunity-cleanup-control">
+                <div className="opportunity-cleanup-control__header">
+                  <label htmlFor="cleanup-r-stability">
+                    <strong>R stability</strong>
+                    <span>Keep timestamps whose direction agrees across nearby R levels.</span>
+                  </label>
                   <input
+                    aria-label="Require R stability"
+                    checked={policy.require_r_stability}
+                    className="opportunity-cleanup-switch"
+                    disabled={session.config.risk_values.length < 2 || session.status !== "atlas_ready"}
+                    id="cleanup-r-stability"
+                    onChange={(event) => setPolicy((current) => ({ ...current, require_r_stability: event.target.checked }))}
+                    type="checkbox"
+                  />
+                </div>
+                <label className="opportunity-cleanup-slider" htmlFor="cleanup-r-radius">
+                  <span>Neighbor radius <strong>{policy.r_stability_radius} R {policy.r_stability_radius === 1 ? "step" : "steps"}</strong></span>
+                  <input
+                    disabled={!policy.require_r_stability || session.config.risk_values.length < 2 || session.status !== "atlas_ready"}
+                    id="cleanup-r-radius"
+                    max={Math.min(3, Math.max(1, session.config.risk_values.length - 1))}
+                    min={1}
+                    onChange={(event) => setPolicy((current) => ({ ...current, r_stability_radius: Number(event.target.value) }))}
+                    type="range"
+                    value={Math.min(policy.r_stability_radius, Math.max(1, session.config.risk_values.length - 1))}
+                  />
+                </label>
+              </div>
+
+              <div className="opportunity-cleanup-control">
+                <div className="opportunity-cleanup-control__header">
+                  <label htmlFor="cleanup-delay-stability">
+                    <strong>Delay stability</strong>
+                    <span>Require the same direction across enough entry-delay scenarios.</span>
+                  </label>
+                  <input
+                    aria-label="Require delay stability"
+                    checked={policy.require_delay_stability}
+                    className="opportunity-cleanup-switch"
+                    disabled={session.config.entry_delays_minutes.length < 2 || session.status !== "atlas_ready"}
+                    id="cleanup-delay-stability"
+                    onChange={(event) => setPolicy((current) => ({ ...current, require_delay_stability: event.target.checked }))}
+                    type="checkbox"
+                  />
+                </div>
+                <label className="opportunity-cleanup-slider" htmlFor="cleanup-delay-agreement">
+                  <span>Required agreement <strong>{policy.delay_agreement_pct}%</strong></span>
+                  <input
+                    disabled={!policy.require_delay_stability || session.config.entry_delays_minutes.length < 2 || session.status !== "atlas_ready"}
+                    id="cleanup-delay-agreement"
+                    max={100}
+                    min={50}
+                    onChange={(event) => setPolicy((current) => ({ ...current, delay_agreement_pct: Number(event.target.value) }))}
+                    step={5}
+                    type="range"
+                    value={policy.delay_agreement_pct}
+                  />
+                </label>
+              </div>
+
+              <div className="opportunity-cleanup-control">
+                <div className="opportunity-cleanup-control__header">
+                  <label htmlFor="cleanup-neutral-gaps">
+                    <strong>Bridge neutral gaps</strong>
+                    <span>Join matching brackets separated only by a brief neutral patch.</span>
+                  </label>
+                  <input
+                    aria-label="Bridge neutral gaps"
+                    checked={policy.bridge_neutral_gap_intervals > 0}
+                    className="opportunity-cleanup-switch"
+                    disabled={session.status !== "atlas_ready"}
+                    id="cleanup-neutral-gaps"
+                    onChange={(event) => setPolicy((current) => ({
+                      ...current,
+                      bridge_neutral_gap_intervals: event.target.checked ? 1 : 0
+                    }))}
+                    type="checkbox"
+                  />
+                </div>
+                <label className="opportunity-cleanup-slider" htmlFor="cleanup-neutral-gap-duration">
+                  <span>Maximum gap <strong>{Math.max(1, policy.bridge_neutral_gap_intervals) * 5}m</strong></span>
+                  <input
+                    disabled={policy.bridge_neutral_gap_intervals === 0 || session.status !== "atlas_ready"}
+                    id="cleanup-neutral-gap-duration"
                     max={12}
                     min={1}
                     onChange={(event) => setPolicy((current) => ({ ...current, bridge_neutral_gap_intervals: Number(event.target.value) }))}
                     type="range"
-                    value={policy.bridge_neutral_gap_intervals}
+                    value={Math.max(1, policy.bridge_neutral_gap_intervals)}
                   />
                 </label>
-              ) : null}
-              <label className="toggle-row">
-                <span>Minimum persistence</span>
-                <input
-                  checked={policy.minimum_persistence_timestamps > 1}
-                  disabled={session.status !== "atlas_ready"}
-                  onChange={(event) => setPolicy((current) => ({
-                    ...current,
-                    minimum_persistence_timestamps: event.target.checked ? 2 : 1
-                  }))}
-                  type="checkbox"
-                />
-              </label>
-              {policy.minimum_persistence_timestamps > 1 ? (
-                <label className="slider-row">
-                  <span>Minimum span <strong>{policy.minimum_persistence_timestamps * 5}m</strong></span>
+              </div>
+
+              <div className="opportunity-cleanup-control">
+                <div className="opportunity-cleanup-control__header">
+                  <label htmlFor="cleanup-persistence">
+                    <strong>Minimum persistence</strong>
+                    <span>Remove brackets that do not last for a meaningful continuous span.</span>
+                  </label>
                   <input
+                    aria-label="Require minimum persistence"
+                    checked={policy.minimum_persistence_timestamps > 1}
+                    className="opportunity-cleanup-switch"
+                    disabled={session.status !== "atlas_ready"}
+                    id="cleanup-persistence"
+                    onChange={(event) => setPolicy((current) => ({
+                      ...current,
+                      minimum_persistence_timestamps: event.target.checked ? 2 : 1
+                    }))}
+                    type="checkbox"
+                  />
+                </div>
+                <label className="opportunity-cleanup-slider" htmlFor="cleanup-persistence-duration">
+                  <span>Minimum span <strong>{Math.max(2, policy.minimum_persistence_timestamps) * 5}m</strong></span>
+                  <input
+                    disabled={policy.minimum_persistence_timestamps === 1 || session.status !== "atlas_ready"}
+                    id="cleanup-persistence-duration"
                     max={24}
                     min={2}
                     onChange={(event) => setPolicy((current) => ({ ...current, minimum_persistence_timestamps: Number(event.target.value) }))}
                     type="range"
-                    value={policy.minimum_persistence_timestamps}
+                    value={Math.max(2, policy.minimum_persistence_timestamps)}
                   />
                 </label>
-              ) : null}
-              <label className="toggle-row">
-                <span>One active opportunity</span>
-                <input
-                  checked={policy.one_active_opportunity}
-                  disabled={session.status !== "atlas_ready"}
-                  onChange={(event) => setPolicy((current) => ({ ...current, one_active_opportunity: event.target.checked }))}
-                  type="checkbox"
-                />
-              </label>
+              </div>
+
+              <div className="opportunity-cleanup-control is-compact">
+                <div className="opportunity-cleanup-control__header">
+                  <label htmlFor="cleanup-one-active">
+                    <strong>One active opportunity</strong>
+                    <span>Suppress new brackets until the prior opportunity resolves.</span>
+                  </label>
+                  <input
+                    aria-label="Allow one active opportunity"
+                    checked={policy.one_active_opportunity}
+                    className="opportunity-cleanup-switch"
+                    disabled={session.status !== "atlas_ready"}
+                    id="cleanup-one-active"
+                    onChange={(event) => setPolicy((current) => ({ ...current, one_active_opportunity: event.target.checked }))}
+                    type="checkbox"
+                  />
+                </div>
+              </div>
             </div>
 
             {previewQuery.isError ? (

@@ -4,7 +4,7 @@
 
 Create a new `vegas_5m_cluster_v6` signal engine and paired base strategy without changing `vegas_5m_cluster_v5` behavior.
 
-V6 preserves the causal 5m Vegas EMA cluster trigger, replaces the strategy's 1d EMA confirmation with 12h context, and adds completed plus forming 1d Bollinger evidence to the neutral packet. Bollinger evidence is observational in the initial base strategy: it is exposed for later Stage 1 research but cannot change the initial direction or entry decision.
+V6 preserves the causal 5m Vegas EMA cluster trigger, replaces the strategy's 1d EMA confirmation with 12h context, and adds completed plus forming 1d Bollinger evidence and a compact completed 15m open-interest regime snapshot to the neutral packet. Bollinger and open-interest evidence are observational in the initial base strategy: they are exposed for later Stage 1 research but cannot change the initial direction or entry decision.
 
 ## Scope
 
@@ -14,6 +14,7 @@ V6 includes:
 - A two-hour dedupe window by default.
 - Causal `2h`, `8h`, and `12h` completed and forming candle context.
 - Causal completed 1d Bollinger rows and one provisional forming 1d Bollinger row.
+- One latest causal completed `feature_open_interest_regime` 15m snapshot.
 - Canonical signal availability and reference-price evidence.
 - A paired strategy that replaces v5's 1d directional logic with equivalent 12h logic.
 - Registry, runtime, packet, strategy, consumer-contract, extension-parity, and point-in-time tests.
@@ -35,6 +36,8 @@ The registry entry declares:
 - Derived EMA-enriched `2h`, `8h`, and `12h` candles for strategy context.
 - Derived 1d candles used only to establish the existing daily bucket anchor, completed daily closes, and the forming daily bucket.
 - Derived `feature_bollinger` 1d rows with `bb_mid_20`, `bb_upper_20_2`, `bb_lower_20_2`, `bb_position_pct`, `bb_bandwidth_pct`, and `bb_zscore`.
+- Raw confirmed Binance 5m open-interest rows and their completed derived 15m aggregates.
+- Derived `feature_open_interest_regime` 15m rows with 2h, 8h, and 24h OI returns, a trailing 7d 2h-change z-score, the general long/short ratio, and the 2h average taker long/short ratio.
 
 The implementation deliberately preserves the repository's existing HTF bucket shape. Training and live scans rebuild and consume the same anchored buckets from the same canonical 5m history. The anchor need not match native OKX chart boundaries to remain causal, but it must remain stable between training and live generation.
 
@@ -68,7 +71,8 @@ Training generation and live scanning call one shared packet builder.
 6. Select completed 1d Bollinger rows whose source daily candle close is at or before `signal_available_at`.
 7. Aggregate the current forming daily candle using the same anchor as the existing derived 1d series.
 8. Calculate one provisional Bollinger slice using the latest 19 completed daily closes plus the forming daily close.
-9. Build and validate a neutral `signal_packet.v2` packet.
+9. Select the latest completed 15m open-interest regime row whose explicit `available_at` is at or before signal availability.
+10. Build and validate a neutral `signal_packet.v2` packet.
 
 Indexes and rolling state must avoid scanning full history for every event. Full-window training generation must remain linear or near-linear in input row count.
 
@@ -131,6 +135,8 @@ The final row may be forming. Its `available_at` equals `signal_available_at`, a
 
 The packet remains neutral. It contains no direction, confidence, action, sizing, leverage, TP, SL, or Bollinger-derived recommendation.
 
+The packet also contains one compact `evidence.derived_features.open_interest_regime` snapshot. It carries source, timeframe, source-window, completeness, and availability metadata plus the six registered feature values. It does not contain a raw 5m OI chart or duplicate feature history.
+
 ## Paired Strategy
 
 Add `vegas_ema_5m_hft_v6_base.py` rather than modifying the v5 strategy.
@@ -143,7 +149,8 @@ The initial v6 strategy:
 - Keeps the existing numeric thresholds initially so the first comparison isolates the timeframe substitution rather than combining it with threshold optimization.
 - Retains v5's 8h logic.
 - Reads and reports the latest completed and forming Bollinger values in diagnostics when present.
-- Does not use Bollinger values to select `LONG`, `SHORT`, `ENTER`, or `SKIP`.
+- Reads and reports the latest open-interest regime snapshot in diagnostics when present.
+- Does not use Bollinger or open-interest values to select `LONG`, `SHORT`, `ENTER`, or `SKIP`.
 - Does not fail solely because optional Bollinger diagnostics are unavailable after the engine packet has otherwise passed validation; engine generation itself remains strict about its declared dependency.
 
 Future Stage 1 iterations may test a Bollinger mean-reversion override, but that rule is outside this build.
@@ -155,7 +162,7 @@ Register `vegas_5m_cluster_v6` with:
 - Version `0.1`.
 - Runtime and live scanner entrypoints in the new v6 module.
 - Default context timeframes `2h`, `8h`, and `12h`.
-- Context mode `candles_only_integrated_forming_with_bollinger_1d`.
+- Context mode `candles_only_integrated_forming_with_bollinger_1d_and_oi_regime`.
 - The existing proximity, vote, context-bar, and dedupe defaults.
 - `code_ref.base_strategy_path` pointing to the new v6 strategy.
 
@@ -169,6 +176,7 @@ Generation blocks with a specific error when:
 - A required `2h`, `8h`, or `12h` context dataset is absent.
 - The source 1d candle dataset is absent.
 - The 1d Bollinger feature dataset is absent or lacks required columns.
+- The 15m open-interest regime feature dataset is absent or lacks required columns.
 - A trigger reference price is zero or invalid.
 
 Insufficient Bollinger warmup omits only the provisional row; it does not fabricate zero bands.
@@ -194,6 +202,7 @@ Tests are written before implementation and must cover:
 15. V6 strategy returns the same decision when only Bollinger values are changed, proving Bollinger is diagnostic-only initially.
 16. Missing required datasets produce explicit blocked errors.
 17. API catalog includes the registry-only engine with zero signal and packet counts.
+18. OI feature selection uses explicit availability, excludes future mutations, and cannot change the initial strategy decision.
 
 Focused runtime, strategy, registry, API, and packet-audit tests run before the full Python test suite.
 

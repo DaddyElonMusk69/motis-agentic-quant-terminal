@@ -195,6 +195,7 @@ def test_r_feasibility_summary_reports_episodes_sensitivity_and_cost() -> None:
 
     assert summary["primary"]["qualifying_timestamp_count"] == 3
     assert summary["primary"]["episode_count"] == 2
+    assert summary["primary"]["max_opportunity_gap_minutes"] == 5
     assert summary["primary"]["direction_counts"] == {"LONG": 2, "SHORT": 1}
     assert summary["primary"]["monthly_episode_counts"] == {"2026-01": 2}
     assert summary["primary"]["ambiguous_count"] == 1

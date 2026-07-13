@@ -1,72 +1,32 @@
-# BTC Outcome-First Signal Engine Implementation Plan
+# BTC Episode-Level Signal Engine Research Decision
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+**Goal:** Determine whether authorized BTC training episodes support a causal neutral engine near 80% emitted-episode precision and 80% distinct approved-bracket coverage.
 
-**Goal:** Determine whether authorized BTC training evidence supports one stable causal event engine, then implement and verify exactly one candidate or document rejection.
+**Decision:** Research gate failed. Do not implement or register an engine for session `discovery-btc-2025-03-01-2026-05-30-mrhdyqd1`.
 
-**Architecture:** A disposable research harness reads only frozen training artifacts and manifest-authorized rows, constructs causal features, and evaluates deduped event leaves. A surviving rule is reimplemented in one worker adapter with a shared historical/live packet builder and one paired strategy; production code never reads discovery outcomes.
+## Completed Work
 
-**Tech Stack:** Python 3, PyArrow, pandas/numpy where already available, pytest, Motis strategy SDK and worker runtime.
+- [x] Replaced mixed timestamp/bracket scoring with deterministic emitted episodes and one-to-one episode/bracket matching.
+- [x] Fixed the episode rule at six quiet 5m intervals from the frozen bracket policy; no outcome-tuned grace window or second cooldown is used.
+- [x] Verified the evaluator oracle supports 100% episode precision and 91.52% bracket coverage, so roughly 80/80 is structurally feasible.
+- [x] Weighted each approved bracket and each contiguous matched hard-negative episode as one independent fitting unit.
+- [x] Kept complete episodes together and purged the 36-hour outcome horizon at internal chronological boundaries.
+- [x] Re-ran compression/release, OI, sweep, bounded-tree, Extra Trees, leaf-budget, capacity, sensitivity, monthly, block, cadence, and ablation diagnostics.
+- [x] Preserved all walk-forward, validation, locked OOS, live outcomes, and post-cutoff rows as sealed.
 
----
+## Build Gate Result
 
-### Task 1: Validate Evidence Semantics
+The old OI anchor rescored at 43.36% episode precision and 8.66% bracket coverage.
 
-**Files:**
-- Read: `dev/signal_discovery_sessions/discovery-btc-2025-03-01-2026-05-30-mrhdyqd1/target/frozen_target.json`
-- Read: `dev/signal_discovery_sessions/discovery-btc-2025-03-01-2026-05-30-mrhdyqd1/evidence/evidence_manifest.json`
-- Create or modify: `dev/signal_discovery_sessions/discovery-btc-2025-03-01-2026-05-30-mrhdyqd1/prompt/engine_research_rationale.md`
+The best balanced purged OOF model scored 25.27% episode precision and 37.81% coverage with episode-weighted AUC 0.5191. The best balanced full-training bounded tree scored 33.73% precision and 35.34% coverage. Larger trees raised coverage only by emitting many unmatched episodes; a representative 512-leaf/minimum-25 tree scored 20.52% precision and 75.09% coverage.
 
-- [ ] Inspect schemas, timestamp ranges, confirmation semantics, and row counts without reading held-out artifacts.
-- [ ] Verify every market source is filtered at `research_end` row-by-row.
-- [ ] Record dataset ids, examined columns, availability semantics, and any rejected derived sources.
+The prior 81.67% precision / 79.86% coverage result is retired because its precision numerator and denominator were deduped timestamps while coverage was counted in distinct brackets. It did not measure the requested episode-level objective.
 
-### Task 2: Research Causal Hypotheses
+## Closed Implementation Tasks
 
-**Files:**
-- Create temporary analysis code only under `/tmp`.
-- Modify: `dev/signal_discovery_sessions/discovery-btc-2025-03-01-2026-05-30-mrhdyqd1/prompt/engine_research_rationale.md`
+- [x] Do not create candidate contract tests; no candidate passed the episode-level research gate.
+- [x] Do not create a worker adapter or paired strategy.
+- [x] Do not modify `artifacts/signal_engine/engine_registry.json` for this session.
+- [x] Do not run packet, Stage 1, API catalog, or live scanner verification for a nonexistent candidate.
 
-- [ ] Build episode-level and matched-negative feature summaries for compression/release, OI flush/trap, and candle-only sweep families.
-- [ ] Evaluate broad thresholds across chronological blocks and months using final deduped streams.
-- [ ] If needed, broaden to causal resampling, trends, z-scores, accelerations, and interactions while keeping bounded complexity.
-- [ ] Reject brittle leaves; document perturbation, overlap, ablation, recurrence, cadence, and drought results.
-- [ ] Decide build versus rejection without inspecting walk-forward evidence.
-
-### Task 3: Write Candidate Contract Tests
-
-**Files:**
-- Create: `tests/test_btc_causal_regime_v1.py` if the build gate passes.
-- Modify: `tests/test_api.py` only if catalog coverage requires a candidate-specific assertion.
-
-- [ ] Add a failing registry/spec test for the selected engine id and strategy path.
-- [ ] Add failing tests for neutral packet fields, reference prices, causal timestamps, deterministic generation, live parity, and seeded cadence.
-- [ ] Add failing canonical-wrapper and paired-strategy tests using real training and live packets.
-- [ ] Add a failing Stage 1 scorer compatibility test.
-- [ ] Run focused tests and confirm failures are caused by the missing candidate implementation.
-
-### Task 4: Implement One Candidate
-
-**Files:**
-- Create: `apps/worker/src/quant_terminal_worker/signal_engines/btc_causal_regime_v1.py`
-- Create: `packages/strategy_modules/src/quant_terminal_strategies/btc_causal_regime_v1_base.py`
-- Modify: `artifacts/signal_engine/engine_registry.json`
-
-- [ ] Implement the minimal shared causal scanner and neutral packet builder needed by the tests.
-- [ ] Implement historical and latest-confirmed-candle entrypoints with identical feature and event semantics.
-- [ ] Implement the directional strategy against `context["signal"]["payload"]`.
-- [ ] Add the registry entry without changing existing engine behavior or reverting user edits.
-- [ ] Run focused tests until green, then refactor without changing behavior.
-
-### Task 5: Direct Training Evaluation and Contract Verification
-
-**Files:**
-- Modify: `dev/signal_discovery_sessions/discovery-btc-2025-03-01-2026-05-30-mrhdyqd1/prompt/engine_research_rationale.md`
-
-- [ ] Generate the final deduped training stream from canonical Parquet.
-- [ ] Run packet contract audit on a representative emitted packet.
-- [ ] Score coverage and direction directly against the frozen target using training labels only.
-- [ ] Report episode precision/recall, timestamp coverage, hard-negative rate, expected net R, monthly/block stability, cadence, drought, duplicates, and per-leaf diagnostics.
-- [ ] Run focused engine, evaluator, API catalog, and Stage 1 scorer tests.
-- [ ] Run `pytest -q` and record any unrelated pre-existing failures separately.
-- [ ] Verify `GET /api/v1/signal-engines` after restarting the backend when practical.
+The complete episode contract, evidence inventory, causal proof, frontier, stability diagnostics, and rejection rationale are recorded in `dev/signal_discovery_sessions/discovery-btc-2025-03-01-2026-05-30-mrhdyqd1/prompt/engine_research_rationale.md`.

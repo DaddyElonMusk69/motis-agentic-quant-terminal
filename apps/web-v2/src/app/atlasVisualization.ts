@@ -28,7 +28,9 @@ export type AtlasBracketPolicy = {
   entry_delay_minutes: number;
   horizon_hours: number;
   require_r_stability: boolean;
+  r_stability_radius: number;
   require_delay_stability: boolean;
+  delay_agreement_pct: number;
   bridge_neutral_gap_intervals: number;
   minimum_persistence_timestamps: number;
   one_active_opportunity: boolean;
@@ -44,11 +46,20 @@ export function createDefaultBracketPolicy(
     entry_delay_minutes: entryDelayMinutes,
     horizon_hours: horizonHours,
     require_r_stability: false,
+    r_stability_radius: 1,
     require_delay_stability: false,
+    delay_agreement_pct: 100,
     bridge_neutral_gap_intervals: 0,
     minimum_persistence_timestamps: 1,
     one_active_opportunity: false
   };
+}
+
+export function shouldShowBracketPreviewLoading(
+  hasVisualization: boolean,
+  isPreviewFetching: boolean
+): boolean {
+  return hasVisualization && isPreviewFetching;
 }
 
 export function replaceActiveAtlasLane<

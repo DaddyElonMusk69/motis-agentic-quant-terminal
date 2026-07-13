@@ -363,6 +363,33 @@ def build_opportunity_episodes(
     return episodes
 
 
+def max_opportunity_gap_minutes(
+    *,
+    eligible_timestamps: Sequence[Any],
+    brackets: Sequence[Mapping[str, Any]],
+    cadence_minutes: int = 5,
+) -> int:
+    if cadence_minutes <= 0:
+        raise ValueError("cadence_minutes must be positive")
+    eligible = sorted({_coerce_timestamp(value) for value in eligible_timestamps})
+    if not eligible:
+        return 0
+    opportunity_timestamps = {
+        _coerce_timestamp(timestamp)
+        for bracket in brackets
+        for timestamp in bracket.get("member_timestamps", ())
+    }
+    longest = 0
+    current = 0
+    for timestamp in eligible:
+        if timestamp in opportunity_timestamps:
+            current = 0
+            continue
+        current += 1
+        longest = max(longest, current)
+    return longest * cadence_minutes
+
+
 def summarize_r_candidate(
     *,
     scenario_results: Mapping[tuple[int, float], Sequence[Mapping[str, Any]]],
@@ -666,6 +693,10 @@ def _scenario_summary(labels: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "timestamp_count": len(labels),
         "qualifying_timestamp_count": sum(direction_counts.values()),
         "episode_count": len(episodes),
+        "max_opportunity_gap_minutes": max_opportunity_gap_minutes(
+            eligible_timestamps=[row["decision_ts"] for row in labels],
+            brackets=episodes,
+        ),
         "direction_counts": direction_counts,
         "monthly_episode_counts": monthly_episode_counts,
         "neutral_count": sum(

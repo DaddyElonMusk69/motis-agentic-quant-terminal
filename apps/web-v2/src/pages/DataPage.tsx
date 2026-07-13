@@ -44,7 +44,8 @@ const FEATURE_CATEGORIES = [
   { dataType: "feature_volume", family: "volume", label: "Volume" },
   { dataType: "feature_ema_vegas_structure", family: "ema_vegas_structure", label: "EMA / Vegas Structure" },
   { dataType: "feature_bollinger", family: "bollinger", label: "Bollinger Context" },
-  { dataType: "feature_regime_momentum", family: "regime_momentum", label: "Regime / Momentum" }
+  { dataType: "feature_regime_momentum", family: "regime_momentum", label: "Regime / Momentum" },
+  { dataType: "feature_open_interest_regime", family: "open_interest_regime", label: "Open Interest Regime" }
 ] as const;
 
 const DATA_TYPE_PRIORITY = new Map<string, number>([

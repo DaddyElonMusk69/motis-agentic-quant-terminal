@@ -36,6 +36,10 @@ from quant_terminal_worker.adapters.okx import OKXAdapter
 from quant_terminal_worker.backtests.stage1 import run_stage1_backtest
 from quant_terminal_worker.ingestion.ema_enrichment import enrich_derived_ema_datasets
 from quant_terminal_worker.ingestion.feature_enrichment import enrich_feature_family_datasets
+from quant_terminal_worker.ingestion.open_interest_feature_enrichment import (
+    FEATURE_FAMILY as OPEN_INTEREST_FEATURE_FAMILY,
+    enrich_open_interest_regime_datasets,
+)
 from quant_terminal_worker.ingestion.binance_open_interest import fill_raw_open_interest_dataset
 from quant_terminal_worker.ingestion.raw_candle_fill import fill_raw_candle_dataset
 from quant_terminal_worker.ingestion.legacy_signals import import_legacy_signal_sets
@@ -196,7 +200,9 @@ class SignalDiscoveryBracketPolicyRequest(BaseModel):
     entry_delay_minutes: int = Field(ge=0)
     horizon_hours: int = Field(gt=0)
     require_r_stability: bool = False
+    r_stability_radius: int = Field(default=1, ge=1, le=3)
     require_delay_stability: bool = False
+    delay_agreement_pct: int = Field(default=100, ge=50, le=100)
     bridge_neutral_gap_intervals: int = Field(default=0, ge=0, le=12)
     minimum_persistence_timestamps: int = Field(default=1, ge=1, le=24)
     one_active_opportunity: bool = False
@@ -3004,6 +3010,12 @@ def create_app(
         )
         if queued:
             return queued
+        if family == OPEN_INTEREST_FEATURE_FAMILY:
+            return enrich_open_interest_regime_datasets(
+                repository=get_market_data_repository(),
+                asset=asset,
+                target_root=Path(".data/market-data"),
+            )
         return enrich_feature_family_datasets(
             repository=get_market_data_repository(),
             asset=asset,

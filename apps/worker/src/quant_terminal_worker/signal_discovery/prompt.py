@@ -149,6 +149,16 @@ def _render_engine_builder_prompt(
             "mechanism that can be detected with information available at signal time. Compare opportunity "
             "episodes with their matched hard negatives, inspect stability across broad recurring buckets, "
             "and distinguish an economic mechanism from a coincidental feature threshold.",
+            "Treat the approved brackets as opportunity regions, not a checklist. The engine need not hit every approved bracket "
+            "or every timestamp inside one. Seek a sparse subset whose final emitted, deduped signal stream lands in approved "
+            "opportunity regions with strong precision, low hard-negative rate, stable cadence, and broad recurrence. Episode "
+            "recall is a coverage diagnostic, not an objective to maximize; do not weaken triggers or emit repeatedly merely to raise recall.",
+            "Use only the temporal tolerance declared by the frozen target or evaluator. If none is declared, matching requires the "
+            "canonical signal availability timestamp to fall inside the bracket; do not infer a grace window from outcomes.",
+            "Data mining and a bounded conditional tree are allowed. The engine may use multiple OR-composed leaves for distinct "
+            "causal regimes instead of one universal rule, and the paired strategy may use separate conditional leaves for direction. "
+            "Require each leaf to have coherent causal meaning, minimum independent episode support, nearby-threshold stability, and "
+            "recurrence across internal chronological blocks. Prune brittle, redundant, date-specific, or unsupported leaves.",
             "",
             f"Write your evidence, competing hypotheses, stability checks, and decision to `{rationale_path}`. "
             "Reject the engine hypothesis when no coherent causal mechanism recurs; rejection is a valid "
@@ -172,7 +182,9 @@ def _render_engine_builder_prompt(
             "- Run engine registry, neutral packet, paired-strategy, canonical wrapper, packet-consumer, and Stage 1 scorer contract tests.",
             "- Score event timestamp coverage and direction directly against the frozen fixed-R target using only the authorized training labels.",
             "- Report episode-level precision/recall, timestamp coverage, hard-negative false-positive rate, "
-            "monthly stability, cadence, and duplicate/overlap behavior. Do not optimize only aggregate accuracy.",
+            "monthly stability, cadence, signal drought, and duplicate/overlap behavior. Score the final emitted, deduped stream; "
+            "do not optimize only aggregate accuracy or exhaustive recall.",
+            "- Report per-leaf support, precision, hard-negative rate, chronological-block stability, overlap, ablation value, and threshold sensitivity.",
             "- Do not change the fixed target, its barrier semantics, entry delay, holding horizon, costs, or split boundaries.",
             "- Do not claim walk-forward performance. The terminal will run held-out evaluation after the engine id is attached.",
             "",

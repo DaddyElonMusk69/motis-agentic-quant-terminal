@@ -4,13 +4,19 @@ import test from "node:test";
 import {
   buildDiscoveryTickers,
   buildRiskGrid,
+  formatOpportunityGap,
   formatRiskGrid,
+  getApprovedBracketCount,
+  isApprovedBracketRisk,
+  isApprovedBracketTarget,
+  shouldDisableAtlasRun,
   isValidRewardMultiple
 } from "../src/app/signalDiscovery.ts";
 import {
   atlasChartPalette,
   clipEpisodeToRange,
   createDefaultBracketPolicy,
+  shouldShowBracketPreviewLoading,
   episodeFill,
   positionEpisodeOnLogicalRange,
   replaceActiveAtlasLane,
@@ -34,6 +40,35 @@ test("discovery target multiple accepts only finite positive values", () => {
   assert.equal(isValidRewardMultiple(-1), false);
   assert.equal(isValidRewardMultiple(Number.NaN), false);
   assert.equal(isValidRewardMultiple(Number.POSITIVE_INFINITY), false);
+});
+
+test("approved bracket policy marks its R candidate and exact freeze target", () => {
+  const policy = {
+    risk_pct: 1,
+    entry_delay_minutes: 10,
+    horizon_hours: 48
+  };
+
+  assert.equal(isApprovedBracketRisk(policy, 1), true);
+  assert.equal(isApprovedBracketRisk(policy, 1.1), false);
+  assert.equal(isApprovedBracketRisk(undefined, 1), false);
+  assert.equal(isApprovedBracketTarget(policy, 1, 10, 48), true);
+  assert.equal(isApprovedBracketTarget(policy, 1, 5, 48), false);
+  assert.equal(getApprovedBracketCount(policy, 1, { preview_total_brackets: 42 }), 42);
+  assert.equal(getApprovedBracketCount(policy, 1.1, { preview_total_brackets: 42 }), undefined);
+});
+
+test("opportunity gaps use compact day hour minute labels", () => {
+  assert.equal(formatOpportunityGap(undefined), "n/a");
+  assert.equal(formatOpportunityGap(5), "5m");
+  assert.equal(formatOpportunityGap(65), "1h 5m");
+  assert.equal(formatOpportunityGap(1500), "1d 1h");
+});
+
+test("atlas run disables immediately while submission is pending", () => {
+  assert.equal(shouldDisableAtlasRun({ isSubmitting: true, hasActiveJob: false, targetFrozen: false, status: "failed" }), true);
+  assert.equal(shouldDisableAtlasRun({ isSubmitting: false, hasActiveJob: true, targetFrozen: false, status: "failed" }), true);
+  assert.equal(shouldDisableAtlasRun({ isSubmitting: false, hasActiveJob: false, targetFrozen: false, status: "failed" }), false);
 });
 
 test("formatRiskGrid compacts ranges without mislabeling legacy grids", () => {
@@ -114,11 +149,19 @@ test("default bracket policy preserves raw cleanup behavior", () => {
     entry_delay_minutes: 5,
     horizon_hours: 36,
     require_r_stability: false,
+    r_stability_radius: 1,
     require_delay_stability: false,
+    delay_agreement_pct: 100,
     bridge_neutral_gap_intervals: 0,
     minimum_persistence_timestamps: 1,
     one_active_opportunity: false
   });
+});
+
+test("bracket preview loading veil only appears over an existing chart", () => {
+  assert.equal(shouldShowBracketPreviewLoading(false, true), false);
+  assert.equal(shouldShowBracketPreviewLoading(true, false), false);
+  assert.equal(shouldShowBracketPreviewLoading(true, true), true);
 });
 
 test("bracket preview replaces only the active scenario lane", () => {

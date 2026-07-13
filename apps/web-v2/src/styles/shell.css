@@ -5285,6 +5285,46 @@
   margin-bottom: var(--space-2);
 }
 
+.discovery-atlas-unapproved {
+  color: var(--ink-faint);
+}
+
+.discovery-atlas-approved {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+  justify-content: center;
+  white-space: nowrap;
+}
+
+.discovery-atlas-bracket-metrics {
+  display: inline-grid;
+  gap: 2px;
+  white-space: nowrap;
+}
+
+.discovery-atlas-bracket-metrics > strong {
+  color: var(--ink-primary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.discovery-atlas-bracket-metrics > small {
+  color: var(--ink-muted);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.discovery-atlas-open-button {
+  min-width: 52px;
+}
+
+.discovery-atlas-approved .status-badge svg {
+  height: 11px;
+  margin-right: 4px;
+  width: 11px;
+}
+
 .has-modal-open {
   overflow: hidden;
 }
@@ -5341,7 +5381,7 @@
 }
 
 .terminal-modal__body.opportunity-atlas-modal__body.has-inspector {
-  grid-template-columns: minmax(0, 1fr) 310px;
+  grid-template-columns: minmax(0, 1fr) 328px;
 }
 
 .opportunity-atlas-modal__visualization {
@@ -5349,6 +5389,55 @@
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
+  position: relative;
+}
+
+.opportunity-atlas-modal__visualization.is-preview-updating > :not(.opportunity-atlas-preview-loading) {
+  pointer-events: none;
+}
+
+.opportunity-atlas-preview-loading {
+  align-items: center;
+  backdrop-filter: blur(1px);
+  background: color-mix(in oklch, var(--surface-base) 32%, transparent);
+  cursor: progress;
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  position: absolute;
+  z-index: 8;
+}
+
+.opportunity-atlas-preview-loading > div {
+  align-items: center;
+  background: color-mix(in oklch, var(--surface-panel) 90%, transparent);
+  border: 1px solid var(--line-subtle);
+  border-radius: 5px;
+  box-shadow: var(--shadow-soft);
+  color: var(--ink-primary);
+  display: flex;
+  font-size: 11px;
+  font-weight: 650;
+  gap: 8px;
+  padding: 7px 10px;
+}
+
+.opportunity-atlas-preview-loading svg {
+  animation: opportunity-atlas-spin 800ms linear infinite;
+  height: 14px;
+  width: 14px;
+}
+
+@keyframes opportunity-atlas-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .opportunity-atlas-preview-loading svg {
+    animation: none;
+  }
 }
 
 .opportunity-atlas-chart {
@@ -5491,6 +5580,14 @@
   margin: 3px 0 0;
 }
 
+.opportunity-atlas-inspector > header p {
+  color: var(--ink-muted);
+  font-size: 10px;
+  line-height: 1.45;
+  margin: 7px 0 0;
+  max-width: 250px;
+}
+
 .opportunity-atlas-inspector > header svg {
   color: var(--ink-muted);
   height: 16px;
@@ -5515,12 +5612,15 @@
   border-bottom: 1px solid var(--line-subtle);
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2px;
   padding-bottom: var(--space-3);
 }
 
 .opportunity-atlas-cleanup__counts > div {
+  background: color-mix(in oklch, var(--surface-muted) 58%, transparent);
+  border-radius: 4px;
   min-width: 0;
-  padding: 5px 6px;
+  padding: 6px 7px;
 }
 
 .opportunity-atlas-cleanup__counts strong,
@@ -5537,50 +5637,128 @@
   color: var(--ink-muted);
   font-size: 9px;
   margin-top: 2px;
-  text-transform: uppercase;
 }
 
 .opportunity-atlas-cleanup__controls {
   display: flex;
   flex-direction: column;
+  gap: 7px;
 }
 
-.opportunity-atlas-cleanup .toggle-row {
-  align-items: center;
-  border-bottom: 1px solid color-mix(in oklch, var(--line-subtle) 58%, transparent);
+.opportunity-cleanup-control {
+  background: color-mix(in oklch, var(--surface-muted) 50%, transparent);
+  border: 1px solid color-mix(in oklch, var(--line-subtle) 74%, transparent);
+  border-radius: 6px;
+  display: grid;
+  gap: 9px;
+  padding: 10px;
+}
+
+.opportunity-cleanup-control.is-compact {
+  padding-bottom: 10px;
+}
+
+.opportunity-cleanup-control__header {
+  align-items: flex-start;
   display: flex;
-  font-size: 11px;
+  gap: 10px;
   justify-content: space-between;
-  min-height: 34px;
 }
 
-.opportunity-atlas-cleanup .toggle-row input {
-  accent-color: var(--status-live);
-  height: 16px;
-  width: 16px;
+.opportunity-cleanup-control__header > label {
+  cursor: pointer;
+  display: grid;
+  gap: 4px;
+  min-width: 0;
 }
 
-.opportunity-atlas-cleanup .slider-row {
+.opportunity-cleanup-control__header strong {
+  color: var(--ink-primary);
+  font-size: 11px;
+  font-weight: 680;
+  line-height: 1.2;
+}
+
+.opportunity-cleanup-control__header span {
+  color: var(--ink-muted);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.opportunity-cleanup-switch {
+  appearance: none;
+  background: color-mix(in oklch, var(--surface-panel) 76%, transparent);
+  border: 1px solid color-mix(in oklch, var(--line-strong) 74%, transparent);
+  border-radius: 999px;
+  cursor: pointer;
+  flex: 0 0 auto;
+  height: 18px;
+  margin: 0;
+  min-height: 18px;
+  position: relative;
+  transition: background 140ms ease, border-color 140ms ease, opacity 140ms ease;
+  width: 34px;
+}
+
+.opportunity-cleanup-switch::before {
+  background: var(--ink-muted);
+  border-radius: 50%;
+  content: "";
+  height: 14px;
+  left: 2px;
+  position: absolute;
+  top: 1px;
+  transition: transform 140ms ease, background 140ms ease;
+  width: 14px;
+}
+
+.opportunity-cleanup-switch:checked {
+  background: color-mix(in oklch, var(--status-live) 30%, var(--surface-panel));
+  border-color: color-mix(in oklch, var(--status-live) 55%, var(--line-strong));
+}
+
+.opportunity-cleanup-switch:checked::before {
+  background: var(--status-live);
+  transform: translateX(16px);
+}
+
+.opportunity-cleanup-switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.opportunity-cleanup-switch:focus-visible {
+  outline: 2px solid color-mix(in oklch, var(--status-live) 70%, transparent);
+  outline-offset: 2px;
+}
+
+.opportunity-cleanup-slider {
   display: grid;
   gap: 6px;
-  padding: 8px 0 10px;
 }
 
-.opportunity-atlas-cleanup .slider-row span {
+.opportunity-cleanup-slider > span {
   color: var(--ink-muted);
   display: flex;
-  font-size: 10px;
+  font-size: 9px;
   justify-content: space-between;
 }
 
-.opportunity-atlas-cleanup .slider-row strong {
+.opportunity-cleanup-slider strong {
   color: var(--ink-primary);
+  font-size: 9px;
+  font-weight: 650;
 }
 
-.opportunity-atlas-cleanup .slider-row input {
+.opportunity-cleanup-slider input {
   accent-color: var(--status-live);
   margin: 0;
   width: 100%;
+}
+
+.opportunity-cleanup-slider input:disabled {
+  cursor: not-allowed;
+  opacity: 0.28;
 }
 
 .opportunity-atlas-cleanup__actions {

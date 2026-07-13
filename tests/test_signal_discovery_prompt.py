@@ -96,6 +96,12 @@ def test_engine_builder_prompt_is_deterministic_training_only_and_actionable(
     assert "training/live parity" in prompt
     assert "packet-consumer" in prompt
     assert "Reject the engine hypothesis" in prompt
+    assert "need not hit every approved bracket" in prompt
+    assert "recall is a coverage diagnostic, not an objective to maximize" in prompt
+    assert "final emitted, deduped signal stream" in prompt
+    assert "conditional tree" in prompt
+    assert "OR-composed leaves" in prompt
+    assert "internal chronological blocks" in prompt
 
     assert "walk_forward_timestamp_labels.parquet" not in prompt
     assert "walk_forward_episodes.parquet" not in prompt
@@ -122,3 +128,12 @@ def test_signal_engine_builder_skill_defines_outcome_first_discovery_rules() -> 
     assert "convenience baseline" in skill
     assert "dataset ids" in skill
     assert "production dependencies" in skill
+    assert "opportunity regions, not a checklist" in skill
+    assert "need not hit every approved bracket" in skill
+    assert "recall is a coverage diagnostic, not an objective to maximize" in skill
+    assert "final emitted, deduped signal stream" in skill
+    assert "conditional tree" in skill
+    assert "OR-composed leaves" in skill
+    assert "minimum independent episode support" in skill
+    assert "internal chronological blocks" in skill
+    assert "zero unless the target contract explicitly defines one" in skill

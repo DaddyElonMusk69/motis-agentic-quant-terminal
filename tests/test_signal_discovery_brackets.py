@@ -67,6 +67,80 @@ def test_stability_filters_require_neighbor_r_and_all_delay_agreement() -> None:
     assert delay_stable["diagnostics"]["stability_rejected_timestamp_count"] == 1
 
 
+def test_r_stability_radius_checks_multiple_grid_steps() -> None:
+    rows = [
+        _row(0, "LONG"),
+        _row(0, "LONG", risk=0.9),
+        _row(0, "SHORT", risk=0.8),
+    ]
+
+    radius_one = build_bracket_preview(
+        labels=rows,
+        risk_values=[0.8, 0.9, 1.0],
+        entry_delays=[5],
+        policy=_policy(require_r_stability=True, r_stability_radius=1),
+    )
+    radius_two = build_bracket_preview(
+        labels=rows,
+        risk_values=[0.8, 0.9, 1.0],
+        entry_delays=[5],
+        policy=_policy(require_r_stability=True, r_stability_radius=2),
+    )
+
+    assert len(radius_one["brackets"]) == 1
+    assert radius_two["brackets"] == []
+
+
+def test_delay_stability_uses_configured_agreement_percentage() -> None:
+    rows = [
+        _row(0, "LONG", delay=5),
+        _row(0, "LONG", delay=10),
+        _row(0, "SHORT", delay=15),
+    ]
+
+    two_of_three = build_bracket_preview(
+        labels=rows,
+        risk_values=[1.0],
+        entry_delays=[5, 10, 15],
+        policy=_policy(require_delay_stability=True, delay_agreement_pct=60),
+    )
+    all_three = build_bracket_preview(
+        labels=rows,
+        risk_values=[1.0],
+        entry_delays=[5, 10, 15],
+        policy=_policy(require_delay_stability=True, delay_agreement_pct=100),
+    )
+
+    assert len(two_of_three["brackets"]) == 1
+    assert all_three["brackets"] == []
+
+
+def test_stability_policy_defaults_and_bounds_are_validated() -> None:
+    result = build_bracket_preview(
+        labels=[_row(0, "LONG"), _row(0, "LONG", risk=0.9)],
+        risk_values=[0.9, 1.0],
+        entry_delays=[5],
+        policy=_policy(require_r_stability=True),
+    )
+
+    assert result["policy"]["r_stability_radius"] == 1
+    assert result["policy"]["delay_agreement_pct"] == 100
+    with pytest.raises(ValueError, match="R stability radius"):
+        build_bracket_preview(
+            labels=[_row(0, "LONG")],
+            risk_values=[1.0],
+            entry_delays=[5],
+            policy=_policy(r_stability_radius=4),
+        )
+    with pytest.raises(ValueError, match="delay agreement"):
+        build_bracket_preview(
+            labels=[_row(0, "LONG")],
+            risk_values=[1.0],
+            entry_delays=[5],
+            policy=_policy(delay_agreement_pct=49),
+        )
+
+
 def test_neutral_gap_bridging_is_continuous_but_never_crosses_ambiguous() -> None:
     rows = [
         _row(0, "LONG"),
@@ -90,6 +164,45 @@ def test_neutral_gap_bridging_is_continuous_but_never_crosses_ambiguous() -> Non
     assert result["brackets"][0]["timestamp_count"] == 3
     assert result["brackets"][0]["inherited_timestamp_count"] == 1
     assert result["diagnostics"]["merged_gap_count"] == 1
+
+
+def test_bracket_drought_uses_eligible_decisions_not_wall_clock() -> None:
+    rows = [
+        _row(0, "LONG"),
+        _row(60, "NEUTRAL"),
+        _row(65, "LONG"),
+        _row(70, "NEUTRAL"),
+    ]
+
+    result = build_bracket_preview(
+        labels=rows,
+        risk_values=[1.0],
+        entry_delays=[5],
+        policy=_policy(),
+    )
+
+    assert result["diagnostics"]["raw_max_opportunity_gap_minutes"] == 5
+    assert result["diagnostics"]["max_opportunity_gap_minutes"] == 5
+
+
+def test_bracket_drought_updates_after_gap_cleanup() -> None:
+    rows = [
+        _row(0, "LONG"),
+        _row(5, "NEUTRAL"),
+        _row(10, "NEUTRAL"),
+        _row(15, "LONG"),
+        _row(20, "NEUTRAL"),
+    ]
+
+    result = build_bracket_preview(
+        labels=rows,
+        risk_values=[1.0],
+        entry_delays=[5],
+        policy=_policy(bridge_neutral_gap_intervals=2),
+    )
+
+    assert result["diagnostics"]["raw_max_opportunity_gap_minutes"] == 10
+    assert result["diagnostics"]["max_opportunity_gap_minutes"] == 5
 
 
 def test_minimum_persistence_removes_short_brackets_after_bridging() -> None:

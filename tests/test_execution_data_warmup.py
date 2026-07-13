@@ -367,3 +367,67 @@ def test_warm_route_data_fills_raw_open_interest_requirement():
         }
     ]
     assert fill_calls == ["aave-binance-open_interest-raw-5m"]
+
+
+def test_warm_route_data_enriches_open_interest_regime_with_specialized_service():
+    runtime_repository = FakeRuntimeRepository()
+    runtime_repository.engines[0]["required_data"] = [
+        {
+            "data_type": "feature_open_interest_regime",
+            "origin": "derived",
+            "timeframe": "15m",
+        }
+    ]
+    market_repository = FakeMarketDataRepository()
+    oi_feature_ref = {
+        **market_repository.open_interest_ref,
+        "dataset_id": "AAVE-feature_open_interest_regime-15m",
+        "data_type": "feature_open_interest_regime",
+        "timeframe": "15m",
+        "data_origin": "derived",
+    }
+    original_get_ref = market_repository.get_candle_ref
+
+    def get_ref(**kwargs):
+        if (
+            kwargs["asset"] == "AAVE"
+            and kwargs["timeframe"] == "15m"
+            and kwargs["origin"] == "derived"
+            and kwargs["data_type"] == "feature_open_interest_regime"
+        ):
+            return dict(oi_feature_ref)
+        return original_get_ref(**kwargs)
+
+    market_repository.get_candle_ref = get_ref
+    service_calls = []
+
+    def oi_feature_service(**kwargs):
+        service_calls.append(kwargs)
+        return {
+            "status": "enriched",
+            "family": "open_interest_regime",
+            "feature_count": 1,
+            "features": [
+                {
+                    "dataset_id": "AAVE-feature_open_interest_regime-15m",
+                    "data_type": "feature_open_interest_regime",
+                    "timeframe": "15m",
+                    "row_count": 100,
+                }
+            ],
+        }
+
+    result = warm_route_data(
+        route_id="aave-live",
+        runtime_repository=runtime_repository,
+        market_data_repository=market_repository,
+        fill_service=lambda **kwargs: {"status": "current"},
+        adapter=FakeAdapter(),
+        open_interest_feature_service=oi_feature_service,
+    )
+
+    assert result["status"] == "warmed"
+    assert result["requirements"][0]["status"] == "feature_enriched"
+    assert result["requirements"][0]["family"] == "open_interest_regime"
+    assert service_calls[0]["asset"] == "AAVE"
+    assert "family" not in service_calls[0]

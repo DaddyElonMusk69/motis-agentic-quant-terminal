@@ -5,9 +5,15 @@ from pathlib import Path
 from typing import Any
 
 from quant_terminal_worker.ingestion.feature_enrichment import FEATURE_FAMILIES, enrich_feature_family_datasets
+from quant_terminal_worker.ingestion.open_interest_feature_enrichment import (
+    FEATURE_DATA_TYPE as OPEN_INTEREST_FEATURE_DATA_TYPE,
+    FEATURE_FAMILY as OPEN_INTEREST_FEATURE_FAMILY,
+    enrich_open_interest_regime_datasets,
+)
 
 
 FEATURE_DATA_TYPE_TO_FAMILY = {family.data_type: key for key, family in FEATURE_FAMILIES.items()}
+FEATURE_DATA_TYPE_TO_FAMILY[OPEN_INTEREST_FEATURE_DATA_TYPE] = OPEN_INTEREST_FEATURE_FAMILY
 RAW_FILLABLE_DATA_TYPES = {"candles", "open_interest"}
 
 
@@ -19,6 +25,7 @@ def warm_route_data(
     fill_service: Any,
     adapter: Any,
     feature_service: Any | None = None,
+    open_interest_feature_service: Any | None = None,
     workspace_root: Path | None = None,
     as_of: datetime | None = None,
 ) -> dict[str, Any]:
@@ -190,14 +197,22 @@ def warm_route_data(
             blocked = True
             continue
         family = FEATURE_DATA_TYPE_TO_FAMILY[str(data_type)]
-        service = feature_service or enrich_feature_family_datasets
         target_root = (workspace_root or Path(".")) / ".data" / "market-data"
-        feature_result = service(
-            repository=market_data_repository,
-            asset=route["asset"],
-            family=family,
-            target_root=target_root,
-        )
+        if data_type == OPEN_INTEREST_FEATURE_DATA_TYPE:
+            service = open_interest_feature_service or enrich_open_interest_regime_datasets
+            feature_result = service(
+                repository=market_data_repository,
+                asset=route["asset"],
+                target_root=target_root,
+            )
+        else:
+            service = feature_service or enrich_feature_family_datasets
+            feature_result = service(
+                repository=market_data_repository,
+                asset=route["asset"],
+                family=family,
+                target_root=target_root,
+            )
         matching_feature = next(
             (
                 item

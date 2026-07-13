@@ -1,4 +1,4 @@
 interface:
   display_name: "Stage 1A Training Optimizer"
-  short_description: "Disciplined training-only Stage 1A directional strategy builds."
-  default_prompt: "Use this skill to build or update a Stage 1A direction-only strategy from a training failure audit without overfitting or touching validation/walk-forward/OOS evidence."
+  short_description: "Regime-first Stage 1A strategy research and patching."
+  default_prompt: "Use $stage1a-training-optimizer to update a Stage 1A strategy from training evidence by proving broad signal-time regime patterns before patching the rules."

@@ -16,6 +16,7 @@ SUPPORTED_REQUIRED_DATA_TYPES = {
     "feature_ema_vegas_structure",
     "feature_bollinger",
     "feature_regime_momentum",
+    "feature_open_interest_regime",
 }
 SUPPORTED_REQUIRED_DATA_ORIGINS = {"raw", "derived"}
 SUPPORTED_PACKET_SCHEMA = "signal_packet.v2"

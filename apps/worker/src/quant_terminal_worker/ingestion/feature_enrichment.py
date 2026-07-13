@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from statistics import mean, pstdev
@@ -12,8 +12,23 @@ from quant_terminal_api.repositories.market_data import PostgresMarketDataReposi
 from quant_terminal_worker.ingestion.raw_candle_fill import _read_dataset_rows, _write_dataset_rows
 
 
-TIMEFRAMES = ("5m", "2h", "1d")
+TIMEFRAMES = ("5m", "2h", "8h", "12h", "1d")
 EMA_PERIODS = (36, 43, 144, 169, 576, 676)
+FEATURE_METADATA_COLUMNS = (
+    "available_at",
+    "complete",
+    "source_window_start_ts",
+    "source_window_end_ts",
+    "source_row_count",
+)
+FEATURE_LOOKBACK_BARS = {
+    "base_candle": 2,
+    "volatility_range": 48,
+    "volume": 48,
+    "ema_vegas_structure": 2,
+    "bollinger": 20,
+    "regime_momentum": 49,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,7 +160,11 @@ def enrich_feature_family_dataset(
             "status": "skipped",
             "reason": "empty_source_after_start_date",
         }
-    feature_rows = build_feature_rows(rows, family=family_spec.key)
+    feature_rows = build_feature_rows(
+        rows,
+        family=family_spec.key,
+        timeframe=str(source_registration["timeframe"]),
+    )
     storage_uri = (
         target_root
         / "origin=derived"
@@ -176,7 +195,12 @@ def enrich_feature_family_dataset(
     }
 
 
-def build_feature_rows(rows: list[dict[str, Any]], *, family: str) -> list[dict[str, Any]]:
+def build_feature_rows(
+    rows: list[dict[str, Any]],
+    *,
+    family: str,
+    timeframe: str | None = None,
+) -> list[dict[str, Any]]:
     family_spec = _feature_family(family)
     sorted_rows = sorted(rows, key=lambda row: _coerce_datetime(row["timestamp"]))
     enriched: list[dict[str, Any]] = []
@@ -202,8 +226,77 @@ def build_feature_rows(rows: list[dict[str, Any]], *, family: str) -> list[dict[
                 family=family_spec.key,
             ),
         }
+        if timeframe:
+            lookback_bars = FEATURE_LOOKBACK_BARS[family_spec.key]
+            source_start = sorted_rows[max(0, index - lookback_bars + 1)]["timestamp"]
+            source_end = row["timestamp"]
+            feature_row.update(
+                {
+                    "available_at": _to_iso(_coerce_datetime(source_end) + _timeframe_delta(timeframe)),
+                    "complete": True,
+                    "source_window_start_ts": _to_iso(_coerce_datetime(source_start)),
+                    "source_window_end_ts": _to_iso(_coerce_datetime(source_end)),
+                    "source_row_count": min(index + 1, lookback_bars),
+                }
+            )
         enriched.append(feature_row)
     return enriched
+
+
+def rebuild_registered_feature_datasets(
+    *,
+    repository: Any,
+    source_registration: dict[str, Any],
+    source_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    list_feature_refs = getattr(repository, "list_feature_refs_for_derived", None)
+    if not callable(list_feature_refs):
+        return []
+    feature_refs = list_feature_refs(source_registration)
+    rebuilt: list[dict[str, Any]] = []
+    for feature_ref in feature_refs:
+        family = _feature_family_for_ref(feature_ref)
+        start_ts = _coerce_datetime(feature_ref["start_ts"])
+        eligible_rows = [
+            row
+            for row in source_rows
+            if _coerce_datetime(row["timestamp"]) >= start_ts
+        ]
+        if not eligible_rows:
+            continue
+        feature_rows = build_feature_rows(
+            eligible_rows,
+            family=family.key,
+            timeframe=str(source_registration["timeframe"]),
+        )
+        _write_dataset_rows(Path(feature_ref["storage_uri"]), feature_rows)
+        generated = _feature_registration(
+            source_registration=source_registration,
+            family=family,
+            storage_uri=Path(feature_ref["storage_uri"]),
+            rows=feature_rows,
+        )
+        updated_registration = {
+            **feature_ref,
+            "start_ts": generated["start_ts"],
+            "end_ts": generated["end_ts"],
+            "row_count": generated["row_count"],
+            "schema_descriptor": generated["schema_descriptor"],
+            "quality_status": generated["quality_status"],
+            "ingestion_version": generated["ingestion_version"],
+        }
+        repository.update_ref(updated_registration)
+        rebuilt.append(
+            {
+                "dataset_id": feature_ref["dataset_id"],
+                "data_type": feature_ref["data_type"],
+                "timeframe": feature_ref["timeframe"],
+                "row_count": len(feature_rows),
+                "start_ts": feature_rows[0]["timestamp"],
+                "end_ts": feature_rows[-1]["timestamp"],
+            }
+        )
+    return rebuilt
 
 
 def _family_values(
@@ -369,7 +462,7 @@ def _feature_registration(
         "storage_backend": "parquet",
         "storage_uri": str(storage_uri),
         "schema_descriptor": {
-            "columns": ["timestamp", *family.columns],
+            "columns": ["timestamp", *family.columns, *FEATURE_METADATA_COLUMNS],
             "feature_family": family.key,
             "label": family.label,
             "source_dataset_id": source_registration["dataset_id"],
@@ -377,8 +470,20 @@ def _feature_registration(
             "source_timeframe": source_registration["timeframe"],
         },
         "quality_status": "feature_enriched",
-        "ingestion_version": "feature_enrichment.v1",
+        "ingestion_version": "feature_enrichment.v2",
     }
+
+
+def _feature_family_for_ref(ref: dict[str, Any]) -> FeatureFamily:
+    schema = ref.get("schema_descriptor") if isinstance(ref.get("schema_descriptor"), dict) else {}
+    family_key = str(schema.get("feature_family") or "")
+    if family_key in FEATURE_FAMILIES:
+        return FEATURE_FAMILIES[family_key]
+    data_type = str(ref.get("data_type") or "")
+    for family in FEATURE_FAMILIES.values():
+        if family.data_type == data_type:
+            return family
+    raise ValueError(f"Unsupported registered feature data type: {data_type}")
 
 
 def _feature_dataset_id(source_registration: dict[str, Any], family: FeatureFamily) -> str:
@@ -510,6 +615,21 @@ def _coerce_datetime(value: datetime | str) -> datetime:
         return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _to_iso(value: datetime) -> str:
+    return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _timeframe_delta(timeframe: str) -> timedelta:
+    value = timeframe.strip().lower()
+    if value.endswith("m"):
+        return timedelta(minutes=int(value[:-1]))
+    if value.endswith("h"):
+        return timedelta(hours=int(value[:-1]))
+    if value.endswith("d"):
+        return timedelta(days=int(value[:-1]))
+    raise ValueError(f"Unsupported feature timeframe: {timeframe}")
 
 
 def main() -> None:

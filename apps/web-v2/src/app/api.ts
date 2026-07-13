@@ -173,6 +173,7 @@ export type SignalDiscoveryScenarioMetrics = {
     timestamp_count?: number;
     qualifying_timestamp_count?: number;
     episode_count?: number;
+    max_opportunity_gap_minutes?: number;
     neutral_count?: number;
     ambiguous_count?: number;
     direction_counts?: Record<string, number>;
@@ -213,7 +214,9 @@ export type SignalDiscoveryBracketPolicy = {
   entry_delay_minutes: number;
   horizon_hours: number;
   require_r_stability: boolean;
+  r_stability_radius: number;
   require_delay_stability: boolean;
+  delay_agreement_pct: number;
   bridge_neutral_gap_intervals: number;
   minimum_persistence_timestamps: number;
   one_active_opportunity: boolean;
@@ -222,6 +225,8 @@ export type SignalDiscoveryBracketPolicy = {
 export type SignalDiscoveryBracketDiagnostics = {
   raw_total_brackets: number;
   preview_total_brackets: number;
+  raw_max_opportunity_gap_minutes: number;
+  max_opportunity_gap_minutes: number;
   raw_direction_counts: Record<string, number>;
   preview_direction_counts: Record<string, number>;
   removed_bracket_count: number;

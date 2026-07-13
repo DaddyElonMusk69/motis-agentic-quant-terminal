@@ -25,9 +25,11 @@ apps/worker/src/quant_terminal_worker/signal_engines/*.py
 !apps/worker/src/quant_terminal_worker/signal_engines/__init__.py
 !apps/worker/src/quant_terminal_worker/signal_engines/runtime.py
 !apps/worker/src/quant_terminal_worker/signal_engines/liquidity_sweep_v1.py
+!apps/worker/src/quant_terminal_worker/signal_engines/vegas_5m_cluster_v6.py
 packages/strategy_modules/src/quant_terminal_strategies/*.py
 !packages/strategy_modules/src/quant_terminal_strategies/__init__.py
 !packages/strategy_modules/src/quant_terminal_strategies/liquidity_sweep_v1_base.py
+!packages/strategy_modules/src/quant_terminal_strategies/vegas_ema_5m_hft_v6_base.py
 artifacts/signal_engine/scripts/**/*.py
 artifacts/signal_engine/src/vegas/*.py
 !artifacts/signal_engine/src/vegas/__init__.py

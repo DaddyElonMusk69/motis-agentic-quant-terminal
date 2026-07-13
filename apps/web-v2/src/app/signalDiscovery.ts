@@ -14,6 +14,77 @@ export type DiscoveryTicker = {
   label: string;
 };
 
+type BracketPolicyCoordinates = {
+  risk_pct: number;
+  entry_delay_minutes: number;
+  horizon_hours: number;
+};
+
+export function formatOpportunityGap(minutes: number | undefined): string {
+  if (minutes === undefined || !Number.isFinite(minutes)) {
+    return "n/a";
+  }
+  const totalMinutes = Math.max(0, Math.round(minutes));
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const remainder = totalMinutes % 60;
+  if (days > 0) {
+    return `${days}d${hours > 0 ? ` ${hours}h` : ""}`;
+  }
+  if (hours > 0) {
+    return `${hours}h${remainder > 0 ? ` ${remainder}m` : ""}`;
+  }
+  return `${remainder}m`;
+}
+
+export function shouldDisableAtlasRun({
+  isSubmitting,
+  hasActiveJob,
+  targetFrozen,
+  status
+}: {
+  isSubmitting: boolean;
+  hasActiveJob: boolean;
+  targetFrozen: boolean;
+  status: string;
+}): boolean {
+  return isSubmitting
+    || hasActiveJob
+    || targetFrozen
+    || !["draft", "atlas_ready", "failed"].includes(status);
+}
+
+export function isApprovedBracketRisk(
+  policy: BracketPolicyCoordinates | undefined,
+  riskPct: number
+): boolean {
+  return Boolean(policy && policy.risk_pct === riskPct);
+}
+
+export function getApprovedBracketCount(
+  policy: BracketPolicyCoordinates | undefined,
+  riskPct: number,
+  diagnostics: { preview_total_brackets?: number } | undefined
+): number | undefined {
+  return isApprovedBracketRisk(policy, riskPct)
+    ? diagnostics?.preview_total_brackets
+    : undefined;
+}
+
+export function isApprovedBracketTarget(
+  policy: BracketPolicyCoordinates | undefined,
+  riskPct: number,
+  entryDelayMinutes: number,
+  horizonHours: number
+): boolean {
+  return Boolean(
+    policy
+    && policy.risk_pct === riskPct
+    && policy.entry_delay_minutes === entryDelayMinutes
+    && policy.horizon_hours === horizonHours
+  );
+}
+
 export function isValidRewardMultiple(value: number): boolean {
   return Number.isFinite(value) && value > 0;
 }

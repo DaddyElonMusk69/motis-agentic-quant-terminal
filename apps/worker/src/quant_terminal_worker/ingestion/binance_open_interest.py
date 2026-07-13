@@ -288,6 +288,10 @@ def _rebuild_derived_refs(
     raw_rows: list[dict[str, Any]],
     repository: Any,
 ) -> list[dict[str, Any]]:
+    from quant_terminal_worker.ingestion.open_interest_feature_enrichment import (
+        rebuild_registered_open_interest_feature_datasets,
+    )
+
     rebuilt: list[dict[str, Any]] = []
     for derived_registration in repository.list_derived_refs_for_raw(raw_registration):
         if derived_registration.get("data_type") != "open_interest":
@@ -314,7 +318,15 @@ def _rebuild_derived_refs(
             },
         }
         repository.update_ref(updated_registration)
-        rebuilt.append(_summary(updated_registration))
+        result = _summary(updated_registration)
+        features_rebuilt = rebuild_registered_open_interest_feature_datasets(
+            repository=repository,
+            source_registration=updated_registration,
+            source_rows=derived_rows,
+        )
+        if features_rebuilt:
+            result["features_rebuilt"] = features_rebuilt
+        rebuilt.append(result)
     return rebuilt
 
 

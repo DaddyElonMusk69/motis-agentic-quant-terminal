@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 from quant_terminal_sdk.parquet_store import read_candles
@@ -9,6 +9,7 @@ class FakeRepository:
     def __init__(self) -> None:
         self.updated_registration = None
         self.derived_refs = []
+        self.feature_refs = []
         self.updated_registrations = []
 
     def update_ref(self, registration):
@@ -17,6 +18,9 @@ class FakeRepository:
 
     def list_derived_refs_for_raw(self, registration):
         return self.derived_refs
+
+    def list_feature_refs_for_derived(self, registration):
+        return [ref for ref in self.feature_refs if ref["timeframe"] == registration["timeframe"]]
 
 
 class FakeOKXAdapter:
@@ -183,6 +187,84 @@ def test_fill_raw_candle_dataset_rebuilds_matching_derived_candle_datasets(tmp_p
     assert repository.updated_registrations[-1]["dataset_id"] == "btc-derived-10m"
     assert repository.updated_registrations[-1]["quality_status"] == "ema_enriched"
     assert repository.updated_registrations[-1]["schema_descriptor"]["ema"]["periods"] == [36, 43, 144, 169, 576, 676]
+
+
+def test_fill_raw_candle_dataset_rebuilds_registered_features_with_derived_candles(tmp_path: Path):
+    raw_storage_uri = tmp_path / "origin=raw/source=okx/type=candles/asset=BTC/timeframe=5m"
+    raw_month_path = raw_storage_uri / "year=2026/month=06/data.parquet"
+    raw_month_path.parent.mkdir(parents=True)
+    _write_parquet(
+        raw_month_path,
+        [
+            _row("2026-06-01T00:00:00Z", 100, 105, 99, 101, 12.5),
+        ],
+    )
+    derived_storage_uri = tmp_path / "origin=derived/source=okx/type=candles/asset=BTC/timeframe=5m"
+    derived_month_path = derived_storage_uri / "year=2026/month=06/data.parquet"
+    derived_month_path.parent.mkdir(parents=True)
+    _write_parquet(derived_month_path, [_row("2026-06-01T00:00:00Z", 100, 105, 99, 101, 12.5)])
+    feature_storage_uri = tmp_path / "origin=derived/source=okx/type=feature_volume/asset=BTC/timeframe=5m"
+    feature_month_path = feature_storage_uri / "year=2026/month=06/data.parquet"
+    feature_month_path.parent.mkdir(parents=True)
+    _write_parquet(feature_month_path, [{"timestamp": "2026-06-01T00:00:00Z", "quote_volume_ratio_48": 1.0}])
+    registration = {
+        "dataset_id": "btc-raw-5m",
+        "source_id": "okx",
+        "asset": "BTC",
+        "instrument": "BTC-USDT-SWAP",
+        "data_type": "candles",
+        "timeframe": "5m",
+        "data_origin": "raw",
+        "start_ts": datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+        "end_ts": datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+        "row_count": 1,
+        "storage_backend": "parquet",
+        "storage_uri": str(raw_storage_uri),
+        "schema_descriptor": {"columns": ["timestamp", "open", "high", "low", "close", "volume"]},
+        "quality_status": "ingested",
+        "ingestion_version": "legacy",
+    }
+    derived_registration = {
+        **registration,
+        "dataset_id": "btc-derived-5m",
+        "data_origin": "derived",
+        "storage_uri": str(derived_storage_uri),
+    }
+    feature_registration = {
+        **registration,
+        "dataset_id": "btc-feature-volume-5m",
+        "data_type": "feature_volume",
+        "data_origin": "derived",
+        "storage_uri": str(feature_storage_uri),
+        "schema_descriptor": {"feature_family": "volume"},
+    }
+    repository = FakeRepository()
+    repository.derived_refs = [derived_registration]
+    repository.feature_refs = [feature_registration]
+
+    result = fill_raw_candle_dataset(
+        registration=registration,
+        repository=repository,
+        adapter=FakeOKXAdapter(),
+        as_of=datetime(2026, 6, 1, 0, 10, tzinfo=UTC),
+    )
+
+    rebuilt = result["derived_rebuilt"][0]["features_rebuilt"]
+    assert rebuilt == [
+        {
+            "dataset_id": "btc-feature-volume-5m",
+            "data_type": "feature_volume",
+            "timeframe": "5m",
+            "row_count": 3,
+            "start_ts": "2026-06-01T00:00:00Z",
+            "end_ts": "2026-06-01T00:10:00Z",
+        }
+    ]
+    feature_rows = read_candles(feature_month_path)
+    assert feature_rows[-1]["timestamp"] == "2026-06-01T00:10:00Z"
+    assert feature_rows[-1]["available_at"] == "2026-06-01T00:15:00Z"
+    assert feature_rows[-1]["complete"] is True
+    assert repository.updated_registrations[-1]["dataset_id"] == "btc-feature-volume-5m"
 
 
 def test_fill_raw_candle_dataset_pages_back_from_latest_until_gap_is_covered(tmp_path: Path):

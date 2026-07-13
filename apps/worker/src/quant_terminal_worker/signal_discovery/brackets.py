@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -10,7 +11,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from quant_terminal_sdk.market_data_reader import MarketDataCandle
-from quant_terminal_worker.signal_discovery.atlas import label_fixed_r_timestamps
+from quant_terminal_worker.signal_discovery.atlas import (
+    label_fixed_r_timestamps,
+    max_opportunity_gap_minutes,
+)
 
 BRACKET_POLICY_SCHEMA = "signal_discovery_bracket_policy.v1"
 _CADENCE = timedelta(minutes=5)
@@ -23,7 +27,9 @@ def normalize_bracket_policy(policy: Mapping[str, Any]) -> dict[str, Any]:
         "entry_delay_minutes": int(policy["entry_delay_minutes"]),
         "horizon_hours": float(policy["horizon_hours"]),
         "require_r_stability": bool(policy.get("require_r_stability", False)),
+        "r_stability_radius": int(policy.get("r_stability_radius", 1)),
         "require_delay_stability": bool(policy.get("require_delay_stability", False)),
+        "delay_agreement_pct": int(policy.get("delay_agreement_pct", 100)),
         "bridge_neutral_gap_intervals": int(
             policy.get("bridge_neutral_gap_intervals", 0)
         ),
@@ -38,6 +44,10 @@ def normalize_bracket_policy(policy: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("bracket policy entry delay must be nonnegative")
     if normalized["horizon_hours"] <= 0:
         raise ValueError("bracket policy horizon must be positive")
+    if not 1 <= normalized["r_stability_radius"] <= 3:
+        raise ValueError("R stability radius must be between 1 and 3")
+    if not 50 <= normalized["delay_agreement_pct"] <= 100:
+        raise ValueError("delay agreement must be between 50 and 100 percent")
     if not 0 <= normalized["bridge_neutral_gap_intervals"] <= 12:
         raise ValueError("neutral gap intervals must be between 0 and 12")
     if not 1 <= normalized["minimum_persistence_timestamps"] <= 24:
@@ -90,7 +100,15 @@ def build_bracket_preview(
 
     raw_states = [_state(row=row, direction=_direction(row), bridgeable=False) for row in primary]
     raw_brackets = _states_to_brackets(raw_states, normalized)
-    neighbor_risks = _neighbor_values(risks, selected_risk)
+    neighbor_risks = _neighbor_values(
+        risks,
+        selected_risk,
+        radius=normalized["r_stability_radius"],
+    )
+    required_delay_matches = max(
+        2,
+        math.ceil(len(delays) * normalized["delay_agreement_pct"] / 100),
+    )
     states: list[dict[str, Any]] = []
     stability_rejected = 0
     for row in primary:
@@ -104,11 +122,12 @@ def build_bracket_preview(
                 for risk in neighbor_risks
             )
         if survives and normalized["require_delay_stability"]:
-            survives = all(
+            matching_delays = sum(
                 _direction(indexed.get((selected_risk, delay, horizon, timestamp), {}))
                 == direction
                 for delay in delays
             )
+            survives = matching_delays >= required_delay_matches
         if direction is not None and not survives:
             stability_rejected += 1
         label = str(row.get("label") or "").upper()
@@ -146,6 +165,7 @@ def build_bracket_preview(
     diagnostics = _diagnostics(
         raw_brackets=raw_brackets,
         brackets=brackets,
+        eligible_timestamps=[row["decision_ts"] for row in primary],
         stability_rejected=stability_rejected,
         merged_gap_count=merged_gap_count,
         persistence_removed=persistence_removed,
@@ -296,7 +316,14 @@ def build_policy_scenario_labels(
     selected_risk = float(selected_target["selected_risk_pct"])
     selected_delay = int(selected_target["entry_delay_minutes"])
     required_risks = (
-        [selected_risk, *_neighbor_values(sorted({float(value) for value in risk_values}), selected_risk)]
+        [
+            selected_risk,
+            *_neighbor_values(
+                sorted({float(value) for value in risk_values}),
+                selected_risk,
+                radius=normalized["r_stability_radius"],
+            ),
+        ]
         if normalized["require_r_stability"]
         else [selected_risk]
     )
@@ -324,9 +351,13 @@ def build_policy_scenario_labels(
     return rows
 
 
-def _neighbor_values(values: Sequence[float], selected: float) -> list[float]:
+def _neighbor_values(
+    values: Sequence[float], selected: float, *, radius: int = 1
+) -> list[float]:
     index = list(values).index(selected)
-    return list(values[max(0, index - 1) : index]) + list(values[index + 1 : index + 2])
+    return list(values[max(0, index - radius) : index]) + list(
+        values[index + 1 : index + radius + 1]
+    )
 
 
 def _read_policy_labels(
@@ -342,7 +373,14 @@ def _read_policy_labels(
     selected_risk = normalized["risk_pct"]
     selected_delay = normalized["entry_delay_minutes"]
     required_risks = (
-        [selected_risk, *_neighbor_values(risks, selected_risk)]
+        [
+            selected_risk,
+            *_neighbor_values(
+                risks,
+                selected_risk,
+                radius=normalized["r_stability_radius"],
+            ),
+        ]
         if normalized["require_r_stability"]
         else [selected_risk]
     )
@@ -464,6 +502,7 @@ def _diagnostics(
     *,
     raw_brackets: Sequence[Mapping[str, Any]],
     brackets: Sequence[Mapping[str, Any]],
+    eligible_timestamps: Sequence[Any],
     stability_rejected: int,
     merged_gap_count: int,
     persistence_removed: int,
@@ -486,6 +525,14 @@ def _diagnostics(
     return {
         "raw_total_brackets": raw_total,
         "preview_total_brackets": preview_total,
+        "raw_max_opportunity_gap_minutes": max_opportunity_gap_minutes(
+            eligible_timestamps=eligible_timestamps,
+            brackets=raw_brackets,
+        ),
+        "max_opportunity_gap_minutes": max_opportunity_gap_minutes(
+            eligible_timestamps=eligible_timestamps,
+            brackets=brackets,
+        ),
         "raw_direction_counts": counts(raw_brackets),
         "preview_direction_counts": counts(brackets),
         "removed_bracket_count": max(0, raw_total - preview_total),

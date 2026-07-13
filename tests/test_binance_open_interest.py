@@ -21,6 +21,7 @@ class FakeRepository:
         self.upserted = []
         self.updated = []
         self.derived_refs = []
+        self.feature_refs = []
 
     def upsert_data_source(self, source_id, name, source_type):
         self.upserted_sources.append({"source_id": source_id, "name": name, "source_type": source_type})
@@ -33,6 +34,9 @@ class FakeRepository:
 
     def list_derived_refs_for_raw(self, registration):
         return self.derived_refs
+
+    def list_feature_refs_for_derived(self, registration):
+        return [ref for ref in self.feature_refs if ref["timeframe"] == registration["timeframe"]]
 
 
 def test_normalize_open_interest_row_accepts_downloaded_csv_fields():
@@ -257,6 +261,17 @@ def test_fill_raw_open_interest_dataset_appends_live_cli_rows_and_rebuilds_deriv
             "ingestion_version": "binance-metrics-v1",
         }
     ]
+    feature_uri = tmp_path / "origin=derived/source=binance/type=feature_open_interest_regime/asset=SOL/timeframe=15m"
+    repository.feature_refs = [
+        {
+            **repository.derived_refs[0],
+            "dataset_id": "SOL-feature_open_interest_regime-15m",
+            "data_type": "feature_open_interest_regime",
+            "storage_uri": str(feature_uri),
+            "start_ts": datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
+            "schema_descriptor": {"feature_family": "open_interest_regime"},
+        }
+    ]
 
     class FakeBinanceAdapter:
         def __init__(self) -> None:
@@ -305,7 +320,11 @@ def test_fill_raw_open_interest_dataset_appends_live_cli_rows_and_rebuilds_deriv
     assert result["rows_added"] == 2
     assert result["end_ts"] == "2026-06-01T00:10:00Z"
     assert result["derived_rebuilt"][0]["dataset_id"] == "sol-binance-open_interest-derived-15m"
-    assert repository.updated[-1]["quality_status"] == "derived"
+    assert result["derived_rebuilt"][0]["features_rebuilt"][0]["dataset_id"] == "SOL-feature_open_interest_regime-15m"
+    assert repository.updated[-2]["quality_status"] == "derived"
+    assert repository.updated[-1]["quality_status"] == "feature_enriched"
+    feature_rows = pq.read_table(feature_uri / "year=2026/month=06/data.parquet").to_pylist()
+    assert feature_rows[-1]["available_at"] == "2026-06-01T00:15:00Z"
 
 
 def _write_zip(path: Path, name: str, lines: list[str]) -> None:

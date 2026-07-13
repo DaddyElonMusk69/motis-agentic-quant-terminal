@@ -139,6 +139,20 @@ class PostgresMarketDataRepository:
         with self.engine.connect() as connection:
             return [dict(row._mapping) for row in connection.execute(statement)]
 
+    def list_feature_refs_for_derived(self, registration: dict[str, Any]) -> list[dict[str, Any]]:
+        statement = (
+            select(market_data_refs)
+            .where(market_data_refs.c.source_id == registration["source_id"])
+            .where(market_data_refs.c.asset == registration["asset"])
+            .where(market_data_refs.c.instrument == registration["instrument"])
+            .where(market_data_refs.c.timeframe == registration["timeframe"])
+            .where(market_data_refs.c.data_origin == "derived")
+            .where(market_data_refs.c.data_type.like("feature_%"))
+            .order_by(market_data_refs.c.data_type)
+        )
+        with self.engine.connect() as connection:
+            return [dict(row._mapping) for row in connection.execute(statement)]
+
     def build_derived_refs_for_raw_statement(self, registration: dict[str, Any]):
         return (
             select(market_data_refs)
