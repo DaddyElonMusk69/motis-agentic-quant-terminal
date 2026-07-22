@@ -40,6 +40,13 @@ from quant_terminal_worker.ingestion.open_interest_feature_enrichment import (
     FEATURE_FAMILY as OPEN_INTEREST_FEATURE_FAMILY,
     enrich_open_interest_regime_datasets,
 )
+from quant_terminal_worker.ingestion.binance_funding import fill_raw_funding_dataset
+from quant_terminal_worker.ingestion.binance_futures_metrics import (
+    fill_raw_futures_metrics_dataset,
+)
+from quant_terminal_worker.ingestion.binance_premium_index import (
+    fill_raw_premium_index_dataset,
+)
 from quant_terminal_worker.ingestion.binance_open_interest import fill_raw_open_interest_dataset
 from quant_terminal_worker.ingestion.raw_candle_fill import fill_raw_candle_dataset
 from quant_terminal_worker.ingestion.legacy_signals import import_legacy_signal_sets
@@ -105,6 +112,7 @@ STAGE1_ROLE_ACTIONS = {
     "training": ("create_training_bundle", "Create Training Bundle"),
     "walk_forward_test": ("create_walk_forward_bundle", "Create Walk-Forward Test Bundle"),
 }
+STRATEGY_SIDECAR_NAMES = ("model_artifact.json",)
 
 
 class AgentTaskPreviewRequest(BaseModel):
@@ -241,6 +249,8 @@ class Stage4RealizedExpectancyRequest(BaseModel):
     initial_capital_usdt: float = Field(default=10_000.0, gt=0)
     margin_allocation_pct: float = Field(default=30.0, gt=0, le=100)
     leverage: float = Field(default=5.0, ge=1, le=125)
+    consecutive_losses: int | None = Field(default=None, ge=1, le=20)
+    cooldown_hours: int | None = Field(default=None, ge=1, le=168)
 
 
 class PortfolioBacktestRequest(BaseModel):
@@ -853,7 +863,13 @@ def create_app(
 
     @app.get("/api/v1/research/signal-discovery-sessions")
     def list_signal_discovery_sessions() -> dict[str, Any]:
-        return {"sessions": get_runtime_repository().list_signal_discovery_sessions()}
+        sessions = get_runtime_repository().list_signal_discovery_sessions()
+        return {
+            "sessions": [
+                _signal_discovery_api_with_prompt_state(session)
+                for session in sessions
+            ]
+        }
 
     @app.post("/api/v1/research/signal-discovery-sessions")
     def create_signal_discovery_session(
@@ -1184,14 +1200,6 @@ def create_app(
             except ValueError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
         evidence_summary = (session.get("summary") or {}).get("evidence") or {}
-        if evidence_summary:
-            try:
-                validate_evidence_manifest(
-                    workspace_root=Path.cwd(),
-                    artifact_root=artifact_root,
-                )
-            except ValueError as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
         try:
             contract = freeze_target_contract(
                 artifact_root=artifact_root,
@@ -1281,15 +1289,6 @@ def create_app(
                 detail="Target must be frozen before prompt generation",
             )
         artifact_root = _signal_discovery_api_artifact_root(session)
-        if (artifact_root / "evidence" / "evidence_manifest.json").is_file():
-            try:
-                validate_evidence_manifest(
-                    workspace_root=Path.cwd(),
-                    artifact_root=artifact_root,
-                )
-            except ValueError as exc:
-                runtime.update_signal_discovery_session(session_id, status="failed")
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
         try:
             return generate_engine_builder_prompt(
                 workspace_root=Path.cwd(),
@@ -1951,6 +1950,8 @@ def create_app(
         session = repository.get_stage1_research_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Stage 1 session not found")
+        if (request.consecutive_losses is None) != (request.cooldown_hours is None):
+            raise HTTPException(status_code=400, detail="consecutive_losses and cooldown_hours must be provided together")
         gate = build_stage1_gate_summary(workspace_root=Path.cwd(), session=session)
         if not (gate.get("stage3_pyramid") or {}).get("exists"):
             raise HTTPException(status_code=400, detail="Stage 4 requires completed Stage 3 pyramid")
@@ -1963,6 +1964,14 @@ def create_app(
                 "initial_capital_usdt": request.initial_capital_usdt,
                 "margin_allocation_pct": request.margin_allocation_pct,
                 "leverage": request.leverage,
+                "loss_cooldown": (
+                    {
+                        "consecutive_losses": request.consecutive_losses,
+                        "cooldown_hours": request.cooldown_hours,
+                    }
+                    if request.consecutive_losses is not None and request.cooldown_hours is not None
+                    else None
+                ),
             },
             current_step="queued",
         )
@@ -1977,6 +1986,14 @@ def create_app(
                 initial_capital_usdt=request.initial_capital_usdt,
                 margin_allocation_pct=request.margin_allocation_pct,
                 leverage=request.leverage,
+                loss_cooldown=(
+                    {
+                        "consecutive_losses": request.consecutive_losses,
+                        "cooldown_hours": request.cooldown_hours,
+                    }
+                    if request.consecutive_losses is not None and request.cooldown_hours is not None
+                    else None
+                ),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2968,11 +2985,18 @@ def create_app(
             service = fill_service
         elif registration.get("data_type") == "open_interest":
             service = fill_raw_open_interest_dataset
+        elif registration.get("data_type") == "funding":
+            service = fill_raw_funding_dataset
+        elif registration.get("data_type") == "futures_metrics":
+            service = fill_raw_futures_metrics_dataset
+        elif registration.get("data_type") == "premium_index":
+            service = fill_raw_premium_index_dataset
         else:
             service = fill_raw_candle_dataset
         adapter = (
             BinanceCLIAdapter({"cli_path": os.environ.get("BINANCE_CLI_PATH"), "profile": os.environ.get("BINANCE_PROFILE")})
-            if registration.get("data_type") == "open_interest"
+            if registration.get("data_type")
+            in {"open_interest", "funding", "futures_metrics", "premium_index"}
             else OKXAdapter({"backend": "okx_cli", "mode": os.environ.get("OKX_MODE", "demo"), "market_mode": "live"})
         )
         try:
@@ -3098,7 +3122,22 @@ def _signal_discovery_api_session(repository: Any, session_id: str) -> dict[str,
     session = repository.get_signal_discovery_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Signal discovery session not found")
-    return session
+    return _signal_discovery_api_with_prompt_state(session)
+
+
+def _signal_discovery_api_with_prompt_state(
+    session: Mapping[str, Any],
+) -> dict[str, Any]:
+    artifact_root = _signal_discovery_api_artifact_root(session)
+    prompt_path = artifact_root / "prompt" / "engine_builder_prompt.md"
+    generated = prompt_path.is_file()
+    return {
+        **session,
+        "engine_builder_prompt": {
+            "generated": generated,
+            "path": str(prompt_path) if generated else None,
+        },
+    }
 
 
 def _validate_signal_discovery_visualization_risk(
@@ -3486,6 +3525,7 @@ def _materialize_execution_bundle(
         validate_execution_bundle_contract({"execution_setup": execution_setup})
     except ContractValidationError as exc:
         raise ValueError(str(exc)) from exc
+    strategy_sidecar_contents = _strategy_sidecar_contents(strategy_path)
     bundle_seed = {
         "asset": session["asset"],
         "signal_engine_id": session["signal_engine_id"],
@@ -3496,6 +3536,7 @@ def _materialize_execution_bundle(
         "promotion_source": selected_source,
         "content": {
             "strategy": strategy_path.read_text(),
+            "strategy_sidecars": strategy_sidecar_contents,
             "execution_setup": execution_setup,
             "risk_limits": risk_limits,
             "evidence_refs": evidence_refs,
@@ -3508,6 +3549,7 @@ def _materialize_execution_bundle(
 
     strategy_copy = bundle_root / "strategy.py"
     strategy_copy.write_text(strategy_path.read_text())
+    strategy_sidecar_copies = _copy_strategy_sidecars(strategy_path, bundle_root)
     stage4b_base_copy = None
     if selected_source == "stage4b_timing":
         base_strategy_sidecar = strategy_path.with_name("stage1a_base_strategy.py")
@@ -3545,6 +3587,8 @@ def _materialize_execution_bundle(
         "evidence_refs.json": _file_sha256(bundle_root / "evidence_refs.json"),
         "manifest.json": _file_sha256(bundle_root / "manifest.json"),
     }
+    for name, path in strategy_sidecar_copies.items():
+        checksums[name] = _file_sha256(path)
     if stage4b_base_copy is not None:
         checksums["stage1a_base_strategy.py"] = _file_sha256(stage4b_base_copy)
     (bundle_root / "checksums.json").write_text(json.dumps(checksums, indent=2, sort_keys=True) + "\n")
@@ -3591,6 +3635,26 @@ def _stage1_strategy_path(*, artifact_root: Path, promotion_root: Path) -> Path:
         else:
             raise ValueError("Frozen strategy module is missing")
     return strategy_path
+
+
+def _strategy_sidecar_contents(strategy_path: Path) -> dict[str, str]:
+    return {
+        name: sidecar.read_text()
+        for name in STRATEGY_SIDECAR_NAMES
+        if (sidecar := strategy_path.with_name(name)).is_file()
+    }
+
+
+def _copy_strategy_sidecars(strategy_path: Path, target_root: Path) -> dict[str, Path]:
+    copied: dict[str, Path] = {}
+    for name in STRATEGY_SIDECAR_NAMES:
+        source = strategy_path.with_name(name)
+        if not source.is_file():
+            continue
+        target = target_root / name
+        target.write_text(source.read_text())
+        copied[name] = target
+    return copied
 
 
 def _resolve_stage4_promotion_candidate(*, promotion_root: Path) -> dict[str, Any]:
@@ -3727,6 +3791,7 @@ def _materialize_stage4b_timing_strategy_module(*, promotion_root: Path, base_st
     wrapper_root.mkdir(parents=True, exist_ok=True)
     base_copy = wrapper_root / "stage1a_base_strategy.py"
     base_copy.write_text(base_strategy_path.read_text())
+    _copy_strategy_sidecars(base_strategy_path, wrapper_root)
     wrapper_path = wrapper_root / "strategy.py"
     wrapper_path.write_text(_render_stage4b_timing_strategy_wrapper(overlay=overlay))
     return wrapper_path

@@ -39,8 +39,37 @@ from quant_terminal_worker.signal_engines.vegas_ema_5m_cluster import (
 
 
 ENGINE_ID = "vegas_5m_cluster_v6"
-V6_CONTEXT_MODE = "candles_only_integrated_forming_with_bollinger_1d_and_oi_regime"
+V6_CONTEXT_MODE = "candles_integrated_forming_bollinger_oi_and_stage1a_context_v2"
 DEFAULT_CONTEXT_TIMEFRAMES = ("2h", "8h", "12h")
+STAGE1A_CONTEXT_SCHEMA_VERSION = "vegas_5m_cluster_v6.stage1a_context.v2"
+STAGE1A_CONTEXT_VALUE_NAMES = (
+    "5m_return_12_pct",
+    "5m_return_48_pct",
+    "5m_return_288_pct",
+    "5m_realized_volatility_48_pct",
+    "5m_realized_volatility_288_pct",
+    "5m_range_position_48_pct",
+    "5m_range_position_288_pct",
+    "5m_volume_zscore_48",
+    "5m_trend_efficiency_48",
+    "5m_trend_efficiency_288",
+    *(
+        name
+        for timeframe in DEFAULT_CONTEXT_TIMEFRAMES
+        for name in (
+            f"{timeframe}_completed_return_pct",
+            f"{timeframe}_realized_volatility_12_pct",
+            f"{timeframe}_range_position_12_pct",
+            f"{timeframe}_trend_efficiency_12",
+            f"{timeframe}_ema_36_slope_3_pct",
+            f"{timeframe}_ema_576_slope_3_pct",
+        )
+    ),
+    "1d_return_3_pct",
+    "1d_return_10_pct",
+    "1d_return_20_pct",
+    "1d_realized_volatility_20_pct",
+)
 FORMING_CANDLE_METADATA_COLUMNS = [
     "is_completed",
     "source_candle_count",
@@ -507,6 +536,10 @@ def _build_packet_at_index(
         asset=asset,
         signal_available_at=signal_available_at,
     )
+    stage1a_context = _stage1a_context_snapshot(
+        prepared=prepared,
+        signal_available_at=signal_available_at,
+    )
 
     packet = {
         "schema_version": "signal_packet.v2",
@@ -537,6 +570,7 @@ def _build_packet_at_index(
             "signal_available_at": _iso_z(signal_available_at),
             "derived_features": {
                 "open_interest_regime": oi_feature,
+                "stage1a_context_v2": stage1a_context,
             },
         },
     }
@@ -826,6 +860,285 @@ def _open_interest_regime_snapshot(
             for column in OI_FEATURE_VALUE_COLUMNS
         },
     }
+
+
+def _stage1a_context_snapshot(
+    *,
+    prepared: _PreparedData,
+    signal_available_at: datetime,
+) -> dict[str, Any]:
+    five_minute_rows = _completed_rows_as_of(
+        rows=prepared.raw_rows,
+        timestamps=prepared.raw_timestamps,
+        timeframe="5m",
+        signal_available_at=signal_available_at,
+        max_rows=289,
+    )
+    daily_rows = _completed_rows_as_of(
+        rows=prepared.daily_rows,
+        timestamps=prepared.daily_timestamps,
+        timeframe="1d",
+        signal_available_at=signal_available_at,
+        max_rows=21,
+    )
+    rows_by_timeframe = {
+        timeframe: _completed_rows_as_of(
+            rows=prepared.context_rows.get(timeframe, []),
+            timestamps=prepared.context_timestamps.get(timeframe, []),
+            timeframe=timeframe,
+            signal_available_at=signal_available_at,
+            max_rows=80,
+        )
+        for timeframe in DEFAULT_CONTEXT_TIMEFRAMES
+    }
+
+    values: dict[str, Any] = {name: None for name in STAGE1A_CONTEXT_VALUE_NAMES}
+    five_minute_delta = _timeframe_delta("5m")
+    for lookback in (12, 48, 288):
+        values[f"5m_return_{lookback}_pct"] = _window_return_pct(
+            five_minute_rows,
+            lookback=lookback,
+            delta=five_minute_delta,
+        )
+    for lookback in (48, 288):
+        values[f"5m_realized_volatility_{lookback}_pct"] = _realized_volatility_pct(
+            five_minute_rows,
+            lookback=lookback,
+            delta=five_minute_delta,
+        )
+        values[f"5m_range_position_{lookback}_pct"] = _range_position_pct(
+            five_minute_rows,
+            lookback=lookback,
+            delta=five_minute_delta,
+        )
+        values[f"5m_trend_efficiency_{lookback}"] = _trend_efficiency(
+            five_minute_rows,
+            lookback=lookback,
+            delta=five_minute_delta,
+        )
+    values["5m_volume_zscore_48"] = _volume_zscore(
+        five_minute_rows,
+        lookback=48,
+        delta=five_minute_delta,
+    )
+
+    for timeframe, rows in rows_by_timeframe.items():
+        delta = _timeframe_delta(timeframe)
+        values[f"{timeframe}_completed_return_pct"] = _candle_return_pct(rows[-1]) if rows else None
+        values[f"{timeframe}_realized_volatility_12_pct"] = _realized_volatility_pct(
+            rows,
+            lookback=12,
+            delta=delta,
+        )
+        values[f"{timeframe}_range_position_12_pct"] = _range_position_pct(
+            rows,
+            lookback=12,
+            delta=delta,
+        )
+        values[f"{timeframe}_trend_efficiency_12"] = _trend_efficiency(
+            rows,
+            lookback=12,
+            delta=delta,
+        )
+        for period in (36, 576):
+            values[f"{timeframe}_ema_{period}_slope_3_pct"] = _ema_slope_pct(
+                rows,
+                period=period,
+                lookback=3,
+                delta=delta,
+            )
+
+    daily_delta = _timeframe_delta("1d")
+    for lookback in (3, 10, 20):
+        values[f"1d_return_{lookback}_pct"] = _window_return_pct(
+            daily_rows,
+            lookback=lookback,
+            delta=daily_delta,
+        )
+    values["1d_realized_volatility_20_pct"] = _realized_volatility_pct(
+        daily_rows,
+        lookback=20,
+        delta=daily_delta,
+    )
+
+    source_windows = {
+        "5m": _source_window_metadata(five_minute_rows, timeframe="5m", required_rows=289),
+        **{
+            timeframe: _source_window_metadata(rows, timeframe=timeframe, required_rows=13)
+            for timeframe, rows in rows_by_timeframe.items()
+        },
+        "1d": _source_window_metadata(daily_rows, timeframe="1d", required_rows=21),
+    }
+    return {
+        "schema_version": STAGE1A_CONTEXT_SCHEMA_VERSION,
+        "available_at": _iso_z(signal_available_at),
+        "complete": True,
+        "source_windows": source_windows,
+        "values": {name: _packet_number(values[name]) for name in STAGE1A_CONTEXT_VALUE_NAMES},
+    }
+
+
+def _completed_rows_as_of(
+    *,
+    rows: list[dict[str, Any]],
+    timestamps: list[datetime],
+    timeframe: str,
+    signal_available_at: datetime,
+    max_rows: int,
+) -> list[dict[str, Any]]:
+    if not rows or not timestamps:
+        return []
+    end = bisect_right(timestamps, signal_available_at - _timeframe_delta(timeframe))
+    return rows[max(0, end - max_rows) : end]
+
+
+def _source_window_metadata(
+    rows: list[dict[str, Any]],
+    *,
+    timeframe: str,
+    required_rows: int,
+) -> dict[str, Any]:
+    delta = _timeframe_delta(timeframe)
+    contiguous_row_count = _contiguous_tail_count(rows, delta=delta)
+    return {
+        "timeframe": timeframe,
+        "selected_row_count": len(rows),
+        "contiguous_tail_row_count": contiguous_row_count,
+        "required_row_count": required_rows,
+        "warmup_complete": contiguous_row_count >= required_rows,
+        "latest_available_at": _iso_z(rows[-1]["timestamp"] + delta) if rows else None,
+    }
+
+
+def _window_return_pct(
+    rows: list[dict[str, Any]],
+    *,
+    lookback: int,
+    delta: timedelta,
+) -> Decimal | None:
+    selected = _contiguous_tail(rows, required_rows=lookback + 1, delta=delta)
+    if not selected:
+        return None
+    start = _decimal(selected[0].get("close"))
+    end = _decimal(selected[-1].get("close"))
+    if start == 0:
+        return None
+    return (end / start - 1) * Decimal(100)
+
+
+def _realized_volatility_pct(
+    rows: list[dict[str, Any]],
+    *,
+    lookback: int,
+    delta: timedelta,
+) -> float | None:
+    selected = _contiguous_tail(rows, required_rows=lookback + 1, delta=delta)
+    if not selected:
+        return None
+    closes = [_decimal(row.get("close")) for row in selected]
+    if any(value == 0 for value in closes[:-1]):
+        return None
+    returns = [float((current / previous - 1) * Decimal(100)) for previous, current in zip(closes, closes[1:])]
+    return pstdev(returns)
+
+
+def _range_position_pct(
+    rows: list[dict[str, Any]],
+    *,
+    lookback: int,
+    delta: timedelta,
+) -> Decimal | None:
+    selected = _contiguous_tail(rows, required_rows=lookback, delta=delta)
+    if not selected:
+        return None
+    low = min(_decimal(row.get("low")) for row in selected)
+    high = max(_decimal(row.get("high")) for row in selected)
+    close = _decimal(selected[-1].get("close"))
+    if high == low:
+        return Decimal(50)
+    return (close - low) / (high - low) * Decimal(100)
+
+
+def _volume_zscore(
+    rows: list[dict[str, Any]],
+    *,
+    lookback: int,
+    delta: timedelta,
+) -> float | None:
+    selected = _contiguous_tail(rows, required_rows=lookback, delta=delta)
+    if not selected:
+        return None
+    volumes = [float(_decimal(row.get("volume", 0))) for row in selected]
+    standard_deviation = pstdev(volumes)
+    if standard_deviation == 0:
+        return None
+    return (volumes[-1] - mean(volumes)) / standard_deviation
+
+
+def _trend_efficiency(
+    rows: list[dict[str, Any]],
+    *,
+    lookback: int,
+    delta: timedelta,
+) -> Decimal | None:
+    selected = _contiguous_tail(rows, required_rows=lookback + 1, delta=delta)
+    if not selected:
+        return None
+    closes = [_decimal(row.get("close")) for row in selected]
+    path = sum((abs(current - previous) for previous, current in zip(closes, closes[1:])), Decimal(0))
+    if path == 0:
+        return Decimal(0)
+    return abs(closes[-1] - closes[0]) / path
+
+
+def _candle_return_pct(row: dict[str, Any]) -> Decimal | None:
+    open_ = _decimal(row.get("open"))
+    close = _decimal(row.get("close"))
+    if open_ == 0:
+        return None
+    return (close / open_ - 1) * Decimal(100)
+
+
+def _ema_slope_pct(
+    rows: list[dict[str, Any]],
+    *,
+    period: int,
+    lookback: int,
+    delta: timedelta,
+) -> Decimal | None:
+    selected = _contiguous_tail(rows, required_rows=lookback + 1, delta=delta)
+    if not selected or not _ema_is_valid(selected[0], period) or not _ema_is_valid(selected[-1], period):
+        return None
+    start = _ema_value(selected[0], period)
+    end = _ema_value(selected[-1], period)
+    if start == 0:
+        return None
+    return (end / start - 1) * Decimal(100)
+
+
+def _contiguous_tail(
+    rows: list[dict[str, Any]],
+    *,
+    required_rows: int,
+    delta: timedelta,
+) -> list[dict[str, Any]]:
+    if required_rows <= 0 or len(rows) < required_rows:
+        return []
+    selected = rows[-required_rows:]
+    if any(current["timestamp"] - previous["timestamp"] != delta for previous, current in zip(selected, selected[1:])):
+        return []
+    return selected
+
+
+def _contiguous_tail_count(rows: list[dict[str, Any]], *, delta: timedelta) -> int:
+    if not rows:
+        return 0
+    count = 1
+    for previous, current in zip(reversed(rows[:-1]), reversed(rows[1:])):
+        if current["timestamp"] - previous["timestamp"] != delta:
+            break
+        count += 1
+    return count
 
 
 def _raw_row_to_mapping(row: Any) -> dict[str, Any]:

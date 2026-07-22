@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from quant_terminal_worker.adapters.exchange import ExchangeAdapterError
 from quant_terminal_worker.execution.order_submission import submit_wake_order_intents
 
 
@@ -355,7 +356,44 @@ def test_submission_updates_protection_without_new_entry_order():
     assert adapter.protection_update_calls[0].size == "1.5"
     assert adapter.protection_update_calls[0].tp_trigger_price == "1620"
     assert adapter.protection_update_calls[0].sl_trigger_price == "1560"
+    assert adapter.protection_update_calls[0].tp_pct == 2.2
+    assert adapter.protection_update_calls[0].sl_pct == 1.5
     assert repository.owner_states == []
+
+
+def test_automatic_submission_failure_is_persisted_instead_of_left_pending():
+    repository = FakeRepository(
+        route=_route(account_mode="live"),
+        wake=_wake(
+            route_id="aave-live",
+            action="UPDATE_PROTECTION",
+            side="sell",
+            quantity="1.5",
+            notional_usd=None,
+            tp="1620",
+            sl="1560",
+            reduce_only=True,
+        ),
+    )
+    adapter = FakeAdapter()
+    adapter.ensure_swap_protection = lambda request: (_ for _ in ()).throw(
+        ExchangeAdapterError('[{"sCode":"51524","sMsg":"Unable to modify quantity"}]')
+    )
+
+    result = submit_wake_order_intents(
+        route_id="aave-live",
+        wake_id="wake-1",
+        repository=repository,
+        adapter=adapter,
+        confirm_live=True,
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "51524"
+    stored_intent = repository.updated_wakes[0]["order_intents"][0]
+    assert stored_intent["status"] == "submission_failed"
+    assert stored_intent["submission_error"]["code"] == "51524"
+    assert stored_intent["failed_at"].endswith("Z")
 
 
 def test_submission_exit_cancels_protection_and_places_reduce_only_close_without_notional():

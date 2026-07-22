@@ -77,12 +77,20 @@ def run_route_lifecycle_cycle(
         adapter=adapter,
     )
     completed_at = datetime.now(UTC)
+    lifecycle_error: dict[str, Any] = {}
+    if wake.get("status") == "error":
+        lifecycle_error = wake.get("error", {})
+    elif submission.get("status") == "failed":
+        lifecycle_error = {
+            "stage": "order_submission",
+            **(submission.get("error") or {}),
+        }
     route_after_cycle = _record_route_cycle(
         runtime_repository=runtime_repository,
         route_id=route_id,
         wake=wake,
         route=runtime_repository.get_deployment_route(route_id) or route,
-        error={} if wake.get("status") != "error" else wake.get("error", {}),
+        error=lifecycle_error,
         completed_at=completed_at,
     )
     return {

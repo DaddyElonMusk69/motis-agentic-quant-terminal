@@ -1,0 +1,327 @@
+{
+  "data": {
+    "causal_decision_rows": 113760,
+    "feature_columns": [
+      "true_range_pct",
+      "body_pct",
+      "upper_wick_pct",
+      "lower_wick_pct",
+      "close_location_pct",
+      "return_1h_pct",
+      "abs_return_1h_pct",
+      "realized_volatility_1h_pct",
+      "range_1h_pct",
+      "close_position_1h",
+      "trend_efficiency_1h",
+      "return_4h_pct",
+      "abs_return_4h_pct",
+      "realized_volatility_4h_pct",
+      "range_4h_pct",
+      "close_position_4h",
+      "trend_efficiency_4h",
+      "return_12h_pct",
+      "abs_return_12h_pct",
+      "realized_volatility_12h_pct",
+      "range_12h_pct",
+      "close_position_12h",
+      "trend_efficiency_12h",
+      "return_24h_pct",
+      "abs_return_24h_pct",
+      "realized_volatility_24h_pct",
+      "range_24h_pct",
+      "close_position_24h",
+      "return_48h_pct",
+      "abs_return_48h_pct",
+      "range_compression_1h_24h",
+      "volume_zscore_4h",
+      "volume_ratio_4h",
+      "volume_zscore_24h",
+      "volume_ratio_24h",
+      "bb_zscore_20",
+      "bb_bandwidth_pct_20",
+      "bb_zscore_48",
+      "bb_bandwidth_pct_48",
+      "ema_gap_12_48_pct",
+      "ema_gap_48_144_pct",
+      "close_ema_48_pct",
+      "close_ema_144_pct",
+      "oi_change_1h_pct",
+      "oi_change_4h_pct",
+      "oi_change_12h_pct",
+      "oi_change_24h_pct",
+      "oi_change_48h_pct",
+      "abs_oi_change_4h_pct",
+      "oi_change_4h_zscore_7d",
+      "oi_price_divergence_4h",
+      "top_account_ratio",
+      "top_account_log_ratio",
+      "top_account_ratio_change_4h",
+      "top_account_ratio_mean_1h",
+      "top_account_ratio_mean_4h",
+      "top_account_ratio_mean_12h",
+      "top_account_ratio_last_minus_mean_4h",
+      "top_position_ratio",
+      "top_position_log_ratio",
+      "top_position_ratio_change_4h",
+      "top_position_ratio_mean_1h",
+      "top_position_ratio_mean_4h",
+      "top_position_ratio_mean_12h",
+      "top_position_ratio_last_minus_mean_4h",
+      "global_ratio",
+      "global_log_ratio",
+      "global_ratio_change_4h",
+      "global_ratio_mean_1h",
+      "global_ratio_mean_4h",
+      "global_ratio_mean_12h",
+      "global_ratio_last_minus_mean_4h",
+      "taker_ratio",
+      "taker_log_ratio",
+      "taker_ratio_change_4h",
+      "taker_ratio_mean_1h",
+      "taker_ratio_mean_4h",
+      "taker_ratio_mean_12h",
+      "taker_ratio_last_minus_mean_4h",
+      "top_account_minus_global",
+      "top_position_minus_global",
+      "top_position_minus_account",
+      "top_account_vs_global_long_share_gap",
+      "top_account_vs_global_long_share_gap_mean_4h",
+      "top_account_vs_global_long_share_gap_mean_12h",
+      "top_position_vs_global_long_share_gap",
+      "top_position_vs_global_long_share_gap_mean_4h",
+      "top_position_vs_global_long_share_gap_mean_12h",
+      "premium_close",
+      "premium_change_5m",
+      "premium_change_1h",
+      "premium_range",
+      "premium_body",
+      "premium_zscore_7d",
+      "premium_mean_1h",
+      "premium_mean_4h",
+      "premium_mean_8h",
+      "premium_mean_24h",
+      "premium_std_1h",
+      "premium_std_4h",
+      "premium_std_8h",
+      "premium_std_24h",
+      "premium_range_1h",
+      "premium_range_4h",
+      "premium_range_8h",
+      "premium_range_24h",
+      "premium_change_4h",
+      "premium_change_8h",
+      "premium_change_24h",
+      "premium_positive_fraction_8h",
+      "premium_positive_fraction_24h",
+      "latest_funding_rate",
+      "funding_rate_change",
+      "annualized_funding_rate",
+      "funding_carry_1d",
+      "funding_carry_3d",
+      "funding_carry_7d",
+      "funding_rate_zscore_7d",
+      "funding_signed_streak",
+      "funding_event_age_minutes",
+      "minutes_to_expected_funding",
+      "funding_event_is_new",
+      "funding_interval_hours",
+      "funding_event_count_1d",
+      "funding_event_count_3d",
+      "funding_event_count_7d",
+      "funding_rate_mean_7d",
+      "funding_rate_std_7d",
+      "oi_coverage",
+      "metrics_coverage",
+      "premium_coverage",
+      "funding_coverage"
+    ],
+    "feature_count": 132,
+    "labeled_rows": 68862,
+    "negative_episode_count": 3297,
+    "positive_episode_count": 800,
+    "selected_dataset_ids": [
+      "legacy-okx-BTC-USDT-SWAP-candles-5m-raw-legacy-dev-data-20260603",
+      "btc-binance-open_interest-raw-5m",
+      "btc-binance-futures_metrics-raw-5m",
+      "btc-binance-premium_index-raw-5m",
+      "btc-binance-funding_features-derived-5m"
+    ]
+  },
+  "decision": {
+    "deployment_status": "not_registered",
+    "reason": "negative precision lift versus fixed 8h cadence on untouched research holdout",
+    "status": "rejected"
+  },
+  "engine_id": "btc_supervised_opportunity_v2",
+  "model_selection": {
+    "candidate_names": [
+      "logistic_c0.1",
+      "hist_gbdt_leaf15",
+      "hist_gbdt_leaf31",
+      "random_forest",
+      "extra_trees_regularized",
+      "extra_trees_broad"
+    ],
+    "folds": [
+      {
+        "fold": 1,
+        "models": {
+          "extra_trees_broad": {
+            "score_mean": 0.51573619,
+            "score_std": 0.13673121
+          },
+          "extra_trees_regularized": {
+            "score_mean": 0.49735396,
+            "score_std": 0.12870572
+          },
+          "hist_gbdt_leaf15": {
+            "score_mean": 0.50465084,
+            "score_std": 0.04503136
+          },
+          "hist_gbdt_leaf31": {
+            "score_mean": 0.50185025,
+            "score_std": 0.02883892
+          },
+          "logistic_c0.1": {
+            "score_mean": 0.50782028,
+            "score_std": 0.01387161
+          },
+          "random_forest": {
+            "score_mean": 0.52874341,
+            "score_std": 0.13813093
+          }
+        },
+        "train_episode_count": 920,
+        "validation_month_count": 2
+      },
+      {
+        "fold": 2,
+        "models": {
+          "extra_trees_broad": {
+            "score_mean": 0.59787389,
+            "score_std": 0.10785685
+          },
+          "extra_trees_regularized": {
+            "score_mean": 0.57094896,
+            "score_std": 0.09783122
+          },
+          "hist_gbdt_leaf15": {
+            "score_mean": 0.51035674,
+            "score_std": 0.05909532
+          },
+          "hist_gbdt_leaf31": {
+            "score_mean": 0.50879396,
+            "score_std": 0.03205137
+          },
+          "logistic_c0.1": {
+            "score_mean": 0.50304856,
+            "score_std": 0.01655668
+          },
+          "random_forest": {
+            "score_mean": 0.56732747,
+            "score_std": 0.14674832
+          }
+        },
+        "train_episode_count": 1443,
+        "validation_month_count": 2
+      },
+      {
+        "fold": 3,
+        "models": {
+          "extra_trees_broad": {
+            "score_mean": 0.55383776,
+            "score_std": 0.06627031
+          },
+          "extra_trees_regularized": {
+            "score_mean": 0.53423825,
+            "score_std": 0.05691713
+          },
+          "hist_gbdt_leaf15": {
+            "score_mean": 0.50992393,
+            "score_std": 0.01439797
+          },
+          "hist_gbdt_leaf31": {
+            "score_mean": 0.50704629,
+            "score_std": 0.00637064
+          },
+          "logistic_c0.1": {
+            "score_mean": 0.50733318,
+            "score_std": 0.01186427
+          },
+          "random_forest": {
+            "score_mean": 0.55776955,
+            "score_std": 0.0813936
+          }
+        },
+        "train_episode_count": 1974,
+        "validation_month_count": 2
+      }
+    ],
+    "selected": {
+      "active_months": 6,
+      "bracket_count_coverage": 0.243402,
+      "duration_weighted_coverage": 0.416051,
+      "emitted_episodes": 216,
+      "episode_precision": 0.384259,
+      "hard_negative_episode_rate": 0.115741,
+      "matched_episodes": 83,
+      "max_drought_hours": 568.33,
+      "model": "hist_gbdt_leaf31",
+      "precision_ci_high": 0.450614,
+      "precision_ci_low": 0.32195,
+      "threshold": 0.51042088,
+      "worst_active_month_precision": 0.215686
+    },
+    "selection_rule": "maximize Wilson precision lower bound after minimum support, month recurrence, and bracket coverage constraints"
+  },
+  "model_version": "3.0",
+  "production_fit": {
+    "artifact_path": "artifacts/signal_engine/models/btc_supervised_opportunity_v2.pkl",
+    "artifact_sha256": "e62fefa9e8c0d5dcac89a32b61d66bdbad08fbd175b355ecacfb6b4791bfc7be",
+    "top_feature_importance": [],
+    "training_episode_count": 4097
+  },
+  "schema_version": "motis_supervised_training_report.v1",
+  "sealed_walk_forward_inspected": false,
+  "session_id": "discovery-btc-2025-04-01-2026-07-10-mrle2qpp",
+  "target_config_hash": "dd5f72eecf81b6b21953ff8bc7a5a7717457cecc715bc1f0411ca41e2f40786d",
+  "training_contract": {
+    "class_balance": "equal_total_mass_preserving_within_class_duration_ratios",
+    "episode_weighting": "min(eligible_5m_rows,576)",
+    "final_evaluation_scope": "untouched_research_holdout",
+    "purge_hours": 48,
+    "refractory_minutes": 480,
+    "research_cutoff": "2026-04-30T23:55:00+00:00",
+    "selection_scope": "purged_expanding_development_folds",
+    "target_config_hash": "dd5f72eecf81b6b21953ff8bc7a5a7717457cecc715bc1f0411ca41e2f40786d"
+  },
+  "untouched_research_holdout": {
+    "fixed_8h_cadence": {
+      "active_months": 4,
+      "bracket_count_coverage": 0.458904,
+      "duration_weighted_coverage": 0.750727,
+      "emitted_episodes": 360,
+      "episode_precision": 0.372222,
+      "hard_negative_episode_rate": 0.111111,
+      "matched_episodes": 134,
+      "max_drought_hours": 8.0,
+      "precision_ci_high": 0.423261,
+      "precision_ci_low": 0.323882,
+      "worst_active_month_precision": 0.225806
+    },
+    "model": {
+      "active_months": 4,
+      "bracket_count_coverage": 0.106164,
+      "duration_weighted_coverage": 0.309089,
+      "emitted_episodes": 95,
+      "episode_precision": 0.326316,
+      "hard_negative_episode_rate": 0.136842,
+      "matched_episodes": 31,
+      "max_drought_hours": 389.83,
+      "precision_ci_high": 0.425747,
+      "precision_ci_low": 0.240386,
+      "worst_active_month_precision": 0.226415
+    },
+    "precision_lift_percentage_points": -4.5906
+  }
+}

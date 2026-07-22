@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 from pathlib import Path
@@ -208,6 +208,22 @@ class OKXAdapter:
             inst_id,
         )
 
+    def list_swap_positions(self, inst_id: str) -> list[dict[str, Any]]:
+        positions = self._extract_list(
+            self.run_json_command(
+                "account",
+                "positions",
+                [],
+                timeout_seconds=int(self.config.get("position_query_timeout_seconds", 15)),
+            ),
+            keys=("data", "positions", "result"),
+        )
+        return [
+            position
+            for position in self._filter_instrument_rows(positions, inst_id)
+            if abs(_numeric(position.get("pos") or position.get("size") or position.get("sz"))) > 0
+        ]
+
     def list_swap_algo_orders(self, inst_id: str, *, order_type: str | None = None) -> list[dict[str, Any]]:
         args = ["--instId", inst_id]
         if order_type:
@@ -268,8 +284,9 @@ class OKXAdapter:
             request.trade_mode,
             "--reduceOnly",
         ]
-        if request.position_side:
-            args.extend(["--posSide", request.position_side])
+        position_side = _cli_position_side(request.position_side)
+        if position_side:
+            args.extend(["--posSide", position_side])
         parsed = self.run_json_command("swap", "algo", args)
         if isinstance(parsed, list):
             return {"data": parsed}
@@ -309,37 +326,111 @@ class OKXAdapter:
         return parsed
 
     def ensure_swap_protection(self, request: SwapProtectionRequest) -> dict[str, Any]:
+        positions = self.list_swap_positions(request.inst_id)
+        position = _select_exchange_position(positions, request=request)
         orders = self.list_swap_algo_orders(request.inst_id, order_type="oco")
-        live_orders = [order for order in orders if str(order.get("state") or "").lower() in {"", "live"}]
+        all_live_orders = [order for order in orders if str(order.get("state") or "").lower() in {"", "live"}]
+        live_orders = _protection_orders_for_position(
+            all_live_orders,
+            request=request,
+            positions=positions,
+        )
+        if position is None:
+            cancelled = self._cancel_swap_algo_orders(request.inst_id, live_orders)
+            return {
+                "status": "cancelled" if cancelled else "noop",
+                "reason": "exchange_position_flat",
+                "cancelled_count": len(cancelled),
+                "cancelled": cancelled,
+            }
+
+        effective_request = _protection_request_for_exchange_position(
+            request,
+            position=position,
+            live_orders=live_orders,
+        )
+        unmanageable_orders = [
+            order
+            for order in live_orders
+            if not str(order.get("algoId") or order.get("algo_id") or "")
+        ]
+        if unmanageable_orders:
+            raise OKXCLIError(
+                f"live protection order for {request.inst_id} has no algoId; refusing to create duplicate protection"
+            )
         if len(live_orders) == 1:
             order = live_orders[0]
+            closes_entire_position = _closes_entire_position(order)
             algo_id = str(order.get("algoId") or "")
-            if algo_id and _protection_matches(order, request):
-                return {"status": "noop", "reason": "protection_already_matches", "order": order}
-            if algo_id:
+            order_belongs_to_position = not _protection_order_predates_position(order, position=position)
+            if algo_id and order_belongs_to_position and _protection_matches(order, effective_request):
                 return {
-                    "status": "amended",
-                    "previous_order": order,
-                    "result": self.amend_swap_protection_order(
+                    "status": "noop",
+                    "reason": "protection_already_matches_exchange_position",
+                    "position": _position_summary(position),
+                    "order": order,
+                }
+            if algo_id and order_belongs_to_position and _protection_order_can_be_amended(order, request=effective_request):
+                try:
+                    amended = self.amend_swap_protection_order(
                         inst_id=request.inst_id,
                         algo_id=algo_id,
-                        tp_trigger_price=request.tp_trigger_price,
-                        sl_trigger_price=request.sl_trigger_price,
-                        size=request.size,
-                    ),
-                }
+                        tp_trigger_price=effective_request.tp_trigger_price,
+                        sl_trigger_price=effective_request.sl_trigger_price,
+                        size=None if closes_entire_position else effective_request.size,
+                    )
+                except OKXCLIError as exc:
+                    if not _is_missing_attached_protection_error(exc):
+                        raise
+                else:
+                    return {
+                        "status": "amended",
+                        "reason": "protection_reconciled_to_exchange_position",
+                        "position": _position_summary(position),
+                        "previous_order": order,
+                        "result": amended,
+                    }
 
-        cancelled = []
-        for order in live_orders:
-            algo_id = str(order.get("algoId") or "")
-            if algo_id:
-                cancelled.append(self.cancel_swap_algo_order(inst_id=request.inst_id, algo_id=algo_id))
+        cancelled = self._cancel_swap_algo_orders(request.inst_id, live_orders)
+        latest_position = _select_exchange_position(self.list_swap_positions(request.inst_id), request=request)
+        if latest_position is None:
+            return {
+                "status": "cancelled" if cancelled else "noop",
+                "reason": "exchange_position_flat_after_cleanup",
+                "cancelled_count": len(cancelled),
+                "cancelled": cancelled,
+            }
+        effective_request = _protection_request_for_exchange_position(
+            request,
+            position=latest_position,
+            live_orders=[],
+        )
         return {
             "status": "placed",
+            "reason": "protection_recreated_from_exchange_position",
+            "position": _position_summary(latest_position),
             "cancelled_count": len(cancelled),
             "cancelled": cancelled,
-            "result": self.place_swap_protection_order(request),
+            "result": self.place_swap_protection_order(effective_request),
         }
+
+    def _cancel_swap_algo_orders(self, inst_id: str, orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        cancelled = []
+        for order in orders:
+            algo_id = str(order.get("algoId") or order.get("algo_id") or "")
+            if algo_id:
+                try:
+                    cancelled.append(self.cancel_swap_algo_order(inst_id=inst_id, algo_id=algo_id))
+                except OKXCLIError:
+                    refreshed_ids = {
+                        str(item.get("algoId") or item.get("algo_id") or "")
+                        for item in self.list_swap_algo_orders(inst_id, order_type="oco")
+                        if str(item.get("state") or "").lower() in {"", "live"}
+                    }
+                    if algo_id in refreshed_ids:
+                        raise
+                    cancelled.append({"status": "already_gone", "algo_id": algo_id})
+        return cancelled
 
     def place_swap_order(self, request: SwapOrderRequest) -> dict[str, Any]:
         exchange_client_order_id = _okx_client_order_id(request.client_order_id)
@@ -357,8 +448,9 @@ class OKXAdapter:
             "--clOrdId",
             exchange_client_order_id,
         ]
-        if request.position_side:
-            args.extend(["--posSide", request.position_side])
+        position_side = _cli_position_side(request.position_side)
+        if position_side:
+            args.extend(["--posSide", position_side])
         if request.price:
             args.extend(["--px", request.price])
         if request.target_currency:
@@ -400,8 +492,9 @@ class OKXAdapter:
             "--mgnMode",
             margin_mode,
         ]
-        if position_side:
-            args.extend(["--posSide", position_side])
+        cli_position_side = _cli_position_side(position_side)
+        if cli_position_side:
+            args.extend(["--posSide", cli_position_side])
         parsed = self.run_json_command("swap", "leverage", args)
         if isinstance(parsed, list):
             return {"data": parsed}
@@ -459,9 +552,255 @@ def _protection_matches(order: dict[str, Any], request: SwapProtectionRequest) -
     return (
         _same_decimal(order.get("tpTriggerPx"), request.tp_trigger_price)
         and _same_decimal(order.get("slTriggerPx"), request.sl_trigger_price)
-        and _same_decimal(order.get("sz"), request.size)
+        and (_closes_entire_position(order) or _same_decimal(order.get("sz"), request.size))
         and str(order.get("side") or "").lower() == request.side
+        and _position_side_matches(order, request=request)
     )
+
+
+def _protection_order_can_be_amended(order: dict[str, Any], *, request: SwapProtectionRequest) -> bool:
+    if str(order.get("side") or "").lower() != request.side:
+        return False
+    if not _position_side_matches(order, request=request):
+        return False
+    return all(order.get(key) not in (None, "") for key in ("tpTriggerPx", "slTriggerPx"))
+
+
+def _position_side_matches(order: dict[str, Any], *, request: SwapProtectionRequest) -> bool:
+    order_position_side = str(order.get("posSide") or order.get("position_side") or "").lower()
+    request_position_side = str(request.position_side or "").lower()
+    return not order_position_side or not request_position_side or order_position_side == request_position_side
+
+
+def _protection_orders_for_position(
+    orders: list[dict[str, Any]],
+    *,
+    request: SwapProtectionRequest,
+    positions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    requested_position_side = str(request.position_side or "").lower()
+    if requested_position_side not in {"long", "short"}:
+        return orders
+    scoped = [
+        order
+        for order in orders
+        if str(order.get("posSide") or order.get("position_side") or "").lower() == requested_position_side
+    ]
+    unknown = [order for order in orders if not str(order.get("posSide") or order.get("position_side") or "").strip()]
+    active_sides = {
+        str(position.get("posSide") or position.get("position_side") or "").lower()
+        for position in positions
+        if abs(_numeric(position.get("pos") or position.get("size") or position.get("sz"))) > 0
+    }
+    if unknown and len(active_sides.intersection({"long", "short"})) > 1:
+        raise OKXCLIError(
+            f"live protection orders for {request.inst_id} have no position side in hedge mode; refusing ambiguous reconciliation"
+        )
+    return scoped
+
+
+def _select_exchange_position(
+    positions: list[dict[str, Any]],
+    *,
+    request: SwapProtectionRequest,
+) -> dict[str, Any] | None:
+    active = [
+        position
+        for position in positions
+        if abs(_numeric(position.get("pos") or position.get("size") or position.get("sz"))) > 0
+    ]
+    requested_position_side = str(request.position_side or "").lower()
+    if requested_position_side in {"long", "short"}:
+        matching = [
+            position
+            for position in active
+            if str(position.get("posSide") or position.get("position_side") or "").lower() == requested_position_side
+        ]
+        if len(matching) == 1:
+            return matching[0]
+        if not matching:
+            return None
+        active = matching
+    if not active:
+        return None
+    if len(active) != 1:
+        raise OKXCLIError(f"multiple active exchange positions found for {request.inst_id}; position_side is required")
+    return active[0]
+
+
+def _protection_request_for_exchange_position(
+    request: SwapProtectionRequest,
+    *,
+    position: dict[str, Any],
+    live_orders: list[dict[str, Any]],
+) -> SwapProtectionRequest:
+    raw_size = _numeric(position.get("pos") or position.get("size") or position.get("sz"))
+    if raw_size == 0:
+        raise OKXCLIError(f"exchange position is flat for {request.inst_id}")
+    position_side = str(position.get("posSide") or position.get("position_side") or "").lower()
+    direction = "SHORT" if position_side in {"short", "sell"} or (position_side not in {"long", "buy"} and raw_size < 0) else "LONG"
+    entry_price = _numeric(position.get("avgPx") or position.get("avg_price") or position.get("entry_price"))
+    tp = request.tp_trigger_price
+    sl = request.sl_trigger_price
+    phase = _protection_phase_for_exchange_position(
+        request,
+        position=position,
+        direction=direction,
+        entry_price=entry_price,
+        live_orders=live_orders,
+    )
+    sl_pct = request.sl_pct
+    if phase == "protected" and request.trail_sl_pct:
+        sl_pct = request.trail_sl_pct
+    elif phase == "initial" and request.initial_sl_pct:
+        sl_pct = request.initial_sl_pct
+    if request.tp_pct and request.sl_pct:
+        if entry_price <= 0:
+            raise OKXCLIError(f"exchange position has no usable entry price for {request.inst_id}")
+        tp, sl = _protection_prices_from_position(
+            entry_price=entry_price,
+            direction=direction,
+            tp_pct=float(request.tp_pct),
+            sl_pct=float(sl_pct or request.sl_pct),
+            phase=phase,
+        )
+    _validate_protection_prices(entry_price=entry_price, direction=direction, tp=tp, sl=sl, phase=phase)
+    exchange_position_side = str(position.get("posSide") or position.get("position_side") or request.position_side or "") or None
+    trade_mode = str(position.get("mgnMode") or position.get("margin_mode") or request.trade_mode)
+    return replace(
+        request,
+        side="sell" if direction == "LONG" else "buy",
+        size=_format_decimal(abs(raw_size)),
+        trade_mode=trade_mode,
+        tp_trigger_price=tp,
+        sl_trigger_price=sl,
+        position_side=exchange_position_side,
+        sl_pct=sl_pct,
+        protection_phase=phase,
+    )
+
+
+def _protection_phase_for_exchange_position(
+    request: SwapProtectionRequest,
+    *,
+    position: dict[str, Any],
+    direction: str,
+    entry_price: float,
+    live_orders: list[dict[str, Any]],
+) -> str:
+    if not request.protection_enabled or not request.protect_trigger_pct or not request.trail_sl_pct:
+        return "initial"
+    expected_side = "sell" if direction == "LONG" else "buy"
+    matching_order = next(
+        (
+            order
+            for order in live_orders
+            if str(order.get("side") or "").lower() == expected_side
+            and not _protection_order_predates_position(order, position=position)
+        ),
+        None,
+    )
+    live_sl = _numeric((matching_order or {}).get("slTriggerPx"))
+    if _live_stop_is_protected(entry_price=entry_price, live_sl=live_sl, direction=direction):
+        return "protected"
+    mark_price = _numeric(
+        position.get("markPx")
+        or position.get("mark_price")
+        or position.get("last")
+        or position.get("lastPx")
+        or position.get("last_price")
+    )
+    favorable_move = _favorable_move_pct(entry_price=entry_price, mark_price=mark_price, direction=direction)
+    return "protected" if favorable_move is not None and favorable_move >= float(request.protect_trigger_pct) else "initial"
+
+
+def _protection_prices_from_position(
+    *,
+    entry_price: float,
+    direction: str,
+    tp_pct: float,
+    sl_pct: float,
+    phase: str,
+) -> tuple[str, str]:
+    if tp_pct <= 0 or sl_pct <= 0:
+        raise OKXCLIError("protection percentages must be positive")
+    protected = phase == "protected"
+    if direction == "SHORT":
+        tp = entry_price * (1 - tp_pct / 100)
+        sl = entry_price * (1 - sl_pct / 100) if protected else entry_price * (1 + sl_pct / 100)
+    else:
+        tp = entry_price * (1 + tp_pct / 100)
+        sl = entry_price * (1 + sl_pct / 100) if protected else entry_price * (1 - sl_pct / 100)
+    return _format_decimal(tp), _format_decimal(sl)
+
+
+def _favorable_move_pct(*, entry_price: float, mark_price: float, direction: str) -> float | None:
+    if entry_price <= 0 or mark_price <= 0:
+        return None
+    if direction == "SHORT":
+        return (entry_price - mark_price) / entry_price * 100
+    return (mark_price - entry_price) / entry_price * 100
+
+
+def _live_stop_is_protected(*, entry_price: float, live_sl: float, direction: str) -> bool:
+    if entry_price <= 0 or live_sl <= 0:
+        return False
+    return live_sl < entry_price if direction == "SHORT" else live_sl > entry_price
+
+
+def _protection_order_predates_position(order: dict[str, Any], *, position: dict[str, Any]) -> bool:
+    order_created_at = _numeric(order.get("cTime") or order.get("created_at"))
+    position_opened_at = _numeric(position.get("cTime") or position.get("opened_at") or position.get("open_time"))
+    return order_created_at > 0 and position_opened_at > 0 and order_created_at < position_opened_at
+
+
+def _validate_protection_prices(*, entry_price: float, direction: str, tp: str, sl: str, phase: str) -> None:
+    tp_value = _numeric(tp)
+    sl_value = _numeric(sl)
+    if tp_value <= 0 or sl_value <= 0:
+        raise OKXCLIError("protection trigger prices must be positive")
+    if entry_price <= 0:
+        return
+    if direction == "SHORT" and tp_value >= entry_price:
+        raise OKXCLIError("short take-profit must be below the exchange entry price")
+    if direction == "LONG" and tp_value <= entry_price:
+        raise OKXCLIError("long take-profit must be above the exchange entry price")
+    if phase == "protected":
+        if direction == "SHORT" and sl_value >= entry_price:
+            raise OKXCLIError("protected short stop-loss must be below the exchange entry price")
+        if direction == "LONG" and sl_value <= entry_price:
+            raise OKXCLIError("protected long stop-loss must be above the exchange entry price")
+    else:
+        if direction == "SHORT" and sl_value <= entry_price:
+            raise OKXCLIError("initial short stop-loss must be above the exchange entry price")
+        if direction == "LONG" and sl_value >= entry_price:
+            raise OKXCLIError("initial long stop-loss must be below the exchange entry price")
+
+
+def _position_summary(position: dict[str, Any]) -> dict[str, Any]:
+    raw_size = _numeric(position.get("pos") or position.get("size") or position.get("sz"))
+    position_side = str(position.get("posSide") or position.get("position_side") or "").lower()
+    direction = "SHORT" if position_side in {"short", "sell"} or (position_side not in {"long", "buy"} and raw_size < 0) else "LONG"
+    return {
+        "position_id": position.get("posId") or position.get("position_id"),
+        "direction": direction,
+        "size": _format_decimal(abs(raw_size)),
+        "entry_price": position.get("avgPx") or position.get("avg_price") or position.get("entry_price"),
+        "position_side": position.get("posSide") or position.get("position_side"),
+    }
+
+
+def _is_missing_attached_protection_error(exc: OKXCLIError) -> bool:
+    return "51527" in str(exc)
+
+
+def _closes_entire_position(order: dict[str, Any]) -> bool:
+    try:
+        if float(order.get("closeFraction") or 0) == 1:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return order.get("sz") in (None, "")
 
 
 def _same_decimal(left: Any, right: Any, *, tolerance: float = 1e-8) -> bool:
@@ -469,3 +808,22 @@ def _same_decimal(left: Any, right: Any, *, tolerance: float = 1e-8) -> bool:
         return abs(float(left) - float(right)) <= tolerance
     except (TypeError, ValueError):
         return str(left) == str(right)
+
+
+def _numeric(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _cli_position_side(value: Any) -> str | None:
+    position_side = str(value or "").strip().lower()
+    return position_side if position_side in {"long", "short"} else None
+
+
+def _format_decimal(value: Any) -> str:
+    number = _numeric(value)
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.12f}".rstrip("0").rstrip(".")

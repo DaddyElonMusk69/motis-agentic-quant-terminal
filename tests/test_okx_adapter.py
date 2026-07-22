@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 import pytest
@@ -236,6 +235,35 @@ def test_okx_cli_adapter_places_swap_order_with_client_order_id(tmp_path: Path):
     assert result["exchange_client_order_id"].isalnum()
 
 
+def test_okx_cli_adapter_omits_net_position_side_for_swap_order(tmp_path: Path):
+    cli = tmp_path / "okx"
+    cli.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import json, sys",
+                "print(json.dumps({'argv': sys.argv[1:], 'ordId': '123'}))",
+            ]
+        )
+    )
+    cli.chmod(0o755)
+    adapter = OKXAdapter(config={"backend": "okx_cli", "cli_path": str(cli), "mode": "live"})
+
+    result = adapter.place_swap_order(
+        SwapOrderRequest(
+            inst_id="ETH-USDT-SWAP",
+            side="buy",
+            order_type="market",
+            size="1",
+            trade_mode="isolated",
+            client_order_id="route-pyramid-1",
+            position_side="net",
+        )
+    )
+
+    assert "--posSide" not in result["argv"]
+
+
 def test_okx_cli_adapter_sanitizes_exchange_client_order_id(tmp_path: Path):
     cli = tmp_path / "okx"
     cli.write_text(
@@ -444,6 +472,30 @@ def test_okx_cli_adapter_sets_swap_leverage(tmp_path: Path):
     ]
 
 
+def test_okx_cli_adapter_omits_net_position_side_for_leverage(tmp_path: Path):
+    cli = tmp_path / "okx"
+    cli.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import json, sys",
+                "print(json.dumps({'argv': sys.argv[1:], 'data': [{'sCode': '0'}]}))",
+            ]
+        )
+    )
+    cli.chmod(0o755)
+    adapter = OKXAdapter(config={"backend": "okx_cli", "cli_path": str(cli), "mode": "live"})
+
+    result = adapter.set_swap_leverage(
+        inst_id="ETH-USDT-SWAP",
+        leverage="10",
+        margin_mode="isolated",
+        position_side="net",
+    )
+
+    assert "--posSide" not in result["argv"]
+
+
 def test_okx_cli_adapter_wraps_list_leverage_response(tmp_path: Path):
     cli = tmp_path / "okx"
     cli.write_text(
@@ -564,8 +616,6 @@ def test_okx_cli_adapter_places_swap_protection_order(tmp_path: Path):
         "--tdMode",
         "isolated",
         "--reduceOnly",
-        "--posSide",
-        "net",
     ]
 
 
@@ -610,6 +660,374 @@ def test_okx_cli_adapter_amends_swap_protection_order(tmp_path: Path):
         "--newSz",
         "0.06",
     ]
+
+
+def test_okx_adapter_amends_full_position_protection_without_quantity(monkeypatch):
+    adapter = OKXAdapter(config={"backend": "okx_cli", "mode": "live"})
+    amend_calls = []
+    monkeypatch.setattr(
+        OKXAdapter,
+        "list_swap_positions",
+        lambda self, inst_id: [{"instId": inst_id, "pos": "2.22", "posSide": "net", "avgPx": "1874.78", "mgnMode": "isolated"}],
+    )
+    monkeypatch.setattr(
+        OKXAdapter,
+        "list_swap_algo_orders",
+        lambda self, inst_id, order_type: [
+            {
+                "instId": inst_id,
+                "algoId": "algo-full-position",
+                "state": "live",
+                "side": "sell",
+                "sz": "",
+                "closeFraction": "1",
+                "tpTriggerPx": "1941.86",
+                "slTriggerPx": "1829.83",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        OKXAdapter,
+        "amend_swap_protection_order",
+        lambda self, **kwargs: amend_calls.append(kwargs) or {"status": "ok"},
+    )
+
+    result = adapter.ensure_swap_protection(
+        SwapProtectionRequest(
+            inst_id="ETH-USDT-SWAP",
+            side="sell",
+            size="2.22",
+            trade_mode="isolated",
+            tp_trigger_price="1944.15",
+            sl_trigger_price="1837.29",
+            position_side="net",
+        )
+    )
+
+    assert result["status"] == "amended"
+    assert amend_calls[0]["size"] is None
+
+
+def test_okx_adapter_treats_full_position_protection_as_size_synced(monkeypatch):
+    adapter = OKXAdapter(config={"backend": "okx_cli", "mode": "live"})
+    monkeypatch.setattr(
+        OKXAdapter,
+        "list_swap_positions",
+        lambda self, inst_id: [{"instId": inst_id, "pos": "2.22", "posSide": "net", "avgPx": "1874.78", "mgnMode": "isolated"}],
+    )
+    monkeypatch.setattr(
+        OKXAdapter,
+        "list_swap_algo_orders",
+        lambda self, inst_id, order_type: [
+            {
+                "instId": inst_id,
+                "algoId": "algo-full-position",
+                "state": "live",
+                "side": "sell",
+                "sz": "",
+                "closeFraction": "1",
+                "tpTriggerPx": "1944.15",
+                "slTriggerPx": "1837.29",
+            }
+        ],
+    )
+
+    result = adapter.ensure_swap_protection(
+        SwapProtectionRequest(
+            inst_id="ETH-USDT-SWAP",
+            side="sell",
+            size="2.22",
+            trade_mode="isolated",
+            tp_trigger_price="1944.15",
+            sl_trigger_price="1837.29",
+            position_side="net",
+        )
+    )
+
+    assert result["status"] == "noop"
+
+
+def test_okx_protection_reversal_uses_current_exchange_short_and_replaces_stale_long_order(monkeypatch):
+    adapter = OKXAdapter(config={"backend": "okx_cli", "mode": "live"})
+    cancelled = []
+    placed = []
+    positions = [{"instId": "ETH-USDT-SWAP", "posId": "pos-1", "pos": "-7.57", "posSide": "net", "avgPx": "1858.7158", "mgnMode": "isolated"}]
+    stale_long_order = {
+        "instId": "ETH-USDT-SWAP",
+        "algoId": "old-long-protection",
+        "state": "live",
+        "side": "sell",
+        "sz": "5.36",
+        "tpTriggerPx": "1947.74",
+        "slTriggerPx": "1840.68",
+        "posSide": "net",
+    }
+    monkeypatch.setattr(OKXAdapter, "list_swap_positions", lambda self, inst_id: positions)
+    monkeypatch.setattr(OKXAdapter, "list_swap_algo_orders", lambda self, inst_id, order_type: [stale_long_order])
+    monkeypatch.setattr(
+        OKXAdapter,
+        "cancel_swap_algo_order",
+        lambda self, **kwargs: cancelled.append(kwargs) or {"status": "cancelled"},
+    )
+    monkeypatch.setattr(
+        OKXAdapter,
+        "place_swap_protection_order",
+        lambda self, request: placed.append(request) or {"status": "placed"},
+    )
+
+    result = adapter.ensure_swap_protection(
+        SwapProtectionRequest(
+            inst_id="ETH-USDT-SWAP",
+            side="sell",
+            size="5.36",
+            trade_mode="isolated",
+            tp_trigger_price="1947.74",
+            sl_trigger_price="1840.68",
+            position_side="net",
+            tp_pct=4.6,
+            sl_pct=2.0,
+            protection_phase="initial",
+        )
+    )
+
+    assert result["status"] == "placed"
+    assert result["position"]["direction"] == "SHORT"
+    assert cancelled == [{"inst_id": "ETH-USDT-SWAP", "algo_id": "old-long-protection"}]
+    assert placed[0].side == "buy"
+    assert placed[0].size == "7.57"
+    assert placed[0].tp_trigger_price == "1773.2148732"
+    assert placed[0].sl_trigger_price == "1895.890116"
+
+
+def test_okx_protection_flat_exchange_position_cancels_stale_orders_without_placing(monkeypatch):
+    adapter = OKXAdapter(config={"backend": "okx_cli", "mode": "live"})
+    cancelled = []
+    placed = []
+    monkeypatch.setattr(OKXAdapter, "list_swap_positions", lambda self, inst_id: [])
+    monkeypatch.setattr(
+        OKXAdapter,
+        "list_swap_algo_orders",
+        lambda self, inst_id, order_type: [{"algoId": "stale-1", "state": "live"}],
+    )
+    monkeypatch.setattr(
+        OKXAdapter,
+        "cancel_swap_algo_order",
+        lambda self, **kwargs: cancelled.append(kwargs) or {"status": "cancelled"},
+    )
+    monkeypatch.setattr(OKXAdapter, "place_swap_protection_order", lambda self, request: placed.append(request))
+
+    result = adapter.ensure_swap_protection(
+        SwapProtectionRequest("ETH-USDT-SWAP", "sell", "1", "isolated", "110", "90", "net")
+    )
+
+    assert result["reason"] == "exchange_position_flat"
+    assert cancelled == [{"inst_id": "ETH-USDT-SWAP", "algo_id": "stale-1"}]
+    assert placed == []
+
+
+def test_okx_protection_duplicate_orders_are_collapsed_to_one_exchange_sized_order(monkeypatch):
+    adapter = OKXAdapter(config={"backend": "okx_cli", "mode": "live"})
+    cancelled = []
+    placed = []
+    position = {"instId": "ETH-USDT-SWAP", "pos": "3", "posSide": "net", "avgPx": "100", "mgnMode": "cross"}
+    orders = [
+        {"algoId": "duplicate-1", "state": "live", "side": "sell", "sz": "1", "tpTriggerPx": "102", "slTriggerPx": "99"},
+        {"algoId": "duplicate-2", "state": "live", "side": "sell", "sz": "2", "tpTriggerPx": "102", "slTriggerPx": "99"},
+    ]
+    monkeypatch.setattr(OKXAdapter, "list_swap_positions", lambda self, inst_id: [position])
+    monkeypatch.setattr(OKXAdapter, "list_swap_algo_orders", lambda self, inst_id, order_type: orders)
+    monkeypatch.setattr(OKXAdapter, "cancel_swap_algo_order", lambda self, **kwargs: cancelled.append(kwargs) or {})
+    monkeypatch.setattr(OKXAdapter, "place_swap_protection_order", lambda self, request: placed.append(request) or {})
+
+    result = adapter.ensure_swap_protection(
+        SwapProtectionRequest("ETH-USDT-SWAP", "sell", "1", "isolated", "102", "99", "net", 2.0, 1.0, "initial")
+    )
+
+    assert result["status"] == "placed"
+    assert {item["algo_id"] for item in cancelled} == {"duplicate-1", "duplicate-2"}
+    assert placed[0].size == "3"
+    assert placed[0].trade_mode == "cross"
+
+
+def test_okx_protection_51527_amend_failure_recreates_from_fresh_exchange_position(monkeypatch):
+    adapter = OKXAdapter(config={"backend": "okx_cli", "mode": "live"})
+    cancelled = []
+    placed = []
+    position = {"instId": "ETH-USDT-SWAP", "pos": "2", "posSide": "net", "avgPx": "100", "mgnMode": "isolated"}
+    order = {"algoId": "broken-oco", "state": "live", "side": "sell", "sz": "2", "tpTriggerPx": "101", "slTriggerPx": "98"}
+    monkeypatch.setattr(OKXAdapter, "list_swap_positions", lambda self, inst_id: [position])
+    monkeypatch.setattr(OKXAdapter, "list_swap_algo_orders", lambda self, inst_id, order_type: [order])
+    monkeypatch.setattr(
+        OKXAdapter,
+        "amend_swap_protection_order",
+        lambda self, **kwargs: (_ for _ in ()).throw(OKXCLIError('[{"sCode":"51527"}]')),
+    )
+    monkeypatch.setattr(OKXAdapter, "cancel_swap_algo_order", lambda self, **kwargs: cancelled.append(kwargs) or {})
+    monkeypatch.setattr(OKXAdapter, "place_swap_protection_order", lambda self, request: placed.append(request) or {})
+
+    result = adapter.ensure_swap_protection(
+        SwapProtectionRequest("ETH-USDT-SWAP", "sell", "2", "isolated", "102", "99", "net", 2.0, 1.0, "initial")
+    )
+
+    assert result["status"] == "placed"
+    assert cancelled == [{"inst_id": "ETH-USDT-SWAP", "algo_id": "broken-oco"}]
+    assert placed[0].tp_trigger_price == "102"
+    assert placed[0].sl_trigger_price == "99"
+
+
+def test_okx_protection_amend_uses_exchange_size_instead_of_stale_intent_size(monkeypatch):
+    adapter = OKXAdapter(config={"backend": "okx_cli", "mode": "live"})
+    amend_calls = []
+    position = {"instId": "ETH-USDT-SWAP", "pos": "4.25", "posSide": "net", "avgPx": "100", "mgnMode": "isolated"}
+    order = {"algoId": "oco-1", "state": "live", "side": "sell", "sz": "2", "tpTriggerPx": "101", "slTriggerPx": "98", "posSide": "net"}
+    monkeypatch.setattr(OKXAdapter, "list_swap_positions", lambda self, inst_id: [position])
+    monkeypatch.setattr(OKXAdapter, "list_swap_algo_orders", lambda self, inst_id, order_type: [order])
+    monkeypatch.setattr(
+        OKXAdapter,
+        "amend_swap_protection_order",
+        lambda self, **kwargs: amend_calls.append(kwargs) or {"status": "ok"},
+    )
+
+    result = adapter.ensure_swap_protection(
+        SwapProtectionRequest("ETH-USDT-SWAP", "sell", "2", "isolated", "102", "99", "net", 2.0, 1.0, "initial")
+    )
+
+    assert result["status"] == "amended"
+    assert amend_calls[0]["size"] == "4.25"
+    assert amend_calls[0]["tp_trigger_price"] == "102"
+    assert amend_calls[0]["sl_trigger_price"] == "99"
+
+
+def test_okx_protection_reversal_recomputes_protected_short_stop_from_exchange_entry(monkeypatch):
+    adapter = OKXAdapter(config={"backend": "okx_cli", "mode": "live"})
+    placed = []
+    position = {"instId": "ETH-USDT-SWAP", "pos": "-3", "posSide": "net", "avgPx": "200", "markPx": "190", "mgnMode": "isolated"}
+    stale_order = {"algoId": "old-long", "state": "live", "side": "sell", "sz": "3", "tpTriggerPx": "210", "slTriggerPx": "198"}
+    monkeypatch.setattr(OKXAdapter, "list_swap_positions", lambda self, inst_id: [position])
+    monkeypatch.setattr(OKXAdapter, "list_swap_algo_orders", lambda self, inst_id, order_type: [stale_order])
+    monkeypatch.setattr(OKXAdapter, "cancel_swap_algo_order", lambda self, **kwargs: {})
+    monkeypatch.setattr(OKXAdapter, "place_swap_protection_order", lambda self, request: placed.append(request) or {})
+
+    adapter.ensure_swap_protection(
+        SwapProtectionRequest(
+            "ETH-USDT-SWAP",
+            "sell",
+            "3",
+            "isolated",
+            "210",
+            "198",
+            "net",
+            5.0,
+            1.5,
+            "protected",
+            2.0,
+            1.5,
+            3.0,
+            True,
+        )
+    )
+
+    assert placed[0].side == "buy"
+    assert placed[0].tp_trigger_price == "190"
+    assert placed[0].sl_trigger_price == "197"
+
+
+def test_okx_protection_refuses_duplicate_when_live_order_has_no_algo_id(monkeypatch):
+    adapter = OKXAdapter(config={"backend": "okx_cli", "mode": "live"})
+    placed = []
+    monkeypatch.setattr(
+        OKXAdapter,
+        "list_swap_positions",
+        lambda self, inst_id: [{"instId": inst_id, "pos": "1", "posSide": "net", "avgPx": "100"}],
+    )
+    monkeypatch.setattr(
+        OKXAdapter,
+        "list_swap_algo_orders",
+        lambda self, inst_id, order_type: [{"state": "live", "side": "sell", "tpTriggerPx": "102", "slTriggerPx": "99"}],
+    )
+    monkeypatch.setattr(OKXAdapter, "place_swap_protection_order", lambda self, request: placed.append(request))
+
+    with pytest.raises(OKXCLIError, match="has no algoId"):
+        adapter.ensure_swap_protection(
+            SwapProtectionRequest("ETH-USDT-SWAP", "sell", "1", "isolated", "102", "99", "net", 2.0, 1.0, "initial")
+        )
+
+    assert placed == []
+
+
+def test_okx_protection_flat_hedge_leg_does_not_cancel_other_position_side(monkeypatch):
+    adapter = OKXAdapter(config={"backend": "okx_cli", "mode": "live"})
+    cancelled = []
+    positions = [{"instId": "ETH-USDT-SWAP", "pos": "-2", "posSide": "short", "avgPx": "100"}]
+    orders = [
+        {"algoId": "stale-long", "state": "live", "posSide": "long", "side": "sell"},
+        {"algoId": "active-short", "state": "live", "posSide": "short", "side": "buy"},
+    ]
+    monkeypatch.setattr(OKXAdapter, "list_swap_positions", lambda self, inst_id: positions)
+    monkeypatch.setattr(OKXAdapter, "list_swap_algo_orders", lambda self, inst_id, order_type: orders)
+    monkeypatch.setattr(
+        OKXAdapter,
+        "cancel_swap_algo_order",
+        lambda self, **kwargs: cancelled.append(kwargs) or {"status": "cancelled"},
+    )
+
+    result = adapter.ensure_swap_protection(
+        SwapProtectionRequest("ETH-USDT-SWAP", "sell", "1", "isolated", "102", "99", "long", 2.0, 1.0, "initial")
+    )
+
+    assert result["reason"] == "exchange_position_flat"
+    assert cancelled == [{"inst_id": "ETH-USDT-SWAP", "algo_id": "stale-long"}]
+
+
+def test_okx_protection_reopened_same_direction_replaces_order_from_previous_position(monkeypatch):
+    adapter = OKXAdapter(config={"backend": "okx_cli", "mode": "live"})
+    cancelled = []
+    placed = []
+    position = {
+        "instId": "ETH-USDT-SWAP",
+        "pos": "2",
+        "posSide": "net",
+        "avgPx": "100",
+        "markPx": "100.2",
+        "cTime": "2000",
+    }
+    old_order = {
+        "algoId": "previous-position-oco",
+        "state": "live",
+        "side": "sell",
+        "sz": "2",
+        "tpTriggerPx": "102",
+        "slTriggerPx": "101",
+        "cTime": "1000",
+    }
+    monkeypatch.setattr(OKXAdapter, "list_swap_positions", lambda self, inst_id: [position])
+    monkeypatch.setattr(OKXAdapter, "list_swap_algo_orders", lambda self, inst_id, order_type: [old_order])
+    monkeypatch.setattr(OKXAdapter, "cancel_swap_algo_order", lambda self, **kwargs: cancelled.append(kwargs) or {})
+    monkeypatch.setattr(OKXAdapter, "place_swap_protection_order", lambda self, request: placed.append(request) or {})
+
+    result = adapter.ensure_swap_protection(
+        SwapProtectionRequest(
+            "ETH-USDT-SWAP",
+            "sell",
+            "2",
+            "isolated",
+            "102",
+            "101",
+            "net",
+            2.0,
+            1.0,
+            "protected",
+            1.0,
+            0.5,
+            1.5,
+            True,
+        )
+    )
+
+    assert result["status"] == "placed"
+    assert cancelled == [{"inst_id": "ETH-USDT-SWAP", "algo_id": "previous-position-oco"}]
+    assert placed[0].protection_phase == "initial"
+    assert placed[0].sl_trigger_price == "99"
 
 
 def test_okx_cli_adapter_builds_execution_snapshot(tmp_path: Path):

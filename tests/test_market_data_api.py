@@ -60,6 +60,23 @@ class FakeMarketDataRepository:
                 "timeframe": "15m",
                 "data_origin": "derived",
             }
+        if dataset_id == "btc-binance-funding-raw-8h":
+            return {
+                "dataset_id": "btc-binance-funding-raw-8h",
+                "asset": "BTC",
+                "instrument": "BTCUSDT",
+                "data_type": "funding",
+                "timeframe": "8h",
+                "data_origin": "raw",
+                "start_ts": datetime(2026, 5, 1, tzinfo=UTC),
+                "end_ts": datetime(2026, 6, 30, 16, tzinfo=UTC),
+                "row_count": 100,
+                "storage_backend": "parquet",
+                "storage_uri": ".data/market-data",
+                "schema_descriptor": {"columns": ["timestamp", "symbol", "funding_rate", "funding_interval_hours"]},
+                "quality_status": "ingested",
+                "ingestion_version": "binance-funding-v1",
+            }
         return None
 
     def update_ref(self, registration):
@@ -267,3 +284,34 @@ def test_market_data_refresh_endpoint_blocks_derived_open_interest_dataset_befor
         "status": "blocked",
         "reason": "refresh_supported_for_raw_market_data_only",
     }
+
+
+def test_market_data_refresh_endpoint_fills_raw_funding_dataset():
+    repository = FakeMarketDataRepository()
+
+    def fake_funding_fill_service(*, registration, repository, adapter):
+        assert registration["dataset_id"] == "btc-binance-funding-raw-8h"
+        assert registration["data_type"] == "funding"
+        repository.update_ref({**registration, "row_count": 101, "quality_status": "updated"})
+        return {
+            "dataset_id": registration["dataset_id"],
+            "status": "filled",
+            "rows_added": 1,
+            "row_count": 101,
+            "end_ts": "2026-07-01T00:00:00Z",
+            "source": "binance_cli",
+        }
+
+    client = TestClient(
+        create_app(
+            market_data_repository=repository,
+            market_data_fill_service=fake_funding_fill_service,
+        )
+    )
+
+    response = client.post("/api/v1/market-data/btc-binance-funding-raw-8h/refresh")
+
+    assert response.status_code == 200
+    assert response.json()["dataset_id"] == "btc-binance-funding-raw-8h"
+    assert response.json()["status"] == "filled"
+    assert repository.updated_registration["row_count"] == 101

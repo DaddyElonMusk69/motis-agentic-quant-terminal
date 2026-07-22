@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import statistics
+from bisect import bisect_right
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -27,6 +28,7 @@ def run_stage4_realized_expectancy(
     leverage: float = DEFAULT_LEVERAGE,
     fees_bps_per_side: float = DEFAULT_FEES_BPS_PER_SIDE,
     slippage_bps_per_side: float = DEFAULT_SLIPPAGE_BPS_PER_SIDE,
+    loss_cooldown: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if initial_capital_usdt <= 0:
         raise ValueError("initial_capital_usdt must be greater than zero")
@@ -46,6 +48,7 @@ def run_stage4_realized_expectancy(
     candidates = _normalize_candidates(candidates_payload)
     if not candidates:
         raise ValueError("Stage 4 requires at least one Stage 4 candidate.")
+    loss_cooldown = _normalize_loss_cooldown(loss_cooldown)
 
     signals_by_id = _index_signals(signal_rows)
     candle_rows = [_coerce_candle(candle) for candle in candles]
@@ -65,6 +68,7 @@ def run_stage4_realized_expectancy(
             fees_bps_per_side=fees_bps_per_side,
             slippage_bps_per_side=slippage_bps_per_side,
             slice_windows=slice_windows,
+            loss_cooldown=loss_cooldown,
         )
         results.append(result)
         ledger_candidates.append(
@@ -110,6 +114,7 @@ def run_stage4_realized_expectancy(
             "initial_capital_usdt": initial_capital_usdt,
             "margin_allocation_pct": margin_allocation_pct,
             "leverage": leverage,
+            **({"loss_cooldown": loss_cooldown} if loss_cooldown is not None else {}),
         },
         "slice_windows": [
             {"name": name, "start": start.isoformat().replace("+00:00", "Z"), "end": end.isoformat().replace("+00:00", "Z")}
@@ -228,6 +233,7 @@ def _score_candidate(
     fees_bps_per_side: float,
     slippage_bps_per_side: float,
     slice_windows: list[tuple[str, datetime, datetime]],
+    loss_cooldown: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     candidate = {**candidate, "leverage": float(leverage)}
     inputs = []
@@ -250,14 +256,26 @@ def _score_candidate(
             }
         )
     inputs.sort(key=lambda item: (item["signal_ts"], item["signal_id"]))
+    candle_timestamps = [candle["timestamp"] for candle in candles]
 
     trades = []
     equity = float(initial_capital_usdt)
+    cooldown_config = _normalize_loss_cooldown(loss_cooldown)
+    cooldown_until: datetime | None = None
+    consecutive_losses = 0
+    cooldown_triggers = 0
     index = 0
     while index < len(inputs):
         item = inputs[index]
         if item["direction"] not in {"LONG", "SHORT"}:
             trades.append(_skipped_decision(item=item, candidate=candidate, reason=str(item["record"].get("stage4b_skip_reason") or "no_trade_decision")))
+            index += 1
+            continue
+
+        if cooldown_until is not None and item["signal_ts"] < cooldown_until:
+            skipped = _skipped_decision(item=item, candidate=candidate, reason="loss_cooldown")
+            skipped["cooldown_until"] = cooldown_until.isoformat().replace("+00:00", "Z")
+            trades.append(skipped)
             index += 1
             continue
 
@@ -270,11 +288,24 @@ def _score_candidate(
             leverage=leverage,
             fees_bps_per_side=fees_bps_per_side,
             slippage_bps_per_side=slippage_bps_per_side,
+            candle_start_index=bisect_right(candle_timestamps, item["signal_ts"]),
         )
         trades.append(trade)
         equity = trade["equity_after"]
 
         exit_ts = _coerce_datetime(trade["exit_ts"])
+        if cooldown_config is not None:
+            if float(trade.get("net_pnl_usdt") or 0.0) < 0:
+                consecutive_losses += 1
+            else:
+                consecutive_losses = 0
+            if consecutive_losses >= cooldown_config["consecutive_losses"]:
+                cooldown_until = exit_ts + timedelta(hours=cooldown_config["cooldown_hours"])
+                trade["loss_cooldown_triggered"] = True
+                trade["cooldown_until"] = cooldown_until.isoformat().replace("+00:00", "Z")
+                cooldown_triggers += 1
+                consecutive_losses = 0
+
         index += 1
         while index < len(inputs) and inputs[index]["signal_ts"] <= exit_ts:
             trades.append(
@@ -298,15 +329,27 @@ def _score_candidate(
         summary["net_pnl_pct"] = account["return_pct"]
         summary["gross_expectancy_pct"] = round(account["gross_return_pct"] / len(records), 8)
         summary["net_expectancy_pct"] = round(account["return_pct"] / len(records), 8)
+    if cooldown_config is not None:
+        summary["loss_cooldown"] = cooldown_config
+        summary["loss_cooldown_triggers"] = cooldown_triggers
+        summary["skipped_loss_cooldown"] = sum(1 for trade in trades if trade.get("skip_reason") == "loss_cooldown")
     by_side = {
         side: _summarize_trades([trade for trade in trades if trade["decision_direction"] == side], denominator=len([trade for trade in trades if trade["decision_direction"] == side]))
         for side in ("LONG", "SHORT")
         if any(trade["decision_direction"] == side for trade in trades)
     }
-    slices = {
-        name: _summarize_trades([trade for trade in trades if trade["slice_name"] == name], denominator=len([trade for trade in trades if trade["slice_name"] == name]))
+    slice_trades = {
+        name: [trade for trade in trades if trade["slice_name"] == name]
         for name, _, _ in slice_windows
         if any(trade["slice_name"] == name for trade in trades)
+    }
+    slices = {
+        name: _summarize_trades(rows, denominator=len(rows))
+        for name, rows in slice_trades.items()
+    }
+    slice_accounts = {
+        name: _summarize_slice_account(rows)
+        for name, rows in slice_trades.items()
     }
     mismatch_trades = [trade for trade in trades if trade.get("agreement") == "MISMATCH"]
     return (
@@ -323,9 +366,27 @@ def _score_candidate(
             "mismatch_cohort": _summarize_trades(mismatch_trades, denominator=len(mismatch_trades)),
             "by_side": by_side,
             "slices": slices,
+            "slice_accounts": slice_accounts,
         },
         trades,
     )
+
+
+def _normalize_loss_cooldown(config: dict[str, Any] | None) -> dict[str, int] | None:
+    if config is None:
+        return None
+    consecutive_losses = int(config.get("consecutive_losses") or 0)
+    cooldown_hours = int(config.get("cooldown_hours") or 0)
+    if consecutive_losses < 1:
+        raise ValueError("loss cooldown consecutive_losses must be at least 1")
+    if cooldown_hours < 1:
+        raise ValueError("loss cooldown cooldown_hours must be at least 1")
+    return {
+        "consecutive_losses": consecutive_losses,
+        "cooldown_hours": cooldown_hours,
+        "counter_reset": "on_win_or_trigger",
+        "starts_at": "loss_exit",
+    }
 
 
 def _stage4_run_id(created_at: datetime, promotion_root: Path) -> str:
@@ -398,6 +459,7 @@ def _simulate_account_position(
     leverage: float,
     fees_bps_per_side: float,
     slippage_bps_per_side: float,
+    candle_start_index: int = 0,
 ) -> dict[str, Any]:
     direction = item["direction"]
     policy = _candidate_policy_for_direction(candidate, direction)
@@ -440,10 +502,8 @@ def _simulate_account_position(
     active = legs.copy()
     last_candle = None
 
-    for candle in candles:
+    for candle in candles[candle_start_index:]:
         timestamp = candle["timestamp"]
-        if timestamp <= signal_ts:
-            continue
         if timestamp > cutoff:
             break
         last_candle = candle
@@ -720,6 +780,17 @@ def _summarize_account(*, initial_capital_usdt: float, ending_equity_usdt: float
         "sharpe_ratio": round(sharpe_ratio, 4),
         "sortino_ratio": round(sortino_ratio, 4),
     }
+
+
+def _summarize_slice_account(trades: list[dict[str, Any]]) -> dict[str, Any]:
+    filled = [trade for trade in trades if trade.get("entry_status") == "FILLED"]
+    if not filled:
+        return _summarize_account(initial_capital_usdt=0.0, ending_equity_usdt=0.0, trades=trades)
+    return _summarize_account(
+        initial_capital_usdt=float(filled[0]["equity_before"]),
+        ending_equity_usdt=float(filled[-1]["equity_after"]),
+        trades=trades,
+    )
 
 
 def _simulate_candidate_trade(
@@ -1106,11 +1177,16 @@ def _overall_net_pnl_usdt(candidate: dict[str, Any]) -> float:
 def _render_summary(payload: dict[str, Any]) -> str:
     best = payload["best_candidate"]
     account = best.get("account") or {}
-    return "\n".join(
+    lines = [
+        "# Stage 4 Realized Expectancy",
+        "",
+        "Mode: `sequential_account_backtest`",
+    ]
+    cooldown = (payload.get("simulation_inputs") or {}).get("loss_cooldown")
+    if cooldown:
+        lines.append(f"Loss cooldown: `{cooldown['consecutive_losses']} consecutive losses / {cooldown['cooldown_hours']}h`")
+    lines.extend(
         [
-            "# Stage 4 Realized Expectancy",
-            "",
-            "Mode: `sequential_account_backtest`",
             f"Best candidate: `{best['candidate_id']}`",
             f"Net expectancy: `{best['net_expectancy_pct']:.4f}%` per decision",
             f"Gross expectancy: `{best['gross_expectancy_pct']:.4f}%` per decision",
@@ -1123,6 +1199,7 @@ def _render_summary(payload: dict[str, Any]) -> str:
             "",
         ]
     )
+    return "\n".join(lines)
 
 
 def _slice_windows(session: dict[str, Any]) -> list[tuple[str, datetime, datetime]]:

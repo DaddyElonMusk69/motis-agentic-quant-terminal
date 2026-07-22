@@ -173,7 +173,7 @@ class OrderIntent:
     tp_pct: float | None = None
     sl_pct: float | None = None
     position_side: str | None = None
-    status: Literal["intent_only", "submitted", "cancelled", "blocked"] = "intent_only"
+    status: Literal["intent_only", "submitted", "submission_failed", "cancelled", "blocked"] = "intent_only"
 
     def __post_init__(self) -> None:
         if not self.client_order_id:

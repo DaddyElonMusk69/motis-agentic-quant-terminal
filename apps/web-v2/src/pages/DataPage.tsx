@@ -51,7 +51,9 @@ const FEATURE_CATEGORIES = [
 const DATA_TYPE_PRIORITY = new Map<string, number>([
   ["candles", 0],
   ["open_interest", 1],
-  ["ema", 2]
+  ["futures_metrics", 2],
+  ["funding", 3],
+  ["ema", 4]
 ]);
 
 function featureCategoryForDataType(dataType: string) {
@@ -155,10 +157,11 @@ function getRefreshTargetForType(datasets: Dataset[], dataType: string, selected
   if (featureCategory) {
     return { kind: "feature", asset: selectedAsset, family: featureCategory.family };
   }
-  if (dataType !== "candles" && dataType !== "open_interest") {
+  if (dataType !== "candles" && dataType !== "open_interest" && dataType !== "funding" && dataType !== "futures_metrics") {
     return undefined;
   }
-  const dataset = datasets.find((item) => item.data_origin === "raw" && item.timeframe === "5m") ?? datasets.find((item) => item.data_origin === "raw");
+  const preferredTimeframe = dataType === "funding" ? "8h" : "5m";
+  const dataset = datasets.find((item) => item.data_origin === "raw" && item.timeframe === preferredTimeframe) ?? datasets.find((item) => item.data_origin === "raw");
   return dataset ? { kind: dataType === "candles" ? "candles" : "dataset", datasetId: dataset.dataset_id } : undefined;
 }
 
@@ -167,6 +170,9 @@ function datasetStatusTone(dataset: Dataset): "pass" | "warn" | "info" | "idle" 
     return "pass";
   }
   if (dataset.quality_status === "blocked" || dataset.quality_status === "failed") {
+    return "warn";
+  }
+  if (dataset.quality_status === "source_gaps") {
     return "warn";
   }
   if (dataset.data_origin === "derived") {
@@ -411,7 +417,7 @@ export function DataPage() {
                     className="button button--primary"
                     disabled={!canRefreshType || isRefreshingType}
                     onClick={() => refreshTarget && refreshMutation.mutate(refreshTarget)}
-                    title={canRefreshType ? `Fill ${selectedTypeLabel.toLowerCase()} to current time` : "Fill is supported for candle, EMA, and feature data"}
+                    title={canRefreshType ? `Fill ${selectedTypeLabel.toLowerCase()} to current time` : "Fill is supported for raw market, EMA, and feature data"}
                     type="button"
                   >
                     <UploadCloud aria-hidden="true" />
@@ -425,7 +431,7 @@ export function DataPage() {
                 <div className="progress-card">
                   <div className="progress-card__header">
                     <strong>Updating {selectedTypeLabel.toLowerCase()}</strong>
-                    <span>{refreshJob ? `${refreshJob.status} · ${refreshJob.current_step ?? "waiting"}` : selectedDataType === "ema" ? "Derived candle scan + EMA enrichment" : featureCategoryForDataType(selectedDataType) ? "Derived candle scan + feature enrichment" : "OKX download + Parquet persist + derived rebuild"}</span>
+                    <span>{refreshJob ? `${refreshJob.status} · ${refreshJob.current_step ?? "waiting"}` : selectedDataType === "ema" ? "Derived candle scan + EMA enrichment" : featureCategoryForDataType(selectedDataType) ? "Derived candle scan + feature enrichment" : selectedDataType === "funding" ? "Binance archive/live fill + Parquet persist" : selectedDataType === "futures_metrics" ? "Binance five-endpoint live fill + Parquet persist" : selectedDataType === "open_interest" ? "Binance metrics fill + Parquet persist + derived rebuild" : "OKX download + Parquet persist + derived rebuild"}</span>
                   </div>
                   <div className="progress-rail" aria-label="Data fill in progress">
                     <span />
@@ -442,6 +448,24 @@ export function DataPage() {
                         <span>Read derived candles</span>
                         <span>Compute feature family</span>
                         <span>Persist feature Parquet</span>
+                      </>
+                    ) : selectedDataType === "funding" ? (
+                      <>
+                        <span>Fetch archive or live funding</span>
+                        <span>Normalize 8h timestamps</span>
+                        <span>Persist canonical Parquet</span>
+                      </>
+                    ) : selectedDataType === "open_interest" ? (
+                      <>
+                        <span>Fetch raw OI rows</span>
+                        <span>Persist canonical Parquet</span>
+                        <span>Rebuild derived OI</span>
+                      </>
+                    ) : selectedDataType === "futures_metrics" ? (
+                      <>
+                        <span>Fetch five live metric feeds</span>
+                        <span>Align completed 5m intervals</span>
+                        <span>Persist canonical Parquet</span>
                       </>
                     ) : (
                       <>
@@ -518,7 +542,7 @@ export function DataPage() {
               </TerminalPanel>
             </div>
 
-            <TerminalPanel title={selectedDataType === "ema" ? "EMA Preview" : featureCategoryForDataType(selectedDataType) ? "Feature Preview" : "Candle Preview"}>
+            <TerminalPanel title={selectedDataType === "ema" ? "EMA Preview" : featureCategoryForDataType(selectedDataType) ? "Feature Preview" : selectedDataType === "funding" ? "Funding Preview" : selectedDataType === "futures_metrics" ? "Futures Metrics Preview" : selectedDataType === "open_interest" ? "Open Interest Preview" : "Candle Preview"}>
               {rowPreviewQuery.error ? <div className="state-line state-line--error">{rowPreviewQuery.error.message}</div> : null}
               {selectedDataset ? (
                 <DataTable
@@ -568,6 +592,51 @@ function previewColumns(selectedDataType: string, rows: Array<Record<string, unk
       "sum_taker_long_short_vol_ratio_avg",
       "count_long_short_ratio",
       "count_long_short_ratio_avg"
+    ].filter((key) => key in sample);
+    const extraKeys = Object.keys(sample)
+      .filter((key) => key !== "timestamp" && key !== "ts" && key !== "symbol" && !preferredKeys.includes(key))
+      .slice(0, Math.max(0, 8 - preferredKeys.length));
+    return [
+      { key: "timestamp", header: "Timestamp", render: (row: Record<string, unknown>) => <span className="mono">{formatTimestamp(String(row.timestamp ?? row.ts ?? ""))}</span> },
+      { key: "symbol", header: "Symbol", render: (row: Record<string, unknown>) => <span className="mono">{String(row.symbol ?? "")}</span> },
+      ...[...preferredKeys, ...extraKeys].slice(0, 8).map((key) => ({
+        key,
+        header: titleize(key),
+        align: "right" as const,
+        render: (row: Record<string, unknown>) => formatCompactValue(row[key])
+      }))
+    ];
+  }
+  if (selectedDataType === "futures_metrics") {
+    const sample = rows[0] ?? {};
+    const preferredKeys = [
+      "sum_open_interest",
+      "sum_open_interest_value",
+      "top_trader_account_long_short_ratio",
+      "top_trader_position_long_short_ratio",
+      "global_account_long_short_ratio",
+      "taker_buy_sell_volume_ratio",
+      "complete",
+      "ingest_source"
+    ].filter((key) => key in sample);
+    return [
+      { key: "timestamp", header: "Timestamp", render: (row: Record<string, unknown>) => <span className="mono">{formatTimestamp(String(row.timestamp ?? row.ts ?? ""))}</span> },
+      { key: "symbol", header: "Symbol", render: (row: Record<string, unknown>) => <span className="mono">{String(row.symbol ?? "")}</span> },
+      ...preferredKeys.map((key) => ({
+        key,
+        header: titleize(key),
+        align: "right" as const,
+        render: (row: Record<string, unknown>) => formatCompactValue(row[key])
+      }))
+    ];
+  }
+  if (selectedDataType === "funding") {
+    const sample = rows[0] ?? {};
+    const preferredKeys = [
+      "funding_rate",
+      "funding_interval_hours",
+      "mark_price",
+      "confirm"
     ].filter((key) => key in sample);
     const extraKeys = Object.keys(sample)
       .filter((key) => key !== "timestamp" && key !== "ts" && key !== "symbol" && !preferredKeys.includes(key))

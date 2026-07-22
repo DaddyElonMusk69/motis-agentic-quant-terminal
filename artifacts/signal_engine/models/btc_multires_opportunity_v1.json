@@ -1,0 +1,105 @@
+{
+  "artifact_path": "artifacts/signal_engine/models/btc_multires_opportunity_v1.pt",
+  "artifact_sha256": "b17fb7aa7985755a4f3ce74c45fd6fcfb62c2b227709fcb331670a6d798dcea2",
+  "bin_stats": [
+    "mean",
+    "std",
+    "min",
+    "max",
+    "last"
+  ],
+  "branch_config": {
+    "15m": {
+      "bars": 1344,
+      "bin_bars": 21,
+      "minutes": 15,
+      "rule": "15min"
+    },
+    "1d": {
+      "bars": 512,
+      "bin_bars": 8,
+      "minutes": 1440,
+      "rule": "1D"
+    },
+    "1h": {
+      "bars": 1536,
+      "bin_bars": 24,
+      "minutes": 60,
+      "rule": "1h"
+    },
+    "4h": {
+      "bars": 1536,
+      "bin_bars": 24,
+      "minutes": 240,
+      "rule": "4h"
+    },
+    "5m": {
+      "bars": 768,
+      "bin_bars": 12,
+      "minutes": 5,
+      "rule": null
+    }
+  },
+  "calibration": {
+    "actual_signal_count": 481,
+    "full_training_months": 13,
+    "method": "match_oof_signals_per_month_without_full_training_labels",
+    "target_signal_count": 481
+  },
+  "dedupe_window_minutes": 480,
+  "engine_id": "btc_multires_opportunity_v1",
+  "final_epochs": 3,
+  "model_version": "1.0",
+  "objective": "signal_level_opportunity_state",
+  "oof_random_fixed_cadence": {
+    "distinct_bracket_coverage_mean": 0.479596,
+    "signal_precision_mean": 0.494058,
+    "signal_precision_p95": 0.507659
+  },
+  "oof_selected_frontier": {
+    "active_months": 9,
+    "distinct_bracket_coverage": 0.200686,
+    "hard_negative_rate": 0.102102,
+    "in_bracket_signal_count": 194,
+    "matched_brackets": 117,
+    "max_drought_hours": 616.33,
+    "outside_bracket_rate": 0.417417,
+    "raw_signal_count": 333,
+    "signal_precision": 0.582583,
+    "signals_per_matched_bracket": 1.65812,
+    "threshold": 0.614695,
+    "timestamp_coverage": 0.005013,
+    "worst_active_month_precision": 0.397059
+  },
+  "raw_channels": [
+    "log_return",
+    "open_gap",
+    "high_excursion",
+    "low_excursion",
+    "range_log",
+    "body_log",
+    "upper_wick_fraction",
+    "lower_wick_fraction",
+    "close_location",
+    "log_quote_volume_change",
+    "quote_volume_zscore_60",
+    "log_oi_change",
+    "oi_level_zscore_60",
+    "log_oi_notional_change",
+    "oi_notional_zscore_60",
+    "oi_range_log",
+    "toptrader_position_log_ratio",
+    "general_log_ratio",
+    "taker_log_ratio",
+    "toptrader_ratio_change",
+    "general_ratio_change",
+    "taker_ratio_change",
+    "source_coverage"
+  ],
+  "schema_version": "motis_multires_tcn_model.v1",
+  "score_threshold": 0.684161,
+  "sequence_bins": 64,
+  "session_id": "discovery-btc-2025-03-01-2026-05-30-mrk5l3hl",
+  "target_config_hash": "fd54b91d01bcdeeab2e7abd3176f6b123382542d143151023525a1c02cb23d9c",
+  "training_weighting": "capped_proportional_48h"
+}

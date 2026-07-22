@@ -14,8 +14,63 @@ from quant_terminal_api.db.models import deployment_routes, execution_bundles, m
 from quant_terminal_api.main import create_app
 from quant_terminal_api.repositories.runtime import RuntimeRepository
 from quant_terminal_worker.execution.bundle_loader import load_strategy_module
+from quant_terminal_worker.signal_discovery import prompt as signal_discovery_prompt
 from quant_terminal_worker.signal_discovery.workspace import materialize_training_atlas
 from quant_terminal_worker.stage4.realized_expectancy import run_stage4_realized_expectancy
+
+
+def _stub_prepared_supervised_data(*, workspace_root, artifact_root):
+    del workspace_root
+    manifest_path = Path(artifact_root) / "training/supervised_input/manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "labels": {"eligible_rows": 1, "positive_prevalence": 1.0},
+        "branches": {
+            "5m_micro": {
+                "channel_names": ["price_log_return"],
+                "spec": {"steps": 576, "lookback_days": 2.0},
+            }
+        },
+    }
+    manifest_path.write_text(json.dumps(manifest) + "\n")
+    return {"manifest_path": str(manifest_path), "manifest": manifest}
+
+
+def test_copy_strategy_sidecars_preserves_supervised_model_artifact(tmp_path):
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    strategy_path = source_root / "strategy.py"
+    strategy_path.write_text("def decide(context): return {}\n")
+    artifact_path = source_root / "model_artifact.json"
+    artifact_path.write_text('{"model_version":"v1"}\n')
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+
+    copied = api_main._copy_strategy_sidecars(strategy_path, bundle_root)
+
+    assert copied == {"model_artifact.json": bundle_root / "model_artifact.json"}
+    assert (bundle_root / "model_artifact.json").read_text() == artifact_path.read_text()
+
+
+def test_stage4b_materialization_carries_supervised_model_artifact(tmp_path):
+    promotion_root = tmp_path / "promotion"
+    source_root = tmp_path / "stage1a"
+    source_root.mkdir()
+    strategy_path = source_root / "strategy.py"
+    strategy_path.write_text("def decide(context): return {}\n")
+    (source_root / "model_artifact.json").write_text('{"model_version":"v1"}\n')
+
+    wrapper_path = api_main._materialize_stage4b_timing_strategy_module(
+        promotion_root=promotion_root,
+        base_strategy_path=strategy_path,
+        overlay={},
+    )
+
+    assert wrapper_path.is_file()
+    assert wrapper_path.with_name("stage1a_base_strategy.py").is_file()
+    assert wrapper_path.with_name("model_artifact.json").read_text() == (
+        source_root / "model_artifact.json"
+    ).read_text()
 
 
 def test_stage2_raw_candles_uses_source_universe_forward_hours(monkeypatch):
@@ -51,6 +106,11 @@ def test_stage2_raw_candles_uses_source_universe_forward_hours(monkeypatch):
 
 def test_signal_discovery_api_lifecycle_and_validation(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        signal_discovery_prompt,
+        "prepare_supervised_training_data",
+        _stub_prepared_supervised_data,
+    )
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -96,12 +156,19 @@ def test_signal_discovery_api_lifecycle_and_validation(tmp_path, monkeypatch):
     assert session["config"]["risk_values"] == [0.6, 0.7, 0.8, 0.9, 1.0]
     assert session["config"]["reward_multiple"] == 1.5
     assert session["config"]["horizon_hours"] == [72]
-    assert client.get("/api/v1/research/signal-discovery-sessions").json()["sessions"][0][
-        "session_id"
-    ] == "discovery-btc-api"
-    assert client.get(
+    listed_session = client.get(
+        "/api/v1/research/signal-discovery-sessions"
+    ).json()["sessions"][0]
+    assert listed_session["session_id"] == "discovery-btc-api"
+    assert listed_session["engine_builder_prompt"] == {
+        "generated": False,
+        "path": None,
+    }
+    detail_response = client.get(
         "/api/v1/research/signal-discovery-sessions/discovery-btc-api"
-    ).status_code == 200
+    )
+    assert detail_response.status_code == 200
+    assert detail_response.json()["session"]["engine_builder_prompt"]["generated"] is False
 
     atlas_response = client.post(
         "/api/v1/research/signal-discovery-sessions/discovery-btc-api/atlas"
@@ -161,6 +228,18 @@ def test_signal_discovery_api_lifecycle_and_validation(tmp_path, monkeypatch):
     assert frozen["frozen_target"]["selected_target"]["horizon_hours"] == 72
     assert (artifact_root / "target/frozen_target.json").is_file()
     assert not (artifact_root / "walk_forward").exists()
+    evidence_path = artifact_root / "evidence/evidence_manifest.json"
+    if not evidence_path.is_file():
+        evidence_path.parent.mkdir(parents=True, exist_ok=True)
+        evidence_path.write_text(
+            json.dumps(
+                {
+                    "authorized_end": "2026-03-29T23:55:00Z",
+                    "included_datasets": [],
+                }
+            )
+            + "\n"
+        )
 
     generate_prompt_response = client.post(
         "/api/v1/research/signal-discovery-sessions/discovery-btc-api/engine-builder-prompt"
@@ -170,11 +249,25 @@ def test_signal_discovery_api_lifecycle_and_validation(tmp_path, monkeypatch):
     assert "$signal-engine-builder" in generate_prompt_response.json()["prompt"]
     prompt_path = artifact_root / "prompt/engine_builder_prompt.md"
     assert prompt_path.is_file()
-    prompt_response = client.get(
+    generated_session = client.get(
+        "/api/v1/research/signal-discovery-sessions/discovery-btc-api"
+    ).json()["session"]
+    assert generated_session["engine_builder_prompt"] == {
+        "generated": True,
+        "path": str(prompt_path),
+    }
+
+    def reject_prompt_regeneration(**_kwargs):
+        raise ValueError("signal discovery evidence source drift detected")
+
+    monkeypatch.setattr(api_main, "validate_evidence_manifest", reject_prompt_regeneration)
+    prompt_response = client.post(
         "/api/v1/research/signal-discovery-sessions/discovery-btc-api/engine-builder-prompt"
     )
     assert prompt_response.status_code == 200
     assert "$signal-engine-builder" in prompt_response.json()["prompt"]
+    assert repository.get_signal_discovery_session("discovery-btc-api")["status"] == "target_frozen"
+    monkeypatch.setattr(api_main, "validate_evidence_manifest", lambda **_kwargs: None)
 
     wf_response = client.post(
         "/api/v1/research/signal-discovery-sessions/discovery-btc-api/walk-forward"
@@ -357,8 +450,13 @@ def test_signal_discovery_auto_resolution_rejects_insufficient_forward_coverage(
     assert "fully covers" in response.json()["detail"]
 
 
-def test_signal_discovery_prompt_drift_marks_session_failed(tmp_path, monkeypatch):
+def test_signal_discovery_prompt_generation_skips_evidence_drift_scan(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        signal_discovery_prompt,
+        "prepare_supervised_training_data",
+        _stub_prepared_supervised_data,
+    )
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -390,12 +488,44 @@ def test_signal_discovery_prompt_drift_marks_session_failed(tmp_path, monkeypatc
     repository.update_signal_discovery_session(
         "discovery-drift",
         status="target_frozen",
-        frozen_target={"config_hash": "abc", "selected_target": {}},
+        frozen_target={
+            "schema_version": "signal_discovery_target.v1",
+            "target_version": 1,
+            "session_id": "discovery-drift",
+            "config_hash": "abc",
+            "selected_target": {"selected_risk_pct": 1.0},
+        },
         target_version=1,
+    )
+    materialize_training_atlas(
+        artifact_root=artifact_root,
+        timestamp_labels=[],
+        episodes=[],
+        features=[],
+        hard_negatives=[],
+        r_feasibility={"r_summaries": [{"risk_pct": 1.0}]},
+    )
+    target_path = artifact_root / "target/frozen_target.json"
+    target_path.parent.mkdir(parents=True)
+    target_path.write_text(
+        json.dumps(
+            repository.get_signal_discovery_session("discovery-drift")["frozen_target"],
+            sort_keys=True,
+        )
+        + "\n"
     )
     evidence_path = artifact_root / "evidence/evidence_manifest.json"
     evidence_path.parent.mkdir(parents=True)
-    evidence_path.write_text("{}\n")
+    evidence_path.write_text(
+        json.dumps(
+            {
+                "authorized_end": "2026-03-31T23:55:00Z",
+                "included_datasets": [],
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
 
     def reject_drift(**_kwargs):
         raise ValueError("signal discovery evidence source drift detected")
@@ -412,9 +542,9 @@ def test_signal_discovery_prompt_drift_marks_session_failed(tmp_path, monkeypatc
         "/api/v1/research/signal-discovery-sessions/discovery-drift/engine-builder-prompt"
     )
 
-    assert response.status_code == 409
-    assert "episodes are unavailable" in response.json()["detail"]
-    assert repository.get_signal_discovery_session("discovery-drift")["status"] == "failed"
+    assert response.status_code == 200
+    assert response.json()["prompt_type"] == "signal_discovery_engine_builder"
+    assert repository.get_signal_discovery_session("discovery-drift")["status"] == "target_frozen"
 
 
 def test_signal_discovery_atlas_visualization_routes_clip_and_validate(
@@ -5154,12 +5284,38 @@ def test_stage4_endpoint_writes_realized_expectancy_from_full_decision_set(tmp_p
     assert stage4["best_candidate"]["total_decisions"] == 2
     assert stage4["best_candidate"]["skipped_decisions"] == 1
     assert stage4["best_candidate"]["account"]["initial_capital_usdt"] == 1000
+    assert stage4["simulation_inputs"].get("loss_cooldown") is None
     assert stage4["run_id"]
     assert stage4["realized_expectancy_path"].endswith("promotion/stage4_realized_expectancy.json")
     assert (tmp_path / stage4["optimal_path"]).exists()
     gate_stage4 = response.json()["gate"]["stage4_realized_expectancy"]
     assert gate_stage4["latest_run_id"] == stage4["run_id"]
     assert len(gate_stage4["stage4_runs"]) == 1
+
+    invalid_cooldown = client.post(
+        "/api/v1/research/stage1-sessions/stage1-aave/stage4/realized-expectancy",
+        json={"consecutive_losses": 2},
+    )
+    assert invalid_cooldown.status_code == 400
+    assert invalid_cooldown.json()["detail"] == "consecutive_losses and cooldown_hours must be provided together"
+
+    cooldown_response = client.post(
+        "/api/v1/research/stage1-sessions/stage1-aave/stage4/realized-expectancy",
+        json={
+            "initial_capital_usdt": 1000,
+            "margin_allocation_pct": 30,
+            "leverage": 5,
+            "consecutive_losses": 2,
+            "cooldown_hours": 4,
+        },
+    )
+    assert cooldown_response.status_code == 200
+    assert cooldown_response.json()["stage4_realized_expectancy"]["simulation_inputs"]["loss_cooldown"] == {
+        "consecutive_losses": 2,
+        "cooldown_hours": 4,
+        "counter_reset": "on_win_or_trigger",
+        "starts_at": "loss_exit",
+    }
 
 
 def test_stage4_run_delete_endpoint_restores_previous_latest(tmp_path, monkeypatch):

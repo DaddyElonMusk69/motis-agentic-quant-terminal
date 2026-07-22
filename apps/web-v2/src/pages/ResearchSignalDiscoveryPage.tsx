@@ -21,6 +21,7 @@ import {
   evaluateSignalDiscoveryCandidate,
   fetchJob,
   fetchMarketDataCatalog,
+  fetchSignalDiscoveryPrompt,
   fetchSignalDiscoverySession,
   fetchSignalDiscoverySessions,
   fetchSignalEngines,
@@ -327,10 +328,15 @@ export function ResearchSignalDiscoveryPage() {
     onSuccess: ({ session: updated }) => refreshSessions(updated.session_id)
   });
   const promptMutation = useMutation({
-    mutationFn: generateSignalDiscoveryPrompt,
+    mutationFn: ({ sessionId, generated }: { sessionId: string; generated: boolean }) => (
+      generated
+        ? fetchSignalDiscoveryPrompt(sessionId)
+        : generateSignalDiscoveryPrompt(sessionId)
+    ),
     onSuccess: (result) => {
       setPrompt(result);
       setCopiedPrompt(false);
+      refreshSessions(result.session_id);
     }
   });
   const walkForwardMutation = useMutation({
@@ -693,11 +699,16 @@ export function ResearchSignalDiscoveryPage() {
                     <button
                       className="button button--secondary button--compact"
                       disabled={!target || promptMutation.isPending}
-                      onClick={() => promptMutation.mutate(session.session_id)}
+                      onClick={() => promptMutation.mutate({
+                        sessionId: session.session_id,
+                        generated: session.engine_builder_prompt.generated
+                      })}
                       type="button"
                     >
                       <FileCode2 aria-hidden="true" />
-                      Generate Engine Builder Prompt
+                      {session.engine_builder_prompt.generated
+                        ? "View Training Handoff"
+                        : "Prepare Training Handoff"}
                     </button>
                     <button
                       className="button button--primary button--compact"

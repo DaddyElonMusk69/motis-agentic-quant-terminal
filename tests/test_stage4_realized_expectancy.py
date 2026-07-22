@@ -4,6 +4,7 @@ from pathlib import Path
 from quant_terminal_worker.stage1.workspace import build_stage1_gate_summary
 from quant_terminal_worker.stage4.realized_expectancy import delete_stage4_realized_expectancy_run
 from quant_terminal_worker.stage4.realized_expectancy import run_stage4_realized_expectancy
+from quant_terminal_worker.stage4.cooldown import run_stage4_loss_cooldown_experiment
 from quant_terminal_worker.stage4.timing import generate_stage4b_timing_prompt
 from quant_terminal_worker.stage4.timing import run_stage4b_timing_replay
 
@@ -850,6 +851,86 @@ def test_generate_stage4b_timing_prompt_writes_context_after_stage4a(tmp_path: P
     assert "timing_overlay.json" in prompt["prompt"]
     assert Path(prompt["prompt_path"]).exists()
     assert Path(prompt["context_path"]).exists()
+
+
+def test_stage4_loss_cooldown_replays_entries_after_repeated_losses(tmp_path: Path):
+    artifact_root = _write_stage4_fixture(
+        tmp_path,
+        records=[
+            _record("sig-loss-1", "LONG"),
+            _record("sig-loss-2", "LONG"),
+            _record("sig-cooldown", "LONG"),
+            _record("sig-resume", "LONG"),
+        ],
+        setup={"tp_pct": 1.0, "sl_pct": 1.0, "max_hold_hours": 1},
+    )
+    session = {
+        **_session(artifact_root),
+        "train_start": "2026-05-01",
+        "train_end": "2026-05-01",
+        "walk_forward_start": "2026-05-02",
+        "walk_forward_end": "2026-05-02",
+    }
+    signals = [
+        _signal("sig-loss-1", "2026-05-01T00:00:00Z", 100),
+        _signal("sig-loss-2", "2026-05-01T00:10:00Z", 100),
+        _signal("sig-cooldown", "2026-05-01T01:00:00Z", 100),
+        _signal("sig-resume", "2026-05-01T04:15:00Z", 100),
+    ]
+    candles = [
+        {"timestamp": "2026-05-01T00:05:00Z", "open": 100, "high": 100.2, "low": 98.5, "close": 99},
+        {"timestamp": "2026-05-01T00:15:00Z", "open": 100, "high": 100.2, "low": 98.5, "close": 99},
+        {"timestamp": "2026-05-01T04:20:00Z", "open": 100, "high": 101.5, "low": 99.8, "close": 101},
+    ]
+    run_stage4_realized_expectancy(
+        workspace_root=tmp_path,
+        session=session,
+        signal_rows=signals,
+        candles=candles,
+        initial_capital_usdt=1000,
+        margin_allocation_pct=30,
+        leverage=1,
+        fees_bps_per_side=0,
+        slippage_bps_per_side=0,
+    )
+
+    result = run_stage4_loss_cooldown_experiment(
+        workspace_root=tmp_path,
+        session=session,
+        signal_rows=signals,
+        candles=candles,
+        consecutive_loss_options=(2,),
+        cooldown_hour_options=(4,),
+    )
+
+    selected = result["selected_policy"]
+    assert selected["loss_cooldown_triggers"] == 1
+    assert selected["skipped_loss_cooldown"] == 1
+    assert selected["executed_trades"] == 3
+    ledger = json.loads(Path(result["trade_ledger_path"]).read_text())
+    skipped = next(trade for trade in ledger["trades"] if trade["signal_id"] == "sig-cooldown")
+    resumed = next(trade for trade in ledger["trades"] if trade["signal_id"] == "sig-resume")
+    assert skipped["skip_reason"] == "loss_cooldown"
+    assert skipped["cooldown_until"] == "2026-05-01T04:15:00Z"
+    assert resumed["entry_status"] == "FILLED"
+    assert Path(result["experiment_path"]).exists()
+    assert Path(result["summary_path"]).exists()
+
+    integrated = run_stage4_realized_expectancy(
+        workspace_root=tmp_path,
+        session=session,
+        signal_rows=signals,
+        candles=candles,
+        initial_capital_usdt=1000,
+        margin_allocation_pct=30,
+        leverage=1,
+        fees_bps_per_side=0,
+        slippage_bps_per_side=0,
+        loss_cooldown={"consecutive_losses": 2, "cooldown_hours": 4},
+    )
+    assert integrated["simulation_inputs"]["loss_cooldown"]["consecutive_losses"] == 2
+    assert integrated["best_candidate"]["loss_cooldown_triggers"] == 1
+    assert integrated["best_candidate"]["skipped_loss_cooldown"] == 1
 
 
 def _write_stage4_fixture(tmp_path: Path, *, records: list[dict], setup: dict) -> Path:

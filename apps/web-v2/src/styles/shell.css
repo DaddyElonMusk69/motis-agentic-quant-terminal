@@ -3002,6 +3002,52 @@
   min-width: min(1280px, calc(100vw - 48px));
 }
 
+.stage4-cooldown-modal {
+  max-width: 620px;
+  width: min(620px, calc(100vw - 32px));
+}
+
+.stage4-cooldown-fields {
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.stage4-cooldown-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.stage4-cooldown-field > span,
+.stage4-cooldown-input-with-unit em {
+  color: var(--ink-muted);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.stage4-cooldown-field input {
+  min-width: 0;
+  width: 100%;
+}
+
+.stage4-cooldown-input-with-unit {
+  align-items: center;
+  display: grid;
+  gap: var(--space-2);
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+@media (max-width: 620px) {
+  .stage4-cooldown-fields {
+    grid-template-columns: 1fr;
+  }
+}
+
 .terminal-modal.portfolio-backtest-modal {
   height: min(860px, calc(100vh - 48px));
   max-height: min(860px, calc(100vh - 48px));

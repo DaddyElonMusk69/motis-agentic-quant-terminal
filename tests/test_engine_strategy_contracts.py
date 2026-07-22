@@ -77,6 +77,41 @@ def test_required_data_accepts_open_interest():
 
     assert spec.required_data == [{"data_type": "open_interest", "origin": "raw", "timeframe": "5m"}]
 
+
+def test_required_data_accepts_futures_metrics():
+    spec = SignalEngineSpec.from_mapping(
+        {
+            "signal_engine_id": "metrics_engine",
+            "version": "1.0",
+            "required_data": [
+                {"data_type": "futures_metrics", "origin": "raw", "timeframe": "5m"}
+            ],
+            "output_envelope_version": "signal_packet.v2",
+            "runtime_entrypoint": "example:generate_training_signals",
+            "live_scanner_entrypoint": "example:scan_live_signal",
+        }
+    )
+
+    assert spec.required_data[0]["data_type"] == "futures_metrics"
+
+
+@pytest.mark.parametrize("data_type", ["funding_features", "premium_index"])
+def test_required_data_accepts_new_binance_derived_types(data_type):
+    spec = SignalEngineSpec.from_mapping(
+        {
+            "signal_engine_id": f"{data_type}_engine",
+            "version": "1.0",
+            "required_data": [
+                {"data_type": data_type, "origin": "derived", "timeframe": "5m"}
+            ],
+            "output_envelope_version": "signal_packet.v2",
+            "runtime_entrypoint": "example:generate_training_signals",
+            "live_scanner_entrypoint": "example:scan_live_signal",
+        }
+    )
+
+    assert spec.required_data[0]["data_type"] == data_type
+
 def test_signal_packet_rejects_directional_or_execution_fields():
     packet = {
         "schema_version": "signal_packet.v2",

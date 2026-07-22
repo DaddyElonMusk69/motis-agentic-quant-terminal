@@ -412,11 +412,19 @@ function dataFreshnessLabel(report: DataFreshnessReport | null): string {
   return `Data ${report.status}`;
 }
 
-function pendingIntentForLatestWake(wake: WakeRun | null): { wake: WakeRun; intent: OrderIntent } | null {
-  if (!wake) {
+function pendingIntentForLatestWake(wake: WakeRun | null, route: DeploymentRoute | undefined): { wake: WakeRun; intent: OrderIntent } | null {
+  if (!wake || route?.auto_submit_enabled) {
     return null;
   }
   const intent = wake.order_intents.find((item) => item.status === "intent_only");
+  return intent ? { wake, intent } : null;
+}
+
+function failedIntentForLatestWake(wake: WakeRun | null): { wake: WakeRun; intent: OrderIntent } | null {
+  if (!wake) {
+    return null;
+  }
+  const intent = wake.order_intents.find((item) => item.status === "submission_failed");
   return intent ? { wake, intent } : null;
 }
 
@@ -530,7 +538,8 @@ export function TradingPage() {
   const wakeRangeEnd = Math.min(wakeOffset + wakes.length, wakeTotal);
   const hasPreviousWakes = wakeOffset > 0;
   const hasNextWakes = wakeRangeEnd < wakeTotal;
-  const pending = pendingIntentForLatestWake(latestWake);
+  const pending = pendingIntentForLatestWake(latestWake, route);
+  const failedSubmission = failedIntentForLatestWake(latestWake);
   const startResult = startMutation.data;
   const wakeResult = wakeMutation.data;
   let warmup: DataWarmupReport | null = null;
@@ -708,6 +717,15 @@ export function TradingPage() {
                       <span>Start scheduler</span>
                     </div>
                   </div>
+                ) : null}
+
+                {failedSubmission ? (
+                  <TerminalPanel title="Execution Error">
+                    <div className="state-line state-line--error">
+                      Automatic {String(failedSubmission.intent.action ?? "order").toLowerCase().replaceAll("_", " ")} failed
+                      {failedSubmission.intent.submission_error?.code ? ` (OKX ${failedSubmission.intent.submission_error.code})` : ""}. The scheduler will retry from a fresh wake.
+                    </div>
+                  </TerminalPanel>
                 ) : null}
 
                 {pending ? (

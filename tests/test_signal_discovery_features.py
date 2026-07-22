@@ -12,7 +12,7 @@ from quant_terminal_worker.signal_discovery.features import (
 )
 
 
-def test_causal_features_do_not_change_when_future_price_and_oi_are_extreme() -> None:
+def test_causal_features_exclude_unclosed_and_future_price_and_oi_rows() -> None:
     decision_ts = _ts("2026-01-01T00:00:00Z")
     candles = _feature_candles(decision_ts=decision_ts)
     oi_rows = _oi_rows(decision_ts=decision_ts)
@@ -23,6 +23,29 @@ def test_causal_features_do_not_change_when_future_price_and_oi_are_extreme() ->
         decision_rows=decision_rows,
         walk_forward_start=_ts("2026-02-01T00:00:00Z"),
         oi_rows=oi_rows,
+    )
+    with_unclosed_extremes = build_causal_feature_rows(
+        candles=[
+            *candles[:-1],
+            _candle(
+                decision_ts,
+                open_value="1000000",
+                high="2000000",
+                low="1",
+                close="1500000",
+                volume="999999999",
+            ),
+        ],
+        decision_rows=decision_rows,
+        walk_forward_start=_ts("2026-02-01T00:00:00Z"),
+        oi_rows=[
+            *oi_rows[:-1],
+            {
+                "timestamp": decision_ts,
+                "sum_open_interest": "999999999",
+                "sum_open_interest_value": "999999999",
+            },
+        ],
     )
     with_future_extremes = build_causal_feature_rows(
         candles=[
@@ -44,9 +67,9 @@ def test_causal_features_do_not_change_when_future_price_and_oi_are_extreme() ->
         ],
     )
 
-    assert baseline == with_future_extremes
+    assert baseline == with_unclosed_extremes == with_future_extremes
     row = baseline[0]
-    assert row["source_candle_ts"] == decision_ts
+    assert row["source_candle_ts"] == decision_ts - timedelta(minutes=5)
     assert row["return_1h_pct"] is not None
     assert row["return_4h_pct"] is not None
     assert row["return_12h_pct"] is not None
@@ -196,7 +219,12 @@ def _oi_rows(*, decision_ts: datetime) -> list[dict[str, object]]:
     return [
         {
             "timestamp": start + timedelta(hours=index),
-            "open_interest": str(Decimal("10000") + Decimal(index) * Decimal("10")),
+            "sum_open_interest": str(
+                Decimal("10000") + Decimal(index) * Decimal("10")
+            ),
+            "sum_open_interest_value": str(
+                Decimal("1000000") + Decimal(index) * Decimal("1000")
+            ),
         }
         for index in range(49)
     ]

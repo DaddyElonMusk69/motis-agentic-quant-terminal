@@ -80,6 +80,74 @@ def test_build_refresh_plan_only_allows_raw_candle_datasets():
         "source": "okx_cli",
     }
 
+
+def test_build_refresh_plan_supports_raw_funding_datasets():
+    registration = {
+        "dataset_id": "btc-binance-funding-raw-8h",
+        "asset": "BTC",
+        "instrument": "BTCUSDT",
+        "data_type": "funding",
+        "timeframe": "8h",
+        "data_origin": "raw",
+        "end_ts": datetime(2026, 6, 30, 16, tzinfo=UTC),
+    }
+
+    plan = build_refresh_plan(registration, as_of=datetime(2026, 7, 3, 12, 0, tzinfo=UTC))
+
+    assert plan == {
+        "dataset_id": "btc-binance-funding-raw-8h",
+        "status": "planned",
+        "asset": "BTC",
+        "instrument": "BTCUSDT",
+        "data_type": "funding",
+        "timeframe": "8h",
+        "from_ts": "2026-07-01T00:00:00Z",
+        "to_ts": "2026-07-03T12:00:00Z",
+        "source": "binance_cli",
+    }
+
+
+def test_build_refresh_plan_supports_raw_futures_metrics_datasets():
+    registration = {
+        "dataset_id": "btc-binance-futures_metrics-raw-5m",
+        "asset": "BTC",
+        "instrument": "BTCUSDT",
+        "data_type": "futures_metrics",
+        "timeframe": "5m",
+        "data_origin": "raw",
+        "end_ts": datetime(2026, 7, 13, 23, 55, tzinfo=UTC),
+    }
+
+    plan = build_refresh_plan(
+        registration,
+        as_of=datetime(2026, 7, 14, 0, 10, tzinfo=UTC),
+    )
+
+    assert plan["status"] == "planned"
+    assert plan["from_ts"] == "2026-07-14T00:00:00Z"
+    assert plan["source"] == "binance_cli"
+
+
+def test_build_refresh_plan_supports_raw_premium_index_datasets():
+    registration = {
+        "dataset_id": "btc-binance-premium_index-raw-5m",
+        "asset": "BTC",
+        "instrument": "BTCUSDT",
+        "data_type": "premium_index",
+        "timeframe": "5m",
+        "data_origin": "raw",
+        "end_ts": datetime(2026, 7, 13, 23, 55, tzinfo=UTC),
+    }
+
+    plan = build_refresh_plan(
+        registration,
+        as_of=datetime(2026, 7, 14, 0, 10, tzinfo=UTC),
+    )
+
+    assert plan["status"] == "planned"
+    assert plan["from_ts"] == "2026-07-14T00:00:00Z"
+    assert plan["source"] == "binance_cli"
+
 def test_read_parquet_candles_returns_limited_rows(tmp_path: Path):
     partition = tmp_path / "year=2026" / "month=06"
     partition.mkdir(parents=True)

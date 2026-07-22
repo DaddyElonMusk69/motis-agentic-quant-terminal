@@ -19,6 +19,13 @@ from quant_terminal_worker.ingestion.open_interest_feature_enrichment import (
     FEATURE_FAMILY as OPEN_INTEREST_FEATURE_FAMILY,
     enrich_open_interest_regime_datasets,
 )
+from quant_terminal_worker.ingestion.binance_funding import fill_raw_funding_dataset
+from quant_terminal_worker.ingestion.binance_futures_metrics import (
+    fill_raw_futures_metrics_dataset,
+)
+from quant_terminal_worker.ingestion.binance_premium_index import (
+    fill_raw_premium_index_dataset,
+)
 from quant_terminal_worker.ingestion.raw_candle_fill import fill_raw_candle_dataset
 from quant_terminal_worker.ingestion.binance_open_interest import fill_raw_open_interest_dataset
 from quant_terminal_worker.ingestion.signal_pool_extension import extend_signal_pool_from_local_candles
@@ -165,6 +172,39 @@ def _execute_market_data_refresh(
         raise ValueError(f"dataset not found: {dataset_id}")
     if registration.get("data_type") == "open_interest":
         return fill_raw_open_interest_dataset(
+            registration=registration,
+            repository=market_data_repository,
+            adapter=BinanceCLIAdapter(
+                {
+                    "cli_path": payload.get("binance_cli_path"),
+                    "profile": payload.get("binance_profile"),
+                }
+            ),
+        )
+    if registration.get("data_type") == "funding":
+        return fill_raw_funding_dataset(
+            registration=registration,
+            repository=market_data_repository,
+            adapter=BinanceCLIAdapter(
+                {
+                    "cli_path": payload.get("binance_cli_path"),
+                    "profile": payload.get("binance_profile"),
+                }
+            ),
+        )
+    if registration.get("data_type") == "futures_metrics":
+        return fill_raw_futures_metrics_dataset(
+            registration=registration,
+            repository=market_data_repository,
+            adapter=BinanceCLIAdapter(
+                {
+                    "cli_path": payload.get("binance_cli_path"),
+                    "profile": payload.get("binance_profile"),
+                }
+            ),
+        )
+    if registration.get("data_type") == "premium_index":
+        return fill_raw_premium_index_dataset(
             registration=registration,
             repository=market_data_repository,
             adapter=BinanceCLIAdapter(
@@ -979,6 +1019,7 @@ def _execute_stage4_realized_expectancy(
         initial_capital_usdt=float(payload["initial_capital_usdt"]),
         margin_allocation_pct=float(payload["margin_allocation_pct"]),
         leverage=float(payload["leverage"]),
+        loss_cooldown=(payload.get("loss_cooldown") or None),
     )
     return {"stage4_realized_expectancy": result, "session_id": session["session_id"]}
 

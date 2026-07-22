@@ -50,7 +50,13 @@ def build_refresh_plan(
             "status": "blocked",
             "reason": "refresh_supported_for_raw_candles_only",
         }
-    if registration["data_origin"] != "raw" or registration["data_type"] not in {"candles", "open_interest"}:
+    if registration["data_origin"] != "raw" or registration["data_type"] not in {
+        "candles",
+        "funding",
+        "futures_metrics",
+        "open_interest",
+        "premium_index",
+    }:
         return {
             "dataset_id": registration["dataset_id"],
             "status": "blocked",
@@ -69,7 +75,12 @@ def build_refresh_plan(
         "timeframe": registration["timeframe"],
         "from_ts": _to_iso(start),
         "to_ts": _to_iso(target),
-        "source": "okx_cli",
+        "source": (
+            "binance_cli"
+            if registration["data_type"]
+            in {"open_interest", "funding", "futures_metrics", "premium_index"}
+            else "okx_cli"
+        ),
     }
 
 

@@ -42,6 +42,13 @@ class SwapProtectionRequest:
     tp_trigger_price: str
     sl_trigger_price: str
     position_side: str | None = None
+    tp_pct: float | None = None
+    sl_pct: float | None = None
+    protection_phase: str | None = None
+    initial_sl_pct: float | None = None
+    trail_sl_pct: float | None = None
+    protect_trigger_pct: float | None = None
+    protection_enabled: bool | None = None
 
     def __post_init__(self) -> None:
         if self.side not in {"buy", "sell"}:

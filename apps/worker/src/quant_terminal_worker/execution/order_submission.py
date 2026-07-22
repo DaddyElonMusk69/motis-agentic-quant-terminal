@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import re
 from typing import Any
 
-from quant_terminal_worker.adapters.exchange import SwapOrderRequest, SwapProtectionRequest
+from quant_terminal_worker.adapters.exchange import ExchangeAdapterError, SwapOrderRequest, SwapProtectionRequest
 
 
 def submit_wake_order_intents(
@@ -50,15 +51,27 @@ def submit_wake_order_intents(
 
     adapter_results = list(wake.get("adapter_results") or [])
     submitted_intents: list[dict[str, Any]] = []
+    failed_intents: list[dict[str, Any]] = []
     for intent in submittable:
-        result = _submit_intent(adapter=adapter, intent=intent)
-        protection_refresh_required = False
+        try:
+            result = _submit_intent(adapter=adapter, intent=intent)
+        except ExchangeAdapterError as exc:
+            failure = _submission_failure(exc)
+            failed = {
+                **intent,
+                "status": "submission_failed",
+                "failed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                "submission_error": failure,
+                "adapter_result_index": len(adapter_results),
+            }
+            adapter_results.append({"status": "failed", "error": failure})
+            failed_intents.append(failed)
+            _replace_intent(order_intents, failed)
+            break
         action = _intent_action(intent=intent, wake=wake)
         if action in {"ENTER", "ENTER_LONG", "ENTER_SHORT", "PYRAMID"} and not _truthy(intent.get("reduce_only")):
             post_fill_protection = _ensure_post_fill_protection(adapter=adapter, intent={**intent, "action": action})
-            if post_fill_protection is None:
-                protection_refresh_required = True
-            else:
+            if post_fill_protection is not None:
                 result = {"order": result} if "order" not in result and "data" in result else dict(result)
                 result["post_fill_protection"] = post_fill_protection
         submitted = {
@@ -96,12 +109,32 @@ def submit_wake_order_intents(
                     owner_state["owner_state_id"],
                     _owner_state_leg({**intent, "action": action}, adapter_result=adapter_result),
                 )
+    if failed_intents:
+        return {
+            "status": "failed",
+            "submitted_count": len(submitted_intents),
+            "failed_count": len(failed_intents),
+            "blockers": ["exchange_submission_failed"],
+            "wake": stored_wake,
+            "adapter_results": adapter_results,
+            "error": failed_intents[0]["submission_error"],
+        }
     return {
         "status": "submitted",
         "submitted_count": len(submitted_intents),
         "blockers": [],
         "wake": stored_wake,
         "adapter_results": adapter_results,
+    }
+
+
+def _submission_failure(exc: ExchangeAdapterError) -> dict[str, Any]:
+    message = str(exc)
+    match = re.search(r'"sCode"\s*:\s*"([^"]+)"', message)
+    return {
+        "type": type(exc).__name__,
+        "code": match.group(1) if match else None,
+        "message": message,
     }
 
 
@@ -186,6 +219,13 @@ def _swap_protection_request(intent: dict[str, Any]) -> SwapProtectionRequest:
         tp_trigger_price=str(intent["tp"]),
         sl_trigger_price=str(intent["sl"]),
         position_side=intent.get("position_side"),
+        tp_pct=_numeric(intent.get("tp_pct")) or None,
+        sl_pct=_numeric(intent.get("sl_pct")) or None,
+        protection_phase=str(intent.get("protection_phase")) if intent.get("protection_phase") else None,
+        initial_sl_pct=_numeric(intent.get("initial_sl_pct")) or None,
+        trail_sl_pct=_numeric(intent.get("trail_sl_pct")) or None,
+        protect_trigger_pct=_numeric(intent.get("protect_trigger_pct")) or None,
+        protection_enabled=_truthy(intent.get("protection_enabled")) if "protection_enabled" in intent else None,
     )
 
 
@@ -217,6 +257,11 @@ def _ensure_post_fill_protection(*, adapter: Any, intent: dict[str, Any]) -> dic
             tp_trigger_price=tp,
             sl_trigger_price=sl,
             position_side=intent.get("position_side"),
+            tp_pct=tp_pct,
+            sl_pct=sl_pct,
+            protection_phase="initial",
+            initial_sl_pct=sl_pct,
+            protection_enabled=False,
         )
     )
 

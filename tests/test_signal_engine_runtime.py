@@ -804,6 +804,92 @@ def test_5m_cluster_vegas_registry_entry_is_contract_compliant():
     validate_strategy_module(resolved.spec.code_ref["base_strategy_path"])
 
 
+def test_5m_cluster_real_registry_entry_uses_optimized_btc_strategy():
+    validate_signal_engine_spec("vegas_ema_5m_cluster_Real")
+    resolved = resolve_signal_engine("vegas_ema_5m_cluster_Real", repository=_repository(), workspace_root=Path.cwd())
+    assert resolved.spec.code_ref["path"] == "apps/worker/src/quant_terminal_worker/signal_engines/vegas_ema_5m_cluster_real.py"
+    assert (
+        resolved.spec.code_ref["base_strategy_path"]
+        == "dev/training_sessions/btc-vegas_ema_5m_cluster-strategy-v01/stage1-btc-vegas_ema_5m_cluster-strategy-v01-btc-2025-05-01-2026-06-27-as-ema-5m-cluster-2025-05-01-2026-06-27-mqxmxdlv/promotion/frozen_stage1a_strategy_module/strategy.py"
+    )
+    assert resolved.spec.configuration_schema["default_parameters"]["context_mode"] == "completed_htf_close_safe"
+    assert resolved.spec.configuration_schema["default_parameters"]["context_timeframes"] == ["2h", "1d"]
+    validate_strategy_module(resolved.spec.code_ref["base_strategy_path"])
+
+
+def test_5m_cluster_real_context_uses_only_closed_higher_timeframe_candles():
+    import importlib.util
+
+    from quant_terminal_worker.signal_engines import vegas_ema_5m_cluster_real as engine
+
+    packet = engine.scan_5m_cluster_at(
+        workspace_root=Path.cwd(),
+        asset="BTC",
+        instrument="BTC-USDT-SWAP",
+        derived_rows=[
+            _ema_cluster_row(
+                "2026-07-01T02:05:00Z",
+                close=100,
+                ema_values={36: 100, 43: 100.1, 144: 99.9, 169: 102, 576: 102, 676: 102},
+            )
+        ],
+        context_rows={
+            "2h": [
+                _ema_cluster_row("2026-06-30T22:00:00Z", close=98, ema_values={36: 98, 43: 98, 144: 98, 169: 98, 576: 98, 676: 98}),
+                _ema_cluster_row("2026-07-01T00:00:00Z", close=101, ema_values={36: 101, 43: 101, 144: 101, 169: 101, 576: 101, 676: 101}),
+                _ema_cluster_row("2026-07-01T02:00:00Z", close=110, ema_values={36: 110, 43: 110, 144: 110, 169: 110, 576: 110, 676: 110}),
+            ],
+            "1d": [
+                _ema_cluster_row("2026-06-29T00:00:00Z", close=97, ema_values={36: 97, 43: 97, 144: 97, 169: 97, 576: 97, 676: 97}),
+                _ema_cluster_row("2026-06-30T00:00:00Z", close=102, ema_values={36: 102, 43: 102, 144: 102, 169: 102, 576: 102, 676: 102}),
+                _ema_cluster_row("2026-07-01T00:00:00Z", close=115, ema_values={36: 115, 43: 115, 144: 115, 169: 115, 576: 115, 676: 115}),
+            ],
+        },
+        timestamp=datetime(2026, 7, 1, 2, 5, tzinfo=UTC),
+        parameters={"context_bars": 3, "context_timeframes": ["2h", "1d"]},
+    )
+
+    assert packet is not None
+    validate_signal_packet(packet)
+    assert packet["evidence"]["engine"] == "vegas_ema_5m_cluster_Real"
+    assert packet["evidence"]["context_mode"] == "completed_htf_close_safe"
+    assert packet["evidence"]["reference_price"] == "100"
+    assert packet["evidence"]["trigger_candle_close"] == "100"
+    assert packet["evidence"]["signal_available_at"] == "2026-07-01T02:05:00Z"
+    assert packet["charts"]["5m"]["completed_candles"][-1][0] == "2026-07-01T02:05:00Z"
+    assert packet["charts"]["2h"]["latest_opened_at"] == "2026-07-01T00:00:00Z"
+    assert packet["charts"]["2h"]["latest_closed_at"] == "2026-07-01T02:00:00Z"
+    assert packet["charts"]["2h"]["completed_candles"][-1][0] == "2026-07-01T00:00:00Z"
+    assert packet["charts"]["1d"]["latest_opened_at"] == "2026-06-30T00:00:00Z"
+    assert packet["charts"]["1d"]["latest_closed_at"] == "2026-07-01T00:00:00Z"
+    assert packet["charts"]["1d"]["completed_candles"][-1][0] == "2026-06-30T00:00:00Z"
+
+    strategy_path = Path(
+        "dev/training_sessions/btc-vegas_ema_5m_cluster-strategy-v01/stage1-btc-vegas_ema_5m_cluster-strategy-v01-btc-2025-05-01-2026-06-27-as-ema-5m-cluster-2025-05-01-2026-06-27-mqxmxdlv/promotion/frozen_stage1a_strategy_module/strategy.py"
+    )
+    spec = importlib.util.spec_from_file_location("frozen_real_strategy", strategy_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    decision = module.decide(
+        {
+            "signal": {
+                "signal_id": "vegas_ema_5m_cluster_Real:BTC:test:20260701T020500Z",
+                "signal_engine_id": "vegas_ema_5m_cluster_Real",
+                "asset": "BTC",
+                "instrument": "BTC-USDT-SWAP",
+                "timestamp": packet["timestamp"],
+                "payload_schema": "signal_packet.v2",
+                "payload": packet,
+            },
+            "runtime_mode": "stage1",
+            "parameters": {},
+        }
+    )
+    assert isinstance(decision, dict)
+    assert decision["action"] in {"ENTER", "SKIP"}
+
+
 def test_5m_cluster_v2_registry_entry_is_contract_compliant():
     validate_signal_engine_spec("vegas_5m_cluster_v2")
     resolved = resolve_signal_engine("vegas_5m_cluster_v2", repository=_repository(), workspace_root=Path.cwd())

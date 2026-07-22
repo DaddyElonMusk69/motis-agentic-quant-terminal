@@ -10,6 +10,7 @@ class FakeRepository:
         self.updated_registration = None
         self.derived_refs = []
         self.feature_refs = []
+        self.feature_ref_queries = 0
         self.updated_registrations = []
 
     def update_ref(self, registration):
@@ -20,6 +21,7 @@ class FakeRepository:
         return self.derived_refs
 
     def list_feature_refs_for_derived(self, registration):
+        self.feature_ref_queries += 1
         return [ref for ref in self.feature_refs if ref["timeframe"] == registration["timeframe"]]
 
 
@@ -189,7 +191,7 @@ def test_fill_raw_candle_dataset_rebuilds_matching_derived_candle_datasets(tmp_p
     assert repository.updated_registrations[-1]["schema_descriptor"]["ema"]["periods"] == [36, 43, 144, 169, 576, 676]
 
 
-def test_fill_raw_candle_dataset_rebuilds_registered_features_with_derived_candles(tmp_path: Path):
+def test_fill_raw_candle_dataset_does_not_rebuild_registered_features(tmp_path: Path):
     raw_storage_uri = tmp_path / "origin=raw/source=okx/type=candles/asset=BTC/timeframe=5m"
     raw_month_path = raw_storage_uri / "year=2026/month=06/data.parquet"
     raw_month_path.parent.mkdir(parents=True)
@@ -249,22 +251,22 @@ def test_fill_raw_candle_dataset_rebuilds_registered_features_with_derived_candl
         as_of=datetime(2026, 6, 1, 0, 10, tzinfo=UTC),
     )
 
-    rebuilt = result["derived_rebuilt"][0]["features_rebuilt"]
-    assert rebuilt == [
+    assert result["derived_rebuilt"] == [
         {
-            "dataset_id": "btc-feature-volume-5m",
-            "data_type": "feature_volume",
+            "dataset_id": "btc-derived-5m",
             "timeframe": "5m",
             "row_count": 3,
             "start_ts": "2026-06-01T00:00:00Z",
             "end_ts": "2026-06-01T00:10:00Z",
         }
     ]
+    assert repository.feature_ref_queries == 0
     feature_rows = read_candles(feature_month_path)
-    assert feature_rows[-1]["timestamp"] == "2026-06-01T00:10:00Z"
-    assert feature_rows[-1]["available_at"] == "2026-06-01T00:15:00Z"
-    assert feature_rows[-1]["complete"] is True
-    assert repository.updated_registrations[-1]["dataset_id"] == "btc-feature-volume-5m"
+    assert feature_rows == [{"timestamp": "2026-06-01T00:00:00Z", "quote_volume_ratio_48": 1.0}]
+    assert [item["dataset_id"] for item in repository.updated_registrations] == [
+        "btc-raw-5m",
+        "btc-derived-5m",
+    ]
 
 
 def test_fill_raw_candle_dataset_pages_back_from_latest_until_gap_is_covered(tmp_path: Path):

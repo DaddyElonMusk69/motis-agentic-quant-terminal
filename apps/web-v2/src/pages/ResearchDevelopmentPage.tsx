@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type Dispatch, type PointerEvent as ReactPointerEvent, type SetStateAction } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { BarChart3, Clipboard, Play, RefreshCw, RotateCcw, Trash2, UploadCloud, X } from "lucide-react";
+import { BarChart3, Clipboard, Play, RefreshCw, RotateCcw, TimerReset, Trash2, UploadCloud, X } from "lucide-react";
 import {
   createStage1Iteration,
   createStage1ResearchSession,
@@ -95,6 +95,11 @@ type ActiveDevelopmentJob = {
   jobId: string;
   label: string;
   sessionId?: string;
+};
+
+type Stage4LossCooldown = {
+  consecutive_losses: number;
+  cooldown_hours: number;
 };
 
 type PortfolioBacktestModalState = {
@@ -1403,13 +1408,15 @@ export function ResearchDevelopmentPage() {
     });
   };
 
-  const runStage4 = () => {
+  const runStage4 = (lossCooldown?: Stage4LossCooldown) => {
     if (!session) {
       return;
     }
     stage4Mutation.mutate({
       session_id: session.session_id,
-      ...stage4Inputs
+      ...stage4Inputs,
+      consecutive_losses: lossCooldown?.consecutive_losses ?? null,
+      cooldown_hours: lossCooldown?.cooldown_hours ?? null
     });
   };
 
@@ -3040,7 +3047,7 @@ function Stage4Panel({
   onDeleteRun: (runId: string) => void;
   onPromote: () => void;
   onRunStage4B: () => void;
-  onRun: () => void;
+  onRun: (lossCooldown?: Stage4LossCooldown) => void;
   inputs: { initial_capital_usdt: number; margin_allocation_pct: number; leverage: number };
   onInputsChange: (inputs: { initial_capital_usdt: number; margin_allocation_pct: number; leverage: number }) => void;
   deletingRunId?: string;
@@ -3049,6 +3056,7 @@ function Stage4Panel({
   stage4BRunning: boolean;
   running: boolean;
 }) {
+  const [cooldownDraft, setCooldownDraft] = useState<{ consecutive_losses: string; cooldown_hours: string } | null>(null);
   const ready = Boolean(gate?.stage3_pyramid.exists);
   const stage4 = gate?.stage4_realized_expectancy;
   const complete = Boolean(stage4?.exists);
@@ -3062,6 +3070,13 @@ function Stage4Panel({
       || Number(latestInputs.leverage) !== Number(inputs.leverage)
     )
   );
+  const cooldownPartial = Boolean(cooldownDraft) && ((cooldownDraft!.consecutive_losses === "") !== (cooldownDraft!.cooldown_hours === ""));
+  const parsedConsecutiveLosses = cooldownDraft?.consecutive_losses === "" ? null : Number(cooldownDraft?.consecutive_losses);
+  const parsedCooldownHours = cooldownDraft?.cooldown_hours === "" ? null : Number(cooldownDraft?.cooldown_hours);
+  const cooldownInvalid = cooldownPartial
+    || (parsedConsecutiveLosses != null && (!Number.isInteger(parsedConsecutiveLosses) || parsedConsecutiveLosses < 1 || parsedConsecutiveLosses > 20))
+    || (parsedCooldownHours != null && (!Number.isInteger(parsedCooldownHours) || parsedCooldownHours < 1 || parsedCooldownHours > 168));
+  const latestLossCooldown = latestInputs?.loss_cooldown ?? null;
   const runLabel = running ? "Backtesting" : complete ? inputsDirty ? "Run Updated Test" : "Run New Test" : "Run Expectancy";
   const bestSetup: Stage4CandidateResult["setup"] = best.setup ?? {};
   const exitMode = best.candidate_id ? formatStage4ExitMode(bestSetup) : "n/a";
@@ -3082,9 +3097,21 @@ function Stage4Panel({
       <TerminalPanel
         actions={
           <>
-            <button className={running ? "button button--primary button--loading" : "button button--primary"} disabled={!ready || running} onClick={onRun} type="button">
+            <button className={running ? "button button--primary button--loading" : "button button--primary"} disabled={!ready || running} onClick={() => onRun()} type="button">
               {running ? <RefreshCw aria-hidden="true" className="spin-icon" /> : <Play aria-hidden="true" />}
               {runLabel}
+            </button>
+            <button
+              className="button button--secondary"
+              disabled={!ready || running}
+              onClick={() => setCooldownDraft({
+                consecutive_losses: latestLossCooldown ? String(latestLossCooldown.consecutive_losses) : "",
+                cooldown_hours: latestLossCooldown ? String(latestLossCooldown.cooldown_hours) : ""
+              })}
+              type="button"
+            >
+              <TimerReset aria-hidden="true" />
+              Loss Cooldown
             </button>
             <button className="button button--secondary" disabled={!complete || promoting || inputsDirty} onClick={onPromote} type="button"><UploadCloud aria-hidden="true" />{promoting ? "Promoting" : "Promote"}</button>
           </>
@@ -3211,6 +3238,7 @@ function Stage4Panel({
           <FieldRow label="Pyramid" value={pyramid ? `${formatNumber(pyramid.max_legs)} legs @ ${formatPct(pyramid.step_pct)}` : "off"} />
           <FieldRow label="Fees" value="OKX USDT swap taker default, 5 bps per fill" />
           <FieldRow label="Position-open skips" value={formatNumber(best.skipped_position_open)} />
+          <FieldRow label="Loss cooldown" value={latestLossCooldown ? `${latestLossCooldown.consecutive_losses} losses / ${latestLossCooldown.cooldown_hours}h` : "off"} />
           <FieldRow label="Initial / Protected SL" value={`${formatNumber(best.initial_sl_hits)} / ${formatNumber(best.protected_sl_hits)}`} />
           <FieldRow label="Latest run" value={stage4?.latest_run_id ?? "n/a"} />
         </div>
@@ -3261,7 +3289,10 @@ function Stage4Panel({
           <DataTable
             columns={[
               { key: "time", header: "Run", render: (item) => item.created_at?.replace("T", " ").replace("Z", " UTC") ?? item.run_id },
-              { key: "setup", header: "Setup", render: (item) => `${formatUsd(item.simulation_inputs.initial_capital_usdt)} · ${formatPct(item.simulation_inputs.margin_allocation_pct)} · ${formatNumber(item.simulation_inputs.leverage)}x` },
+              { key: "setup", header: "Setup", render: (item) => {
+                const lossCooldown = item.simulation_inputs.loss_cooldown;
+                return `${formatUsd(item.simulation_inputs.initial_capital_usdt)} · ${formatPct(item.simulation_inputs.margin_allocation_pct)} · ${formatNumber(item.simulation_inputs.leverage)}x${lossCooldown ? ` · ${lossCooldown.consecutive_losses}L/${lossCooldown.cooldown_hours}h` : ""}`;
+              } },
               { key: "candidate", header: "Best", render: (item) => item.best_candidate_id ?? "n/a" },
               { key: "equity", header: "Ending Equity", align: "right", render: (item) => formatUsd(item.account?.ending_equity_usdt) },
               { key: "pnl", header: "Net PnL", align: "right", render: (item) => formatUsd(item.account?.net_pnl_usdt) },
@@ -3398,6 +3429,78 @@ function Stage4Panel({
           />
         ) : null}
       </TerminalPanel>
+      {cooldownDraft ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="terminal-modal stage4-cooldown-modal" role="dialog" aria-modal="true" aria-labelledby="stage4-cooldown-title">
+            <header className="terminal-modal__header">
+              <div>
+                <span className="eyebrow">Stage 4</span>
+                <h2 id="stage4-cooldown-title">Loss Cooldown</h2>
+              </div>
+              <button className="icon-button" onClick={() => setCooldownDraft(null)} type="button" aria-label="Close loss cooldown">
+                <X aria-hidden="true" />
+              </button>
+            </header>
+            <div className="terminal-modal__body">
+              <div className="stage4-cooldown-fields">
+                <label className="stage4-cooldown-field">
+                  <span>Consecutive losses</span>
+                  <input
+                    autoFocus
+                    inputMode="numeric"
+                    max="20"
+                    min="1"
+                    placeholder="None"
+                    step="1"
+                    type="number"
+                    value={cooldownDraft.consecutive_losses}
+                    onChange={(event) => setCooldownDraft({ ...cooldownDraft, consecutive_losses: event.target.value })}
+                  />
+                </label>
+                <label className="stage4-cooldown-field">
+                  <span>Cooldown time</span>
+                  <div className="stage4-cooldown-input-with-unit">
+                    <input
+                      inputMode="numeric"
+                      max="168"
+                      min="1"
+                      placeholder="None"
+                      step="1"
+                      type="number"
+                      value={cooldownDraft.cooldown_hours}
+                      onChange={(event) => setCooldownDraft({ ...cooldownDraft, cooldown_hours: event.target.value })}
+                    />
+                    <em>hours</em>
+                  </div>
+                </label>
+              </div>
+              {cooldownPartial ? <div className="state-line state-line--warn">Enter both values or leave both empty.</div> : null}
+            </div>
+            <footer className="terminal-modal__footer">
+              <span>{parsedConsecutiveLosses == null && parsedCooldownHours == null ? "Normal backtest" : `${parsedConsecutiveLosses ?? "-"} losses / ${parsedCooldownHours ?? "-"}h cooldown`}</span>
+              <div className="modal-actions">
+                <button className="button button--secondary" onClick={() => setCooldownDraft(null)} type="button">Cancel</button>
+                <button
+                  className="button button--primary"
+                  disabled={cooldownInvalid}
+                  onClick={() => {
+                    if (parsedConsecutiveLosses == null && parsedCooldownHours == null) {
+                      onRun();
+                    } else if (parsedConsecutiveLosses != null && parsedCooldownHours != null) {
+                      onRun({ consecutive_losses: parsedConsecutiveLosses, cooldown_hours: parsedCooldownHours });
+                    }
+                    setCooldownDraft(null);
+                  }}
+                  type="button"
+                >
+                  <Play aria-hidden="true" />
+                  Run Backtest
+                </button>
+              </div>
+            </footer>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }

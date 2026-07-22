@@ -177,7 +177,6 @@ def _rebuild_derived_refs(
 ) -> list[dict[str, Any]]:
     rebuilt: list[dict[str, Any]] = []
     from quant_terminal_worker.ingestion.ema_enrichment import enrich_rows_with_ema, _schema_with_ema
-    from quant_terminal_worker.ingestion.feature_enrichment import rebuild_registered_feature_datasets
 
     for derived_registration in repository.list_derived_refs_for_raw(raw_registration):
         timeframe = derived_registration["timeframe"]
@@ -204,21 +203,15 @@ def _rebuild_derived_refs(
             },
         }
         repository.update_ref(updated_registration)
-        result = {
-            "dataset_id": derived_registration["dataset_id"],
-            "timeframe": timeframe,
-            "row_count": len(derived_rows),
-            "start_ts": derived_rows[0]["timestamp"],
-            "end_ts": derived_rows[-1]["timestamp"],
-        }
-        features_rebuilt = rebuild_registered_feature_datasets(
-            repository=repository,
-            source_registration=updated_registration,
-            source_rows=derived_rows,
+        rebuilt.append(
+            {
+                "dataset_id": derived_registration["dataset_id"],
+                "timeframe": timeframe,
+                "row_count": len(derived_rows),
+                "start_ts": derived_rows[0]["timestamp"],
+                "end_ts": derived_rows[-1]["timestamp"],
+            }
         )
-        if features_rebuilt:
-            result["features_rebuilt"] = features_rebuilt
-        rebuilt.append(result)
     return rebuilt
 
 

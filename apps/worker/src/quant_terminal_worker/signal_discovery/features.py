@@ -9,6 +9,9 @@ from typing import Any, Mapping, Sequence
 from quant_terminal_sdk.market_data_reader import MarketDataCandle
 
 
+_SOURCE_INTERVAL = timedelta(minutes=5)
+
+
 def build_causal_feature_rows(
     *,
     candles: Sequence[MarketDataCandle],
@@ -144,7 +147,8 @@ class _FeatureIndex:
         self.extrema = _RangeExtrema(highs=self.highs, lows=self.lows)
 
     def features_at(self, decision_ts: datetime) -> dict[str, Any]:
-        current = bisect_right(self.timestamps, decision_ts) - 1
+        latest_available_open = decision_ts - _SOURCE_INTERVAL
+        current = bisect_right(self.timestamps, latest_available_open) - 1
         if current < 0:
             raise ValueError(f"no causal candle is available at {decision_ts.isoformat()}")
         source_ts = self.timestamps[current]
@@ -152,11 +156,10 @@ class _FeatureIndex:
         for hours in (1, 4, 12, 24):
             result[f"return_{hours}h_pct"] = self._return_pct(
                 current=current,
-                decision_ts=decision_ts,
                 hours=hours,
             )
         for hours in (4, 24):
-            left = self._complete_window_start(decision_ts=decision_ts, hours=hours)
+            left = self._complete_window_start(current=current, hours=hours)
             if left is None or left >= current:
                 volatility = None
                 range_pct = None
@@ -172,22 +175,21 @@ class _FeatureIndex:
             result[f"trend_slope_{hours}h_pct_per_hour"] = trend
         result["volume_zscore_7d"] = self._volume_zscore_7d(
             current=current,
-            decision_ts=decision_ts,
         )
         result["history_complete_24h"] = (
-            self._complete_window_start(decision_ts=decision_ts, hours=24) is not None
+            self._complete_window_start(current=current, hours=24) is not None
         )
         return result
 
-    def _return_pct(self, *, current: int, decision_ts: datetime, hours: int) -> float | None:
-        target = decision_ts - timedelta(hours=hours)
+    def _return_pct(self, *, current: int, hours: int) -> float | None:
+        target = self.timestamps[current] - timedelta(hours=hours)
         baseline = bisect_right(self.timestamps, target) - 1
         if baseline < 0:
             return None
         return (self.closes[current] / self.closes[baseline] - 1) * 100
 
-    def _complete_window_start(self, *, decision_ts: datetime, hours: int) -> int | None:
-        target = decision_ts - timedelta(hours=hours)
+    def _complete_window_start(self, *, current: int, hours: int) -> int | None:
+        target = self.timestamps[current] - timedelta(hours=hours)
         if self.timestamps[0] > target:
             return None
         return bisect_left(self.timestamps, target)
@@ -196,8 +198,8 @@ class _FeatureIndex:
         square_sum = _range_sum(self.return_square_sum, left + 1, right)
         return sqrt(max(0.0, square_sum)) * 100
 
-    def _volume_zscore_7d(self, *, current: int, decision_ts: datetime) -> float | None:
-        left = self._complete_window_start(decision_ts=decision_ts, hours=7 * 24)
+    def _volume_zscore_7d(self, *, current: int) -> float | None:
+        left = self._complete_window_start(current=current, hours=7 * 24)
         right = current - 1
         if left is None or right - left + 1 < 2:
             return None
@@ -230,7 +232,13 @@ class _OIIndex:
             raw_value = next(
                 (
                     row.get(key)
-                    for key in ("open_interest", "openInterest", "oi", "oi_value")
+                    for key in (
+                        "sum_open_interest",
+                        "open_interest",
+                        "openInterest",
+                        "oi",
+                        "oi_value",
+                    )
                     if row.get(key) is not None
                 ),
                 None,
@@ -244,10 +252,11 @@ class _OIIndex:
         self.values = tuple(by_timestamp[timestamp] for timestamp in self.timestamps)
 
     def change_pct(self, *, decision_ts: datetime, lookback_hours: int) -> float | None:
-        current = bisect_right(self.timestamps, decision_ts) - 1
+        latest_available_timestamp = decision_ts - _SOURCE_INTERVAL
+        current = bisect_right(self.timestamps, latest_available_timestamp) - 1
         baseline = bisect_right(
             self.timestamps,
-            decision_ts - timedelta(hours=lookback_hours),
+            latest_available_timestamp - timedelta(hours=lookback_hours),
         ) - 1
         if current < 0 or baseline < 0 or self.values[baseline] == 0:
             return None

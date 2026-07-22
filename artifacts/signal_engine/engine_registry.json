@@ -1,4 +1,43 @@
 {
+  "btc_multires_opportunity_v1": {
+    "code_ref": {
+      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/btc_multires_opportunity_v1_base.py",
+      "model_path": "artifacts/signal_engine/models/btc_multires_opportunity_v1.pt",
+      "path": "apps/worker/src/quant_terminal_worker/signal_engines/btc_multires_opportunity_v1.py"
+    },
+    "configuration_schema": {
+      "default_parameters": {
+        "context_bars": 96,
+        "dedupe_window_minutes": 480
+      },
+      "fixed_parameters": {
+        "dedupe_window_minutes": 480
+      }
+    },
+    "description": "BTC-only supervised multi-resolution opportunity-state engine using causal raw price, volume, open interest, and positioning sequences from 5m through 1d. Trained with 48h-capped proportional episode weighting and a fixed 480-minute cadence.",
+    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.btc_multires_opportunity_v1:scan_live_signal",
+    "name": "BTC Multi-Resolution Opportunity v1",
+    "output_envelope_version": "signal_packet.v2",
+    "required_data": [
+      {
+        "data_type": "candles",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 200000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "futures_metrics",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 200000,
+        "origin": "raw",
+        "timeframe": "5m"
+      }
+    ],
+    "runtime_entrypoint": "quant_terminal_worker.signal_engines.btc_multires_opportunity_v1:generate_training_signals",
+    "signal_engine_id": "btc_multires_opportunity_v1",
+    "version": "1.0"
+  },
   "compression_participation_release_4h_v1": {
     "code_ref": {
       "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/compression_participation_release_v1_base.py",
@@ -459,7 +498,7 @@
       "default_parameters": {
         "bollinger_context_bars": 20,
         "context_bars": 80,
-        "context_mode": "candles_only_integrated_forming_with_bollinger_1d_and_oi_regime",
+        "context_mode": "candles_integrated_forming_bollinger_oi_and_stage1a_context_v2",
         "context_timeframes": [
           "2h",
           "8h",
@@ -479,7 +518,7 @@
         "vote_threshold": 3
       }
     },
-    "description": "Confirmed-close 5m Vegas EMA rail cluster engine with point-in-time-safe completed and forming 2h/8h/12h context plus diagnostic 1d Bollinger and 15m open-interest regime evidence.",
+    "description": "Confirmed-close 5m Vegas EMA rail cluster engine with bounded point-in-time-safe 5m/2h/8h/12h/1d Stage 1A context, forming higher-timeframe candles, 1d Bollinger, and 15m open-interest regime evidence.",
     "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.vegas_5m_cluster_v6:scan_live_signal",
     "name": "Vegas 5m Cluster v6",
     "output_envelope_version": "signal_packet.v2",
@@ -642,7 +681,7 @@
     ],
     "runtime_entrypoint": "quant_terminal_worker.signal_engines.vegas_5m_cluster_v6:generate_training_signals",
     "signal_engine_id": "vegas_5m_cluster_v6",
-    "version": "0.1"
+    "version": "0.2"
   },
   "vegas_ema": {
     "code_ref": {
@@ -720,6 +759,107 @@
     ],
     "runtime_entrypoint": "quant_terminal_worker.signal_engines.vegas_ema:generate_training_signals",
     "signal_engine_id": "vegas_ema",
+    "version": "0.1"
+  },
+  "vegas_ema_5m_cluster_Real": {
+    "code_ref": {
+      "base_strategy_path": "dev/training_sessions/btc-vegas_ema_5m_cluster-strategy-v01/stage1-btc-vegas_ema_5m_cluster-strategy-v01-btc-2025-05-01-2026-06-27-as-ema-5m-cluster-2025-05-01-2026-06-27-mqxmxdlv/promotion/frozen_stage1a_strategy_module/strategy.py",
+      "path": "apps/worker/src/quant_terminal_worker/signal_engines/vegas_ema_5m_cluster_real.py"
+    },
+    "configuration_schema": {
+      "default_parameters": {
+        "context_bars": 80,
+        "context_mode": "completed_htf_close_safe",
+        "context_timeframes": [
+          "2h",
+          "1d"
+        ],
+        "dedupe_window_minutes": 120,
+        "ema_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ],
+        "ema_mode": "precomputed_5m_ema_cluster",
+        "proximity_threshold": "0.002",
+        "vote_threshold": 3
+      }
+    },
+    "description": "Live-realistic Vegas 5m EMA cluster variant that preserves the legacy completed_candles packet shape for the optimized BTC strategy while selecting 2h and 1d context only after each higher-timeframe candle is closed.",
+    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.vegas_ema_5m_cluster_real:scan_live_signal",
+    "name": "Vegas 5m EMA Cluster Real",
+    "output_envelope_version": "signal_packet.v2",
+    "required_data": [
+      {
+        "data_type": "candles",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "candles",
+        "lookback_bars": 80,
+        "origin": "derived",
+        "required_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ],
+        "source": {
+          "data_type": "candles",
+          "origin": "raw",
+          "timeframe": "5m"
+        },
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "candles",
+        "lookback_bars": 80,
+        "origin": "derived",
+        "required_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ],
+        "source": {
+          "data_type": "candles",
+          "origin": "raw",
+          "timeframe": "5m"
+        },
+        "timeframe": "2h"
+      },
+      {
+        "data_type": "candles",
+        "lookback_bars": 80,
+        "origin": "derived",
+        "required_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ],
+        "source": {
+          "data_type": "candles",
+          "origin": "raw",
+          "timeframe": "5m"
+        },
+        "timeframe": "1d"
+      }
+    ],
+    "runtime_entrypoint": "quant_terminal_worker.signal_engines.vegas_ema_5m_cluster_real:generate_training_signals",
+    "signal_engine_id": "vegas_ema_5m_cluster_Real",
     "version": "0.1"
   },
   "vegas_ema_5m_cluster": {

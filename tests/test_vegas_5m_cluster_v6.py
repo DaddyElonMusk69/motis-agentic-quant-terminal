@@ -14,6 +14,8 @@ from quant_terminal_sdk.engine_contracts import validate_signal_engine_spec, val
 from quant_terminal_worker.signal_engines.runtime import EngineLiveScanContext, EngineTrainingContext, resolve_signal_engine
 from quant_terminal_worker.signal_engines.vegas_5m_cluster_v6 import (
     BOLLINGER_COLUMNS,
+    STAGE1A_CONTEXT_SCHEMA_VERSION,
+    STAGE1A_CONTEXT_VALUE_NAMES,
     calculate_provisional_bollinger,
     generate_5m_cluster_packets,
     scan_5m_cluster_at,
@@ -22,7 +24,7 @@ from quant_terminal_worker.signal_engines.vegas_5m_cluster_v6 import (
 
 
 PARAMETERS = {
-    "context_bars": 24,
+    "context_bars": 80,
     "context_timeframes": ["2h", "8h", "12h"],
     "dedupe_window_minutes": 120,
     "proximity_threshold": "0.002",
@@ -44,6 +46,7 @@ def test_v6_registry_resolves_as_a_separate_contract_engine() -> None:
     )
 
     assert resolved.spec.signal_engine_id == "vegas_5m_cluster_v6"
+    assert resolved.spec.version == "0.2"
     assert resolved.spec.configuration_schema["default_parameters"]["context_timeframes"] == ["2h", "8h", "12h"]
     assert resolved.spec.code_ref["base_strategy_path"].endswith("vegas_ema_5m_hft_v6_base.py")
     required = {(item["data_type"], item["origin"], item["timeframe"]) for item in resolved.spec.required_data}
@@ -109,6 +112,42 @@ def test_packet_timestamp_is_confirmed_close_and_context_is_point_in_time_safe()
     assert bollinger["rows"][-1][BOLLINGER_COLUMNS.index("complete")] is False
     assert bollinger["rows"][-1][BOLLINGER_COLUMNS.index("source_candle_count")] == 73
     assert bollinger["rows"][-1][BOLLINGER_COLUMNS.index("close")] == "20"
+
+
+def test_stage1a_context_v2_is_causal_neutral_and_nulls_incomplete_warmup() -> None:
+    packet = _scan(_fixture())
+
+    assert packet is not None
+    context = packet["evidence"]["derived_features"]["stage1a_context_v2"]
+    assert context["schema_version"] == STAGE1A_CONTEXT_SCHEMA_VERSION
+    assert context["available_at"] == packet["timestamp"]
+    assert context["complete"] is True
+    assert set(context["values"]) == set(STAGE1A_CONTEXT_VALUE_NAMES)
+    assert context["source_windows"]["5m"]["selected_row_count"] == 73
+    assert context["source_windows"]["5m"]["warmup_complete"] is False
+    assert context["values"]["5m_return_12_pct"] == "0"
+    assert context["values"]["5m_return_288_pct"] is None
+    assert context["values"]["1d_return_10_pct"] == "100"
+    assert context["values"]["1d_return_20_pct"] is None
+    assert not ({"direction", "side", "action", "confidence", "score"} & set(context["values"]))
+    assert len(json.dumps(packet, separators=(",", ":")).encode()) < 125_000
+
+
+def test_stage1a_context_v2_populates_full_windows_without_expanding_candle_arrays() -> None:
+    packet = _scan(_full_context_fixture())
+
+    assert packet is not None
+    context = packet["evidence"]["derived_features"]["stage1a_context_v2"]
+    values = context["values"]
+    assert float(values["5m_return_288_pct"]) == pytest.approx(28.8)
+    assert float(values["5m_range_position_288_pct"]) == pytest.approx(288 / 289 * 100)
+    assert float(values["5m_trend_efficiency_288"]) == pytest.approx(1.0)
+    assert float(values["2h_ema_36_slope_3_pct"]) == pytest.approx(3 / 176 * 100)
+    assert float(values["1d_return_20_pct"]) == pytest.approx(20 / 120 * 100)
+    assert all(window["warmup_complete"] for window in context["source_windows"].values())
+    assert len(packet["charts"]["5m"]["candles"]) <= 80
+    assert all(len(packet["charts"][timeframe]["candles"]) <= 81 for timeframe in ("2h", "8h", "12h"))
+    assert len(json.dumps(packet, separators=(",", ":")).encode()) < 150_000
 
 
 def test_v6_preserves_v5_trigger_votes_for_the_same_5m_row() -> None:
@@ -238,7 +277,7 @@ def test_runtime_training_and_live_adapters_preserve_the_same_complete_packet() 
 
 
 def test_representative_packet_passes_consumer_audit(tmp_path: Path) -> None:
-    packet = _scan(_fixture())
+    packet = _scan(_full_context_fixture())
     assert packet is not None
     packet_path = tmp_path / "v6-packet.json"
     packet_path.write_text(json.dumps(packet))
@@ -381,14 +420,55 @@ def _fixture(*, include_second_trigger: bool = False) -> dict[str, object]:
     }
 
 
-def _raw_row(timestamp: datetime, *, close: float) -> dict[str, object]:
+def _full_context_fixture() -> dict[str, object]:
+    trigger_open = datetime(2026, 1, 21, 6, 0, tzinfo=UTC)
+    raw_start = trigger_open - timedelta(minutes=5 * 288)
+    raw_rows = [
+        _raw_row(raw_start + timedelta(minutes=5 * index), close=1000 + index, volume=index + 1)
+        for index in range(289)
+    ]
+    derived_rows = [
+        _ema_row(trigger_open - timedelta(minutes=5 * (79 - index)), close=1209 + index, trigger=True)
+        for index in range(80)
+    ]
+    context_rows: dict[str, list[dict[str, object]]] = {}
+    for timeframe in ("2h", "8h", "12h"):
+        delta = _delta(timeframe)
+        last_open = trigger_open - delta
+        context_rows[timeframe] = [
+            _ema_row(last_open - delta * (79 - index), close=100 + index, trigger=True)
+            for index in range(80)
+        ]
+    daily_end = datetime(2026, 1, 20, tzinfo=UTC)
+    daily_start = daily_end - timedelta(days=40)
+    daily_rows = [_raw_row(daily_start + timedelta(days=index), close=100 + index) for index in range(41)]
+    return {
+        "derived_rows": derived_rows,
+        "raw_5m_rows": raw_rows,
+        "context_rows": context_rows,
+        "daily_rows": daily_rows,
+        "bollinger_rows": [
+            _bollinger_row(daily_start + timedelta(days=index), close=100 + index)
+            for index in range(40)
+        ],
+        "oi_feature_rows": [
+            _oi_feature_row(
+                trigger_open - timedelta(minutes=15),
+                available_at=trigger_open,
+                value=3,
+            )
+        ],
+    }
+
+
+def _raw_row(timestamp: datetime, *, close: float, volume: float = 1) -> dict[str, object]:
     return {
         "timestamp": timestamp,
         "open": close,
         "high": close + 1,
         "low": close - 1,
         "close": close,
-        "volume": 1,
+        "volume": volume,
         "vol_ccy": 1,
         "vol_ccy_quote": 1,
         "confirm": 1,

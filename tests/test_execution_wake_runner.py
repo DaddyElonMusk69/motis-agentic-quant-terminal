@@ -166,6 +166,54 @@ def test_wake_routes_open_position_to_management_branch(tmp_path):
     assert wake["signal_scan_result"]["status"] == "skipped_position_open"
 
 
+def test_wake_adopts_manual_exchange_position_once(tmp_path):
+    bundle = _bundle(
+        tmp_path,
+        strategy_source="def manage_position(context):\n    return {'action': 'HOLD', 'reason_code': 'managed'}\n",
+        setup={"setup": {"tp_pct": 2.0, "sl_pct": 1.0, "pyramid": {"step_pct": 0.5, "max_legs": 3}}},
+    )
+
+    class AdoptingRepository(FakeRepository):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.created_owner_states = []
+
+        def create_owner_state(self, owner_state):
+            self.created_owner_states.append(owner_state)
+            self.owner_state = owner_state
+            return owner_state
+
+    route = {**_route(bundle), "margin_allocation_pct": 30.0, "leverage": 5.0, "manual_sizing_enabled": True}
+    repository = AdoptingRepository(route=route, bundle=bundle)
+    adapter = FakeAdapter(
+        positions=[
+            {
+                "instId": "AAVE-USDT-SWAP",
+                "posId": "position-123",
+                "pos": "2",
+                "posSide": "long",
+                "avgPx": "100",
+                "markPx": "100",
+                "notionalUsd": "500",
+                "cTime": "1784479008367",
+            }
+        ],
+        balance={"data": [{"ccy": "USDT", "totalEq": "1000"}]},
+    )
+
+    first_wake = run_route_wake(route_id="aave-live", repository=repository, adapter=adapter)
+    run_route_wake(route_id="aave-live", repository=repository, adapter=adapter)
+
+    assert first_wake["branch"] == "position_management"
+    assert len(repository.created_owner_states) == 1
+    adopted = repository.created_owner_states[0]
+    assert adopted["position_instance_id"] == "exchange-aave-live-position-123-1784479008367"
+    assert adopted["position_state"]["adoption_source"] == "manual_exchange_position"
+    assert adopted["position_state"]["inferred_pyramid_legs"] == 1
+    assert adopted["position_state"]["pyramid_exposure_ambiguous"] is False
+    assert adopted["position_state"]["legs"][0]["fill_source"] == "manual_exchange_adoption"
+
+
 def test_wake_position_management_ignores_strategy_protection_override_and_uses_bundle_policy(tmp_path):
     strategy_source = (
         "def manage_position(context):\n"
@@ -232,10 +280,14 @@ def test_wake_position_management_ignores_strategy_protection_override_and_uses_
             "tp_pct": 2.0,
             "sl_pct": 1.0,
             "reduce_only": True,
-            "client_order_id": wake["order_intents"][0]["client_order_id"],
-            "status": "intent_only",
-        }
-    ]
+                "client_order_id": wake["order_intents"][0]["client_order_id"],
+                "status": "intent_only",
+                "position_side": "net",
+                "protection_phase": "initial",
+                "initial_sl_pct": 1,
+                "protection_enabled": False,
+            }
+        ]
 
 
 def test_wake_position_management_defaults_to_bundle_tp_sl_when_strategy_has_no_manager(tmp_path):
@@ -426,6 +478,146 @@ def test_wake_position_management_infers_protected_phase_from_live_sl_side_after
     assert protection["phase"] == "protected"
     assert protection["sync_reason"] == "protection_already_synced"
     assert wake["order_intents"] == []
+
+
+def test_wake_treats_full_position_protection_as_size_synced(tmp_path):
+    bundle = _bundle(
+        tmp_path,
+        setup={
+            "setup": {
+                "final_tp_pct": 2.0,
+                "initial_sl_pct": 1.0,
+                "protection_enabled": False,
+            }
+        },
+    )
+    repository = FakeRepository(
+        route=_route(bundle),
+        bundle=bundle,
+        owner_state={
+            "owner_state_id": "owner-1",
+            "position_instance_id": "pos-1",
+            "position_state": {"direction": "LONG", "legs": [{"leg": 1, "status": "filled"}]},
+        },
+    )
+    adapter = FakeAdapter(
+        positions=[{"instId": "AAVE-USDT-SWAP", "pos": "2", "posSide": "long", "avgPx": "100", "markPx": "100"}],
+        protection_orders=[
+            {
+                "instId": "AAVE-USDT-SWAP",
+                "algoId": "algo-1",
+                "state": "live",
+                "side": "sell",
+                "sz": "",
+                "closeFraction": "1",
+                "tpTriggerPx": "102",
+                "slTriggerPx": "99",
+            }
+        ],
+    )
+
+    wake = run_route_wake(route_id="aave-live", repository=repository, adapter=adapter)
+
+    assert wake["strategy_decision"]["action"] == "HOLD"
+    assert wake["strategy_decision"]["diagnostics"]["protection"]["sync_reason"] == "protection_already_synced"
+    assert wake["order_intents"] == []
+
+
+def test_wake_reversal_ignores_stale_opposite_side_protection_for_phase(tmp_path):
+    bundle = _bundle(
+        tmp_path,
+        setup={
+            "setup": {
+                "policy_mode": "side_specific",
+                "side_policies": {
+                    "LONG": {"final_tp_pct": 3.7, "initial_sl_pct": 2.0, "protection_enabled": True, "protect_trigger_pct": 2.8, "trail_sl_pct": 1.4},
+                    "SHORT": {"final_tp_pct": 4.6, "initial_sl_pct": 2.0, "protection_enabled": True, "protect_trigger_pct": 3.0, "trail_sl_pct": 1.5},
+                },
+            }
+        },
+    )
+    repository = FakeRepository(
+        route=_route(bundle),
+        bundle=bundle,
+        owner_state={
+            "owner_state_id": "owner-old-long",
+            "position_instance_id": "old-long",
+            "position_state": {"direction": "LONG", "legs": [{"leg": 1, "status": "filled"}]},
+        },
+    )
+    adapter = FakeAdapter(
+        positions=[{"instId": "AAVE-USDT-SWAP", "pos": "-7.57", "posSide": "net", "avgPx": "1858.7158", "markPx": "1858.65"}],
+        protection_orders=[
+            {
+                "instId": "AAVE-USDT-SWAP",
+                "algoId": "old-long-protection",
+                "state": "live",
+                "side": "sell",
+                "sz": "5.36",
+                "tpTriggerPx": "1947.74",
+                "slTriggerPx": "1840.68",
+            }
+        ],
+    )
+
+    wake = run_route_wake(route_id="aave-live", repository=repository, adapter=adapter)
+
+    protection = wake["strategy_decision"]["diagnostics"]["protection"]
+    intent = wake["order_intents"][0]
+    assert wake["strategy_decision"]["action"] == "UPDATE_PROTECTION"
+    assert wake["strategy_decision"]["direction"] == "SHORT"
+    assert protection["phase"] == "initial"
+    assert protection["sync_reason"] == "live_protection_side_mismatch"
+    assert protection["live_sl"] is None
+    assert intent["side"] == "buy"
+    assert intent["protection_phase"] == "initial"
+
+
+def test_wake_reopened_position_rejects_same_side_protection_from_previous_episode(tmp_path):
+    bundle = _bundle(
+        tmp_path,
+        setup={"setup": {"final_tp_pct": 2.0, "initial_sl_pct": 1.0, "protection_enabled": False}},
+    )
+    repository = FakeRepository(
+        route=_route(bundle),
+        bundle=bundle,
+        owner_state={
+            "owner_state_id": "owner-old",
+            "position_instance_id": "old",
+            "position_state": {"direction": "LONG", "legs": [{"leg": 1, "status": "filled"}]},
+        },
+    )
+    adapter = FakeAdapter(
+        positions=[
+            {
+                "instId": "AAVE-USDT-SWAP",
+                "pos": "2",
+                "posSide": "net",
+                "avgPx": "100",
+                "markPx": "100",
+                "cTime": "2000",
+            }
+        ],
+        protection_orders=[
+            {
+                "instId": "AAVE-USDT-SWAP",
+                "algoId": "old-oco",
+                "state": "live",
+                "side": "sell",
+                "sz": "2",
+                "tpTriggerPx": "102",
+                "slTriggerPx": "99",
+                "cTime": "1000",
+            }
+        ],
+    )
+
+    wake = run_route_wake(route_id="aave-live", repository=repository, adapter=adapter)
+
+    protection = wake["strategy_decision"]["diagnostics"]["protection"]
+    assert wake["strategy_decision"]["action"] == "UPDATE_PROTECTION"
+    assert protection["sync_reason"] == "live_protection_from_previous_position"
+    assert protection["live_sl"] is None
 
 
 def test_wake_position_management_refreshes_missing_protection_before_pyramiding(tmp_path):

@@ -382,6 +382,10 @@ export type SignalDiscoverySession = {
     candidate_id?: string;
     stage0_artifact_root?: string;
   };
+  engine_builder_prompt: {
+    generated: boolean;
+    path?: string | null;
+  };
   created_at: string;
   updated_at: string;
 };
@@ -1213,6 +1217,10 @@ export type Stage4RealizedExpectancyState = {
     initial_capital_usdt?: number;
     margin_allocation_pct?: number;
     leverage?: number;
+    loss_cooldown?: {
+      consecutive_losses: number;
+      cooldown_hours: number;
+    } | null;
   };
   latest_account?: Stage4CandidateResult["account"];
   stage4_runs?: Array<{
@@ -1222,6 +1230,10 @@ export type Stage4RealizedExpectancyState = {
       initial_capital_usdt?: number;
       margin_allocation_pct?: number;
       leverage?: number;
+      loss_cooldown?: {
+        consecutive_losses: number;
+        cooldown_hours: number;
+      } | null;
     };
     best_candidate_id?: string;
     account?: Stage4CandidateResult["account"];
@@ -1439,6 +1451,12 @@ export type OrderIntent = {
   reduce_only?: boolean;
   client_order_id?: string;
   signal_id?: string;
+  failed_at?: string;
+  submission_error?: {
+    type?: string;
+    code?: string | null;
+    message?: string;
+  };
 };
 
 export type WakeRun = {
@@ -2128,6 +2146,8 @@ export type Stage4RealizedExpectancyRequest = {
   initial_capital_usdt: number;
   margin_allocation_pct: number;
   leverage: number;
+  consecutive_losses?: number | null;
+  cooldown_hours?: number | null;
 };
 
 export function runStage4RealizedExpectancy(request: Stage4RealizedExpectancyRequest): Promise<{ stage4_realized_expectancy: Stage4RealizedExpectancyState; gate: Stage1GateSummary } | AsyncJobResponse> {
@@ -2137,7 +2157,9 @@ export function runStage4RealizedExpectancy(request: Stage4RealizedExpectancyReq
     body: JSON.stringify({
       initial_capital_usdt: request.initial_capital_usdt,
       margin_allocation_pct: request.margin_allocation_pct,
-      leverage: request.leverage
+      leverage: request.leverage,
+      consecutive_losses: request.consecutive_losses ?? null,
+      cooldown_hours: request.cooldown_hours ?? null
     })
   });
 }
