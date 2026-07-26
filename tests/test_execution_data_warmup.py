@@ -178,6 +178,50 @@ def test_warm_route_data_fills_raw_requirement_and_marks_route_warmed():
     assert runtime_repository.gate_updates == [{"data_warmed": True}]
 
 
+def test_warm_route_data_fills_required_open_interest_with_data_type_service():
+    runtime_repository = FakeRuntimeRepository()
+    runtime_repository.engines[0]["required_data"] = [
+        {"data_type": "candles", "origin": "raw", "timeframe": "5m"},
+        {"data_type": "open_interest", "origin": "raw", "timeframe": "5m"},
+    ]
+    market_repository = FakeMarketDataRepository()
+    candle_adapter = object()
+    oi_adapter = object()
+    fill_calls = []
+
+    def candle_fill_service(*, registration, repository, adapter):
+        fill_calls.append(("candles", registration["dataset_id"], adapter))
+        return {"dataset_id": registration["dataset_id"], "status": "current", "rows_added": 0}
+
+    def oi_fill_service(*, registration, repository, adapter):
+        fill_calls.append(("open_interest", registration["dataset_id"], adapter))
+        return {"dataset_id": registration["dataset_id"], "status": "filled", "rows_added": 12}
+
+    result = warm_route_data(
+        route_id="aave-live",
+        runtime_repository=runtime_repository,
+        market_data_repository=market_repository,
+        fill_service=candle_fill_service,
+        raw_fill_services={
+            "candles": candle_fill_service,
+            "open_interest": oi_fill_service,
+        },
+        raw_adapters={
+            "candles": candle_adapter,
+            "open_interest": oi_adapter,
+        },
+        adapter=candle_adapter,
+    )
+
+    assert result["status"] == "warmed"
+    assert fill_calls == [
+        ("candles", "aave-raw-5m", candle_adapter),
+        ("open_interest", "aave-binance-open_interest-raw-5m", oi_adapter),
+    ]
+    assert [item["status"] for item in result["requirements"]] == ["current", "filled"]
+    assert runtime_repository.gate_updates == [{"data_warmed": True}]
+
+
 def test_warm_route_data_blocks_when_required_raw_ref_is_missing():
     runtime_repository = FakeRuntimeRepository()
 

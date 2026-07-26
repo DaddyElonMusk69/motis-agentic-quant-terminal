@@ -933,6 +933,105 @@ def test_stage4_loss_cooldown_replays_entries_after_repeated_losses(tmp_path: Pa
     assert integrated["best_candidate"]["skipped_loss_cooldown"] == 1
 
 
+def test_stage4_consecutive_wins_pause_rule_skips_until_pause_expires(tmp_path: Path):
+    artifact_root = _write_stage4_fixture(
+        tmp_path,
+        records=[
+            _record("sig-win-1", "LONG"),
+            _record("sig-win-2", "LONG"),
+            _record("sig-pause", "LONG"),
+            _record("sig-resume", "LONG"),
+        ],
+        setup={"tp_pct": 1.0, "sl_pct": 1.0, "max_hold_hours": 1},
+    )
+    session = _session(artifact_root)
+    signals = [
+        _signal("sig-win-1", "2026-05-01T00:00:00Z", 100),
+        _signal("sig-win-2", "2026-05-01T00:10:00Z", 100),
+        _signal("sig-pause", "2026-05-01T01:00:00Z", 100),
+        _signal("sig-resume", "2026-05-01T04:15:00Z", 100),
+    ]
+    candles = [
+        {"timestamp": "2026-05-01T00:05:00Z", "open": 100, "high": 101.5, "low": 99.8, "close": 101},
+        {"timestamp": "2026-05-01T00:15:00Z", "open": 100, "high": 101.5, "low": 99.8, "close": 101},
+        {"timestamp": "2026-05-01T04:20:00Z", "open": 100, "high": 101.5, "low": 99.8, "close": 101},
+    ]
+
+    result = run_stage4_realized_expectancy(
+        workspace_root=tmp_path,
+        session=session,
+        signal_rows=signals,
+        candles=candles,
+        initial_capital_usdt=1000,
+        margin_allocation_pct=100,
+        leverage=1,
+        fees_bps_per_side=0,
+        slippage_bps_per_side=0,
+        pause_rules=[
+            {"type": "consecutive_losses", "consecutive_count": 2, "cooldown_hours": 6},
+            {"type": "consecutive_wins", "consecutive_count": 2, "cooldown_hours": 4},
+        ],
+    )
+
+    best = result["best_candidate"]
+    assert [rule["type"] for rule in best["pause_rules"]] == ["consecutive_losses", "consecutive_wins"]
+    assert best["pause_rule_triggers"] == 1
+    assert best["skipped_pause_rule"] == 1
+    skipped = next(trade for trade in result["ledger"]["candidates"][0]["trades"] if trade["signal_id"] == "sig-pause")
+    resumed = next(trade for trade in result["ledger"]["candidates"][0]["trades"] if trade["signal_id"] == "sig-resume")
+    assert skipped["skip_reason"] == "pause_rule_consecutive_wins"
+    assert skipped["pause_until"] == "2026-05-01T04:15:00Z"
+    assert resumed["entry_status"] == "FILLED"
+
+
+def test_stage4_profit_burst_pause_rule_uses_closed_equity_growth(tmp_path: Path):
+    artifact_root = _write_stage4_fixture(
+        tmp_path,
+        records=[
+            _record("sig-profit-1", "LONG"),
+            _record("sig-profit-2", "LONG"),
+            _record("sig-pause", "LONG"),
+            _record("sig-resume", "LONG"),
+        ],
+        setup={"tp_pct": 1.0, "sl_pct": 1.0, "max_hold_hours": 1},
+    )
+    session = _session(artifact_root)
+    signals = [
+        _signal("sig-profit-1", "2026-05-01T00:00:00Z", 100),
+        _signal("sig-profit-2", "2026-05-01T00:10:00Z", 100),
+        _signal("sig-pause", "2026-05-01T01:00:00Z", 100),
+        _signal("sig-resume", "2026-05-01T04:15:00Z", 100),
+    ]
+    candles = [
+        {"timestamp": "2026-05-01T00:05:00Z", "open": 100, "high": 101.5, "low": 99.8, "close": 101},
+        {"timestamp": "2026-05-01T00:15:00Z", "open": 100, "high": 101.5, "low": 99.8, "close": 101},
+        {"timestamp": "2026-05-01T04:20:00Z", "open": 100, "high": 101.5, "low": 99.8, "close": 101},
+    ]
+
+    result = run_stage4_realized_expectancy(
+        workspace_root=tmp_path,
+        session=session,
+        signal_rows=signals,
+        candles=candles,
+        initial_capital_usdt=1000,
+        margin_allocation_pct=100,
+        leverage=1,
+        fees_bps_per_side=0,
+        slippage_bps_per_side=0,
+        pause_rule={"type": "profit_burst", "profit_threshold_pct": 1.5, "lookback_hours": 24, "cooldown_hours": 4},
+    )
+
+    best = result["best_candidate"]
+    assert best["pause_rule"]["type"] == "profit_burst"
+    assert best["pause_rule_triggers"] == 1
+    assert best["skipped_pause_rule"] == 1
+    triggered = next(trade for trade in result["ledger"]["candidates"][0]["trades"] if trade["signal_id"] == "sig-profit-2")
+    skipped = next(trade for trade in result["ledger"]["candidates"][0]["trades"] if trade["signal_id"] == "sig-pause")
+    assert triggered["pause_rule_triggered"] is True
+    assert triggered["pause_rule_profit_growth_pct"] >= 1.5
+    assert skipped["skip_reason"] == "pause_rule_profit_burst"
+
+
 def _write_stage4_fixture(tmp_path: Path, *, records: list[dict], setup: dict) -> Path:
     artifact_root = tmp_path / "dev/training_sessions/aave-vegas/stage1-aave"
     promotion_root = artifact_root / "promotion"

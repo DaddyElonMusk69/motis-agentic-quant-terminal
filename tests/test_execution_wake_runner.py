@@ -166,6 +166,169 @@ def test_wake_routes_open_position_to_management_branch(tmp_path):
     assert wake["signal_scan_result"]["status"] == "skipped_position_open"
 
 
+def test_wake_completes_manual_position_to_full_target_without_pyramiding(tmp_path):
+    bundle = _bundle(
+        tmp_path,
+        strategy_source="def manage_position(context):\n    return {'action': 'HOLD', 'reason_code': 'managed'}\n",
+        setup={
+            "sizing": {"margin_allocation_pct": 10, "leverage": 5},
+            "setup": {"tp_pct": 2.0, "sl_pct": 1.0},
+        },
+    )
+    owner_state = {
+        "owner_state_id": "owner-manual",
+        "position_instance_id": "manual-position",
+        "bundle_id": bundle["bundle_id"],
+        "position_state": {"direction": "LONG", "legs": [{"leg": 1, "status": "filled"}]},
+    }
+    repository = FakeRepository(route=_route(bundle), bundle=bundle, owner_state=owner_state)
+    adapter = FakeAdapter(
+        positions=[
+            {
+                "instId": "AAVE-USDT-SWAP",
+                "pos": "1",
+                "posSide": "net",
+                "avgPx": "100",
+                "markPx": "100",
+                "notionalUsd": "100",
+            }
+        ],
+        protection_orders=[
+            {
+                "instId": "AAVE-USDT-SWAP",
+                "state": "live",
+                "side": "sell",
+                "sz": "1",
+                "tpTriggerPx": "102",
+                "slTriggerPx": "99",
+            }
+        ],
+        balance={"data": [{"ccy": "USDT", "totalEq": "1000"}]},
+    )
+
+    wake = run_route_wake(route_id="aave-live", repository=repository, adapter=adapter)
+
+    reconciliation = wake["strategy_decision"]["diagnostics"]["position_size_reconciliation"]
+    intent = wake["order_intents"][0]
+    assert wake["strategy_decision"]["action"] == "COMPLETE_POSITION"
+    assert wake["strategy_decision"]["reason_code"] == "position_size_incomplete"
+    assert reconciliation["current_margin_usd"] == 20
+    assert reconciliation["target_margin_usd"] == 100
+    assert reconciliation["missing_margin_usd"] == 80
+    assert intent["action"] == "COMPLETE_POSITION"
+    assert intent["side"] == "buy"
+    assert intent["quantity"] == "80"
+    assert intent["notional_usd"] == 400
+    assert intent["target_currency"] == "margin"
+    assert intent["position_instance_id"] == "manual-position"
+    assert intent["sizing_source"] == "position_size_reconciliation"
+
+
+def test_wake_does_not_complete_position_that_already_meets_target(tmp_path):
+    bundle = _bundle(
+        tmp_path,
+        strategy_source="def manage_position(context):\n    return {'action': 'HOLD', 'reason_code': 'managed'}\n",
+        setup={"sizing": {"margin_allocation_pct": 10, "leverage": 5}, "setup": {"tp_pct": 2.0, "sl_pct": 1.0}},
+    )
+    repository = FakeRepository(
+        route=_route(bundle),
+        bundle=bundle,
+        owner_state={"position_instance_id": "position-1", "bundle_id": bundle["bundle_id"], "position_state": {}},
+    )
+    adapter = FakeAdapter(
+        positions=[{"instId": "AAVE-USDT-SWAP", "pos": "5", "posSide": "net", "avgPx": "100", "markPx": "100", "notionalUsd": "500"}],
+        protection_orders=[{"instId": "AAVE-USDT-SWAP", "state": "live", "side": "sell", "sz": "5", "tpTriggerPx": "102", "slTriggerPx": "99"}],
+        balance={"data": [{"ccy": "USDT", "totalEq": "1000"}]},
+    )
+
+    wake = run_route_wake(route_id="aave-live", repository=repository, adapter=adapter)
+
+    reconciliation = wake["strategy_decision"]["diagnostics"]["position_size_reconciliation"]
+    assert wake["strategy_decision"]["action"] == "HOLD"
+    assert "position_size_already_complete" in reconciliation["blockers"]
+    assert wake["order_intents"] == []
+
+
+def test_wake_does_not_complete_position_inside_ten_percent_tolerance(tmp_path):
+    bundle = _bundle(
+        tmp_path,
+        strategy_source="def manage_position(context):\n    return {'action': 'HOLD', 'reason_code': 'managed'}\n",
+        setup={"sizing": {"margin_allocation_pct": 10, "leverage": 5}, "setup": {"tp_pct": 2.0, "sl_pct": 1.0}},
+    )
+    repository = FakeRepository(
+        route=_route(bundle),
+        bundle=bundle,
+        owner_state={"position_instance_id": "position-1", "bundle_id": bundle["bundle_id"], "position_state": {}},
+    )
+    adapter = FakeAdapter(
+        positions=[{"instId": "AAVE-USDT-SWAP", "pos": "4.6", "posSide": "net", "avgPx": "100", "markPx": "100", "notionalUsd": "460"}],
+        protection_orders=[{"instId": "AAVE-USDT-SWAP", "state": "live", "side": "sell", "sz": "4.6", "tpTriggerPx": "102", "slTriggerPx": "99"}],
+        balance={"data": [{"ccy": "USDT", "totalEq": "1000"}]},
+    )
+
+    wake = run_route_wake(route_id="aave-live", repository=repository, adapter=adapter)
+
+    reconciliation = wake["strategy_decision"]["diagnostics"]["position_size_reconciliation"]
+    assert reconciliation["current_margin_usd"] == 92
+    assert reconciliation["target_margin_usd"] == 100
+    assert reconciliation["tolerance_usd"] == 10
+    assert "position_size_already_complete" in reconciliation["blockers"]
+    assert wake["order_intents"] == []
+
+
+def test_wake_completes_position_below_ten_percent_tolerance(tmp_path):
+    bundle = _bundle(
+        tmp_path,
+        strategy_source="def manage_position(context):\n    return {'action': 'HOLD', 'reason_code': 'managed'}\n",
+        setup={"sizing": {"margin_allocation_pct": 10, "leverage": 5}, "setup": {"tp_pct": 2.0, "sl_pct": 1.0}},
+    )
+    repository = FakeRepository(
+        route=_route(bundle),
+        bundle=bundle,
+        owner_state={"position_instance_id": "position-1", "bundle_id": bundle["bundle_id"], "position_state": {}},
+    )
+    adapter = FakeAdapter(
+        positions=[{"instId": "AAVE-USDT-SWAP", "pos": "4.4", "posSide": "net", "avgPx": "100", "markPx": "100", "notionalUsd": "440"}],
+        protection_orders=[{"instId": "AAVE-USDT-SWAP", "state": "live", "side": "sell", "sz": "4.4", "tpTriggerPx": "102", "slTriggerPx": "99"}],
+        balance={"data": [{"ccy": "USDT", "totalEq": "1000"}]},
+    )
+
+    wake = run_route_wake(route_id="aave-live", repository=repository, adapter=adapter)
+
+    reconciliation = wake["strategy_decision"]["diagnostics"]["position_size_reconciliation"]
+    assert reconciliation["current_margin_usd"] == 88
+    assert reconciliation["missing_margin_usd"] == 12
+    assert wake["strategy_decision"]["action"] == "COMPLETE_POSITION"
+    assert wake["order_intents"][0]["quantity"] == "12"
+
+
+def test_wake_leaves_partial_position_to_configured_pyramid_rules(tmp_path):
+    bundle = _bundle(
+        tmp_path,
+        strategy_source="def manage_position(context):\n    return {'action': 'HOLD', 'reason_code': 'managed'}\n",
+        setup={
+            "sizing": {"margin_allocation_pct": 10, "leverage": 5},
+            "setup": {"tp_pct": 2.0, "sl_pct": 1.0, "pyramid": {"step_pct": 1.0, "max_legs": 3}},
+        },
+    )
+    repository = FakeRepository(
+        route=_route(bundle),
+        bundle=bundle,
+        owner_state={"position_instance_id": "position-1", "bundle_id": bundle["bundle_id"], "position_state": {}},
+    )
+    adapter = FakeAdapter(
+        positions=[{"instId": "AAVE-USDT-SWAP", "pos": "1", "posSide": "net", "avgPx": "100", "markPx": "100", "notionalUsd": "100"}],
+        protection_orders=[{"instId": "AAVE-USDT-SWAP", "state": "live", "side": "sell", "sz": "1", "tpTriggerPx": "102", "slTriggerPx": "99"}],
+        balance={"data": [{"ccy": "USDT", "totalEq": "1000"}]},
+    )
+
+    wake = run_route_wake(route_id="aave-live", repository=repository, adapter=adapter)
+
+    reconciliation = wake["strategy_decision"]["diagnostics"]["position_size_reconciliation"]
+    assert wake["strategy_decision"]["action"] != "COMPLETE_POSITION"
+    assert "pyramiding_configured" in reconciliation["blockers"]
+
+
 def test_wake_adopts_manual_exchange_position_once(tmp_path):
     bundle = _bundle(
         tmp_path,

@@ -1019,6 +1019,8 @@ def _execute_stage4_realized_expectancy(
         initial_capital_usdt=float(payload["initial_capital_usdt"]),
         margin_allocation_pct=float(payload["margin_allocation_pct"]),
         leverage=float(payload["leverage"]),
+        pause_rules=(payload.get("pause_rules") or None),
+        pause_rule=(payload.get("pause_rule") or None),
         loss_cooldown=(payload.get("loss_cooldown") or None),
     )
     return {"stage4_realized_expectancy": result, "session_id": session["session_id"]}

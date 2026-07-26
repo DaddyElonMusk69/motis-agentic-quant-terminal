@@ -28,6 +28,8 @@ def run_stage4_realized_expectancy(
     leverage: float = DEFAULT_LEVERAGE,
     fees_bps_per_side: float = DEFAULT_FEES_BPS_PER_SIDE,
     slippage_bps_per_side: float = DEFAULT_SLIPPAGE_BPS_PER_SIDE,
+    pause_rules: list[dict[str, Any]] | None = None,
+    pause_rule: dict[str, Any] | None = None,
     loss_cooldown: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if initial_capital_usdt <= 0:
@@ -48,7 +50,7 @@ def run_stage4_realized_expectancy(
     candidates = _normalize_candidates(candidates_payload)
     if not candidates:
         raise ValueError("Stage 4 requires at least one Stage 4 candidate.")
-    loss_cooldown = _normalize_loss_cooldown(loss_cooldown)
+    pause_rules = _normalize_pause_rules(pause_rules=pause_rules, pause_rule=pause_rule, loss_cooldown=loss_cooldown)
 
     signals_by_id = _index_signals(signal_rows)
     candle_rows = [_coerce_candle(candle) for candle in candles]
@@ -68,7 +70,7 @@ def run_stage4_realized_expectancy(
             fees_bps_per_side=fees_bps_per_side,
             slippage_bps_per_side=slippage_bps_per_side,
             slice_windows=slice_windows,
-            loss_cooldown=loss_cooldown,
+            pause_rules=pause_rules,
         )
         results.append(result)
         ledger_candidates.append(
@@ -114,7 +116,9 @@ def run_stage4_realized_expectancy(
             "initial_capital_usdt": initial_capital_usdt,
             "margin_allocation_pct": margin_allocation_pct,
             "leverage": leverage,
-            **({"loss_cooldown": loss_cooldown} if loss_cooldown is not None else {}),
+            **({"pause_rules": pause_rules} if pause_rules else {}),
+            **({"pause_rule": pause_rules[0]} if len(pause_rules) == 1 else {}),
+            **({"loss_cooldown": _loss_cooldown_alias(pause_rules)} if _loss_cooldown_alias(pause_rules) is not None else {}),
         },
         "slice_windows": [
             {"name": name, "start": start.isoformat().replace("+00:00", "Z"), "end": end.isoformat().replace("+00:00", "Z")}
@@ -233,6 +237,8 @@ def _score_candidate(
     fees_bps_per_side: float,
     slippage_bps_per_side: float,
     slice_windows: list[tuple[str, datetime, datetime]],
+    pause_rules: list[dict[str, Any]] | None = None,
+    pause_rule: dict[str, Any] | None = None,
     loss_cooldown: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     candidate = {**candidate, "leverage": float(leverage)}
@@ -260,10 +266,14 @@ def _score_candidate(
 
     trades = []
     equity = float(initial_capital_usdt)
-    cooldown_config = _normalize_loss_cooldown(loss_cooldown)
-    cooldown_until: datetime | None = None
-    consecutive_losses = 0
-    cooldown_triggers = 0
+    pause_rules = _normalize_pause_rules(pause_rules=pause_rules, pause_rule=pause_rule, loss_cooldown=loss_cooldown)
+    pause_until: datetime | None = None
+    pause_reason = "pause_rule_unknown"
+    consecutive_counts = {rule["type"]: 0 for rule in pause_rules if rule["type"] in {"consecutive_losses", "consecutive_wins"}}
+    pause_triggers = 0
+    equity_events: list[tuple[datetime, float]] = []
+    if inputs:
+        equity_events.append((inputs[0]["signal_ts"], equity))
     index = 0
     while index < len(inputs):
         item = inputs[index]
@@ -272,9 +282,11 @@ def _score_candidate(
             index += 1
             continue
 
-        if cooldown_until is not None and item["signal_ts"] < cooldown_until:
-            skipped = _skipped_decision(item=item, candidate=candidate, reason="loss_cooldown")
-            skipped["cooldown_until"] = cooldown_until.isoformat().replace("+00:00", "Z")
+        if pause_until is not None and item["signal_ts"] < pause_until:
+            skipped = _skipped_decision(item=item, candidate=candidate, reason=pause_reason)
+            skipped["pause_until"] = pause_until.isoformat().replace("+00:00", "Z")
+            if pause_reason == "loss_cooldown":
+                skipped["cooldown_until"] = skipped["pause_until"]
             trades.append(skipped)
             index += 1
             continue
@@ -294,17 +306,27 @@ def _score_candidate(
         equity = trade["equity_after"]
 
         exit_ts = _coerce_datetime(trade["exit_ts"])
-        if cooldown_config is not None:
-            if float(trade.get("net_pnl_usdt") or 0.0) < 0:
-                consecutive_losses += 1
-            else:
-                consecutive_losses = 0
-            if consecutive_losses >= cooldown_config["consecutive_losses"]:
-                cooldown_until = exit_ts + timedelta(hours=cooldown_config["cooldown_hours"])
-                trade["loss_cooldown_triggered"] = True
-                trade["cooldown_until"] = cooldown_until.isoformat().replace("+00:00", "Z")
-                cooldown_triggers += 1
-                consecutive_losses = 0
+        if pause_rules:
+            equity_events.append((exit_ts, equity))
+            triggered_rule, consecutive_counts = _update_pause_rules_state(
+                pause_rules=pause_rules,
+                trade=trade,
+                exit_ts=exit_ts,
+                equity_events=equity_events,
+                consecutive_counts=consecutive_counts,
+            )
+            if triggered_rule is not None:
+                pause_reason = _pause_skip_reason(triggered_rule)
+                pause_until = exit_ts + timedelta(hours=triggered_rule["cooldown_hours"])
+                trade["pause_rule_triggered"] = True
+                trade["pause_rule_type"] = triggered_rule["type"]
+                trade["pause_until"] = pause_until.isoformat().replace("+00:00", "Z")
+                if triggered_rule["type"] == "consecutive_losses":
+                    trade["loss_cooldown_triggered"] = True
+                    trade["cooldown_until"] = trade["pause_until"]
+                pause_triggers += 1
+                consecutive_counts = {key: 0 for key in consecutive_counts}
+                equity_events = [(exit_ts, equity)]
 
         index += 1
         while index < len(inputs) and inputs[index]["signal_ts"] <= exit_ts:
@@ -329,10 +351,17 @@ def _score_candidate(
         summary["net_pnl_pct"] = account["return_pct"]
         summary["gross_expectancy_pct"] = round(account["gross_return_pct"] / len(records), 8)
         summary["net_expectancy_pct"] = round(account["return_pct"] / len(records), 8)
-    if cooldown_config is not None:
-        summary["loss_cooldown"] = cooldown_config
-        summary["loss_cooldown_triggers"] = cooldown_triggers
-        summary["skipped_loss_cooldown"] = sum(1 for trade in trades if trade.get("skip_reason") == "loss_cooldown")
+    if pause_rules:
+        summary["pause_rules"] = pause_rules
+        if len(pause_rules) == 1:
+            summary["pause_rule"] = pause_rules[0]
+        summary["pause_rule_triggers"] = pause_triggers
+        summary["skipped_pause_rule"] = sum(1 for trade in trades if str(trade.get("skip_reason") or "").startswith("pause_rule_") or trade.get("skip_reason") == "loss_cooldown")
+        loss_alias = _loss_cooldown_alias(pause_rules)
+        if loss_alias is not None:
+            summary["loss_cooldown"] = loss_alias
+            summary["loss_cooldown_triggers"] = sum(1 for trade in trades if trade.get("loss_cooldown_triggered") is True)
+            summary["skipped_loss_cooldown"] = sum(1 for trade in trades if trade.get("skip_reason") == "loss_cooldown")
     by_side = {
         side: _summarize_trades([trade for trade in trades if trade["decision_direction"] == side], denominator=len([trade for trade in trades if trade["decision_direction"] == side]))
         for side in ("LONG", "SHORT")
@@ -372,21 +401,142 @@ def _score_candidate(
     )
 
 
-def _normalize_loss_cooldown(config: dict[str, Any] | None) -> dict[str, int] | None:
-    if config is None:
+def _normalize_pause_rules(
+    *,
+    pause_rules: list[dict[str, Any]] | None = None,
+    pause_rule: dict[str, Any] | None = None,
+    loss_cooldown: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    provided = sum(value is not None for value in (pause_rules, pause_rule, loss_cooldown))
+    if provided > 1:
+        raise ValueError("pause_rules, pause_rule, and loss_cooldown cannot be combined")
+    if loss_cooldown is not None:
+        pause_rule = {
+            "type": "consecutive_losses",
+            "consecutive_count": loss_cooldown.get("consecutive_losses"),
+            "cooldown_hours": loss_cooldown.get("cooldown_hours"),
+        }
+    if pause_rule is not None:
+        pause_rules = [pause_rule]
+    if not pause_rules:
+        return []
+
+    normalized = [_normalize_pause_rule(rule) for rule in pause_rules]
+    seen_types: set[str] = set()
+    for rule in normalized:
+        rule_type = str(rule["type"])
+        if rule_type in seen_types:
+            raise ValueError(f"duplicate pause rule type: {rule_type}")
+        seen_types.add(rule_type)
+    return normalized
+
+
+def _normalize_pause_rule(pause_rule: dict[str, Any]) -> dict[str, Any]:
+    rule_type = str(pause_rule.get("type") or "").strip()
+    cooldown_hours = int(pause_rule.get("cooldown_hours") or 0)
+    if cooldown_hours < 1 or cooldown_hours > 168:
+        raise ValueError("pause rule cooldown_hours must be between 1 and 168")
+
+    if rule_type in {"consecutive_losses", "consecutive_wins"}:
+        consecutive_count = int(pause_rule.get("consecutive_count") or pause_rule.get(rule_type) or 0)
+        if consecutive_count < 1 or consecutive_count > 20:
+            raise ValueError("pause rule consecutive_count must be between 1 and 20")
+        return {
+            "type": rule_type,
+            "consecutive_count": consecutive_count,
+            "cooldown_hours": cooldown_hours,
+            "counter_reset": "on_opposite_result_or_trigger",
+            "starts_at": "threshold_trade_exit",
+        }
+
+    if rule_type == "profit_burst":
+        threshold = float(pause_rule.get("profit_threshold_pct") or 0)
+        lookback_hours = int(pause_rule.get("lookback_hours") or 0)
+        if threshold <= 0 or threshold > 100:
+            raise ValueError("pause rule profit_threshold_pct must be greater than 0 and no more than 100")
+        if lookback_hours < 1 or lookback_hours > 720:
+            raise ValueError("pause rule lookback_hours must be between 1 and 720")
+        return {
+            "type": "profit_burst",
+            "profit_threshold_pct": threshold,
+            "lookback_hours": lookback_hours,
+            "cooldown_hours": cooldown_hours,
+            "measurement": "closed_equity_growth_from_earliest_point_in_lookback",
+            "starts_at": "threshold_trade_exit",
+        }
+
+    raise ValueError("pause rule type must be consecutive_losses, consecutive_wins, or profit_burst")
+
+
+def _loss_cooldown_alias(pause_rules: list[dict[str, Any]]) -> dict[str, Any] | None:
+    pause_rule = next((rule for rule in pause_rules if rule.get("type") == "consecutive_losses"), None)
+    if pause_rule is None:
         return None
-    consecutive_losses = int(config.get("consecutive_losses") or 0)
-    cooldown_hours = int(config.get("cooldown_hours") or 0)
-    if consecutive_losses < 1:
-        raise ValueError("loss cooldown consecutive_losses must be at least 1")
-    if cooldown_hours < 1:
-        raise ValueError("loss cooldown cooldown_hours must be at least 1")
     return {
-        "consecutive_losses": consecutive_losses,
-        "cooldown_hours": cooldown_hours,
+        "consecutive_losses": int(pause_rule["consecutive_count"]),
+        "cooldown_hours": int(pause_rule["cooldown_hours"]),
         "counter_reset": "on_win_or_trigger",
         "starts_at": "loss_exit",
     }
+
+
+def _pause_skip_reason(pause_rule: dict[str, Any] | None) -> str:
+    if pause_rule and pause_rule.get("type") == "consecutive_losses":
+        return "loss_cooldown"
+    return f"pause_rule_{pause_rule.get('type') if pause_rule else 'unknown'}"
+
+
+def _update_pause_rules_state(
+    *,
+    pause_rules: list[dict[str, Any]],
+    trade: dict[str, Any],
+    exit_ts: datetime,
+    equity_events: list[tuple[datetime, float]],
+    consecutive_counts: dict[str, int],
+) -> tuple[dict[str, Any] | None, dict[str, int]]:
+    for pause_rule in pause_rules:
+        triggered, next_count = _update_pause_rule_state(
+            pause_rule=pause_rule,
+            trade=trade,
+            exit_ts=exit_ts,
+            equity_events=equity_events,
+            consecutive_count=consecutive_counts.get(str(pause_rule["type"]), 0),
+        )
+        if pause_rule["type"] in consecutive_counts:
+            consecutive_counts[str(pause_rule["type"])] = next_count
+        if triggered:
+            return pause_rule, consecutive_counts
+    return None, consecutive_counts
+
+
+def _update_pause_rule_state(
+    *,
+    pause_rule: dict[str, Any],
+    trade: dict[str, Any],
+    exit_ts: datetime,
+    equity_events: list[tuple[datetime, float]],
+    consecutive_count: int,
+) -> tuple[bool, int]:
+    net_pnl = float(trade.get("net_pnl_usdt") or 0.0)
+    rule_type = pause_rule["type"]
+    if rule_type == "consecutive_losses":
+        consecutive_count = consecutive_count + 1 if net_pnl < 0 else 0
+        return consecutive_count >= int(pause_rule["consecutive_count"]), consecutive_count
+    if rule_type == "consecutive_wins":
+        consecutive_count = consecutive_count + 1 if net_pnl > 0 else 0
+        return consecutive_count >= int(pause_rule["consecutive_count"]), consecutive_count
+    if rule_type == "profit_burst":
+        window_start = exit_ts - timedelta(hours=int(pause_rule["lookback_hours"]))
+        candidates = [(ts, equity) for ts, equity in equity_events if ts >= window_start]
+        if not candidates:
+            candidates = equity_events[-1:]
+        baseline = candidates[0][1]
+        if baseline <= 0:
+            return False, consecutive_count
+        growth_pct = (float(trade["equity_after"]) - baseline) / baseline * 100.0
+        trade["pause_rule_profit_growth_pct"] = round(growth_pct, 8)
+        return growth_pct >= float(pause_rule["profit_threshold_pct"]), consecutive_count
+    return False, consecutive_count
 
 
 def _stage4_run_id(created_at: datetime, promotion_root: Path) -> str:
@@ -1182,9 +1332,10 @@ def _render_summary(payload: dict[str, Any]) -> str:
         "",
         "Mode: `sequential_account_backtest`",
     ]
-    cooldown = (payload.get("simulation_inputs") or {}).get("loss_cooldown")
-    if cooldown:
-        lines.append(f"Loss cooldown: `{cooldown['consecutive_losses']} consecutive losses / {cooldown['cooldown_hours']}h`")
+    simulation_inputs = payload.get("simulation_inputs") or {}
+    pause_rules = simulation_inputs.get("pause_rules") or ([simulation_inputs["pause_rule"]] if simulation_inputs.get("pause_rule") else [])
+    if pause_rules:
+        lines.append(f"Pause rules: `{'; '.join(_format_pause_rule(rule) for rule in pause_rules)}`")
     lines.extend(
         [
             f"Best candidate: `{best['candidate_id']}`",
@@ -1200,6 +1351,17 @@ def _render_summary(payload: dict[str, Any]) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _format_pause_rule(pause_rule: dict[str, Any]) -> str:
+    rule_type = pause_rule.get("type")
+    if rule_type == "consecutive_losses":
+        return f"{pause_rule['consecutive_count']} consecutive losses / {pause_rule['cooldown_hours']}h"
+    if rule_type == "consecutive_wins":
+        return f"{pause_rule['consecutive_count']} consecutive wins / {pause_rule['cooldown_hours']}h"
+    if rule_type == "profit_burst":
+        return f"{pause_rule['profit_threshold_pct']}% closed-equity growth over {pause_rule['lookback_hours']}h / {pause_rule['cooldown_hours']}h"
+    return str(rule_type or "unknown")
 
 
 def _slice_windows(session: dict[str, Any]) -> list[tuple[str, datetime, datetime]]:

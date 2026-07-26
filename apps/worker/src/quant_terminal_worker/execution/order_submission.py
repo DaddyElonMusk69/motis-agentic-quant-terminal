@@ -69,7 +69,7 @@ def submit_wake_order_intents(
             _replace_intent(order_intents, failed)
             break
         action = _intent_action(intent=intent, wake=wake)
-        if action in {"ENTER", "ENTER_LONG", "ENTER_SHORT", "PYRAMID"} and not _truthy(intent.get("reduce_only")):
+        if action in {"ENTER", "ENTER_LONG", "ENTER_SHORT", "PYRAMID", "COMPLETE_POSITION"} and not _truthy(intent.get("reduce_only")):
             post_fill_protection = _ensure_post_fill_protection(adapter=adapter, intent={**intent, "action": action})
             if post_fill_protection is not None:
                 result = {"order": result} if "order" not in result and "data" in result else dict(result)
@@ -102,7 +102,7 @@ def submit_wake_order_intents(
                     protection_refresh_required=not bool(adapter_result.get("post_fill_protection")),
                 )
             )
-        elif action == "PYRAMID" and not _truthy(intent.get("reduce_only")):
+        elif action in {"PYRAMID", "COMPLETE_POSITION"} and not _truthy(intent.get("reduce_only")):
             owner_state = repository.get_open_owner_state(route_id)
             if owner_state is not None:
                 repository.append_owner_state_leg(
@@ -267,7 +267,7 @@ def _ensure_post_fill_protection(*, adapter: Any, intent: dict[str, Any]) -> dic
 
 
 def _cancel_existing_protection_before_position_order(*, adapter: Any, intent: dict[str, Any]) -> dict[str, Any] | None:
-    if _canonical_action(intent.get("action")) not in {"ENTER", "ENTER_LONG", "ENTER_SHORT", "PYRAMID", "EXIT", "REDUCE"}:
+    if _canonical_action(intent.get("action")) not in {"ENTER", "ENTER_LONG", "ENTER_SHORT", "PYRAMID", "COMPLETE_POSITION", "EXIT", "REDUCE"}:
         return None
     canceller = getattr(adapter, "cancel_swap_protection_orders", None)
     if canceller is None:

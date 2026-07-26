@@ -11,6 +11,7 @@ from quant_terminal_worker.execution.live_signal_scan import scan_latest_live_si
 
 DEFAULT_ENTRY_ORDER_TTL_MINUTES = 30
 PYRAMID_LEG_BUCKET_TOLERANCE = 0.35
+POSITION_SIZE_RECONCILIATION_TOLERANCE_PCT = 10.0
 
 
 def run_route_wake(
@@ -921,6 +922,7 @@ def _position_context(
         "last_price": _first_present(position, "last", "lastPx", "last_price"),
         "position_notional_usd": _rounded_number(position_notional) if position_notional > 0 else None,
         "account_equity_usd": _rounded_number(account_equity) if account_equity > 0 else None,
+        "position_instance_id": owner_state.get("position_instance_id") if owner_state else None,
         "opened_at": opened_at.isoformat().replace("+00:00", "Z") if opened_at else None,
         "age_hours": age_hours,
         "hard_exit_after_hours": _hard_exit_after_hours(execution_setup),
@@ -1180,8 +1182,35 @@ def _apply_pyramid_management(
     diagnostics = dict(decision.get("diagnostics") or {})
     diagnostics["pyramid"] = pyramid_context
     action = _canonical_action(decision.get("action"))
-    if action in {"EXIT", "REDUCE", "PYRAMID", "UPDATE_PROTECTION", "BLOCKED"}:
+    if action in {"EXIT", "REDUCE", "PYRAMID", "COMPLETE_POSITION", "UPDATE_PROTECTION", "BLOCKED"}:
         return {**decision, "diagnostics": diagnostics}
+    reconciliation = _position_size_reconciliation(
+        execution_setup=execution_setup,
+        position_context=position_context,
+        route=route,
+        working_entry_orders=working_entry_orders,
+    )
+    diagnostics["position_size_reconciliation"] = reconciliation
+    if action == "HOLD" and reconciliation["applicable"]:
+        direction = str(position_context.get("direction") or "LONG").upper()
+        return {
+            **decision,
+            "action": "COMPLETE_POSITION",
+            "reason_code": "position_size_incomplete",
+            "order_intents": [],
+            "quantity": None,
+            "notional_usd": None,
+            "side": "buy" if direction == "LONG" else "sell",
+            "direction": direction,
+            "order_type": "market",
+            "price": None,
+            "reduce_only": False,
+            "position_instance_id": position_context.get("position_instance_id"),
+            "completion_margin_usd": reconciliation["missing_margin_usd"],
+            "completion_notional_usd": reconciliation["missing_notional_usd"],
+            "completion_target_margin_usd": reconciliation["target_margin_usd"],
+            "diagnostics": diagnostics,
+        }
     if not pyramid_context["eligible"] or not pyramid_context["trigger_reached"]:
         return {**decision, "diagnostics": diagnostics}
     direction = str(position_context.get("direction") or pyramid_context.get("direction") or "LONG").upper()
@@ -1202,6 +1231,61 @@ def _apply_pyramid_management(
         "trigger_price": pyramid_context["trigger_price"],
         "last_leg_entry": pyramid_context["last_leg_entry"],
         "diagnostics": diagnostics,
+    }
+
+
+def _position_size_reconciliation(
+    *,
+    execution_setup: dict[str, Any],
+    position_context: dict[str, Any],
+    route: dict[str, Any] | None,
+    working_entry_orders: list[dict[str, Any]],
+) -> dict[str, Any]:
+    setup = execution_setup.get("setup") if isinstance(execution_setup.get("setup"), dict) else execution_setup
+    pyramid_setup = setup.get("pyramid") if isinstance(setup.get("pyramid"), dict) else {}
+    step_pct = _numeric(pyramid_setup.get("step_pct") or setup.get("pyramid_step_pct"))
+    max_legs = _pyramid_max_legs(execution_setup)
+    sizing_policy = _route_sizing_policy(route=route, execution_setup=execution_setup)
+    allocation_pct = sizing_policy["margin_allocation_pct"]
+    leverage = sizing_policy["leverage"]
+    account_equity = _numeric(position_context.get("account_equity_usd"))
+    position_notional = _numeric(position_context.get("position_notional_usd"))
+    current_margin = position_notional / leverage if position_notional > 0 and leverage > 0 else 0.0
+    target_margin = account_equity * allocation_pct / 100 if account_equity > 0 and allocation_pct > 0 else 0.0
+    missing_margin = max(0.0, target_margin - current_margin)
+    missing_notional = missing_margin * leverage if leverage > 0 else 0.0
+    tolerance = max(0.01, target_margin * POSITION_SIZE_RECONCILIATION_TOLERANCE_PCT / 100)
+    pyramid_configured = max_legs > 1 and step_pct > 0
+    blockers: list[str] = []
+    if pyramid_configured:
+        blockers.append("pyramiding_configured")
+    if leverage <= 0:
+        blockers.append("missing_route_leverage")
+    if allocation_pct <= 0:
+        blockers.append("missing_margin_allocation_pct")
+    if account_equity <= 0:
+        blockers.append("missing_account_equity")
+    if position_notional <= 0:
+        blockers.append("missing_position_notional")
+    if working_entry_orders:
+        blockers.append("working_add_order_exists")
+    if missing_margin <= tolerance:
+        blockers.append("position_size_already_complete")
+    return {
+        "applicable": not blockers,
+        "pyramiding_configured": pyramid_configured,
+        "max_legs": max_legs,
+        "step_pct": _rounded_number(step_pct) if step_pct > 0 else None,
+        "account_equity_usd": _rounded_number(account_equity) if account_equity > 0 else None,
+        "allocation_pct": _rounded_number(allocation_pct) if allocation_pct > 0 else None,
+        "leverage": _rounded_number(leverage) if leverage > 0 else None,
+        "current_notional_usd": _rounded_number(position_notional) if position_notional > 0 else None,
+        "current_margin_usd": _rounded_number(current_margin) if current_margin > 0 else None,
+        "target_margin_usd": _rounded_number(target_margin) if target_margin > 0 else None,
+        "missing_margin_usd": _rounded_number(missing_margin) if missing_margin > 0 else None,
+        "missing_notional_usd": _rounded_number(missing_notional) if missing_notional > 0 else None,
+        "tolerance_usd": _rounded_number(tolerance),
+        "blockers": blockers,
     }
 
 
@@ -1374,7 +1458,7 @@ def _normalize_strategy_order_intents(
             for index, intent in enumerate(explicit_intents)
         ]
     action = _canonical_action(decision.get("action") or decision.get("trade_action") or "SKIP")
-    if action not in {"ENTER", "ENTER_LONG", "ENTER_SHORT", "EXIT", "REDUCE", "PYRAMID", "UPDATE_PROTECTION"}:
+    if action not in {"ENTER", "ENTER_LONG", "ENTER_SHORT", "EXIT", "REDUCE", "PYRAMID", "COMPLETE_POSITION", "UPDATE_PROTECTION"}:
         return []
     return [
         _coerce_order_intent(
@@ -1427,7 +1511,15 @@ def _coerce_order_intent(
         or setup.get("notional_usd")
     )
     route_sizing = _route_margin_sizing(route=route, execution_setup=execution_setup, snapshot=snapshot, action=action)
-    if route_sizing is not None:
+    reconciliation = (
+        decision.get("diagnostics", {}).get("position_size_reconciliation")
+        if isinstance(decision.get("diagnostics"), dict)
+        else None
+    )
+    if action == "COMPLETE_POSITION":
+        quantity = decision.get("completion_margin_usd") or "0"
+        notional_usd = decision.get("completion_notional_usd")
+    elif route_sizing is not None:
         quantity = route_sizing["margin_usd"]
         notional_usd = route_sizing["notional_usd"]
     target_currency = (
@@ -1439,7 +1531,11 @@ def _coerce_order_intent(
         or setup.get("tgt_ccy")
     )
     leverage = intent.get("leverage") or decision.get("leverage") or setup.get("leverage")
-    if route_sizing is not None:
+    if action == "COMPLETE_POSITION":
+        sizing_policy = _route_sizing_policy(route=route, execution_setup=execution_setup)
+        target_currency = "margin"
+        leverage = _rounded_number(sizing_policy["leverage"])
+    elif route_sizing is not None:
         target_currency = "margin"
         leverage = route_sizing["leverage"]
     order_intent = {
@@ -1483,7 +1579,18 @@ def _coerce_order_intent(
         value = intent.get(key) if key in intent else decision.get(key)
         if value not in (None, ""):
             order_intent[key] = value
-    if route_sizing is not None:
+    if action == "COMPLETE_POSITION" and isinstance(reconciliation, dict):
+        order_intent.update(
+            {
+                "sizing_source": "position_size_reconciliation",
+                "account_equity_usd": reconciliation.get("account_equity_usd"),
+                "margin_allocation_pct": reconciliation.get("allocation_pct"),
+                "margin_usd": reconciliation.get("missing_margin_usd"),
+                "completion_target_margin_usd": reconciliation.get("target_margin_usd"),
+                "completion_current_margin_usd": reconciliation.get("current_margin_usd"),
+            }
+        )
+    elif route_sizing is not None:
         order_intent.update(
             {
                 "sizing_source": route_sizing["sizing_source"],

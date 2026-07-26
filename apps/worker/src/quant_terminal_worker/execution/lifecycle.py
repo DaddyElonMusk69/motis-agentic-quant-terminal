@@ -23,6 +23,8 @@ def run_route_lifecycle_cycle(
     live_signal_scanner: Any | None = None,
     adapter: Any,
     workspace_root: Path,
+    raw_fill_services: dict[str, Any] | None = None,
+    raw_adapters: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     route = runtime_repository.get_deployment_route(route_id)
     if route is None:
@@ -34,6 +36,8 @@ def run_route_lifecycle_cycle(
         runtime_repository=runtime_repository,
         market_data_repository=market_data_repository,
         fill_service=fill_service,
+        raw_fill_services=raw_fill_services,
+        raw_adapters=raw_adapters,
         adapter=adapter,
         workspace_root=workspace_root,
     )
@@ -158,6 +162,8 @@ def _warm_market_data(
     runtime_repository: Any,
     market_data_repository: Any,
     fill_service: Any,
+    raw_fill_services: dict[str, Any] | None,
+    raw_adapters: dict[str, Any] | None,
     adapter: Any,
     workspace_root: Path,
 ) -> dict[str, Any]:
@@ -180,6 +186,8 @@ def _warm_market_data(
         runtime_repository=runtime_repository,
         market_data_repository=market_data_repository,
         fill_service=fill_service,
+        raw_fill_services=raw_fill_services,
+        raw_adapters=raw_adapters,
         adapter=adapter,
         workspace_root=workspace_root,
     )

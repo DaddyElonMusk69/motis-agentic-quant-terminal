@@ -204,6 +204,50 @@ def test_submission_appends_pyramid_leg_without_new_owner_state():
     assert repository.open_owner_state["position_state"]["protection_refresh_required"] is True
 
 
+def test_submission_appends_position_completion_without_new_owner_state():
+    owner_state = {
+        "owner_state_id": "owner-1",
+        "route_id": "aave-demo",
+        "bundle_id": "bundle-1",
+        "position_instance_id": "pos-1",
+        "asset": "AAVE",
+        "instrument": "AAVE-USDT-SWAP",
+        "account_mode": "demo",
+        "owner_strategy_id": "aave-strategy",
+        "owner_strategy_version": "v0.1",
+        "status": "open",
+        "position_state": {"direction": "LONG", "legs": [{"leg": 1, "status": "filled"}]},
+    }
+    repository = FakeRepository(
+        route=_route(account_mode="demo"),
+        wake=_wake(
+            action="COMPLETE_POSITION",
+            side="buy",
+            quantity="80",
+            notional_usd=400,
+            target_currency="margin",
+            leverage=5,
+            position_instance_id="pos-1",
+        ),
+        owner_state=owner_state,
+    )
+    adapter = FakeAdapter()
+
+    result = submit_wake_order_intents(
+        route_id="aave-demo",
+        wake_id="wake-1",
+        repository=repository,
+        adapter=adapter,
+        confirm_live=False,
+    )
+
+    assert result["status"] == "submitted"
+    assert adapter.orders[0].size == "80"
+    assert adapter.orders[0].target_currency == "margin"
+    assert repository.owner_states == []
+    assert repository.appended_legs[0][1]["action"] == "COMPLETE_POSITION"
+
+
 def test_submission_refuses_zero_quantity_intent():
     repository = FakeRepository(route=_route(account_mode="demo"), wake=_wake(quantity="0", notional_usd=10))
     adapter = FakeAdapter()

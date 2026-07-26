@@ -13,6 +13,7 @@ OrderAction = Literal[
     "EXIT",
     "REDUCE",
     "PYRAMID",
+    "COMPLETE_POSITION",
     "UPDATE_PROTECTION",
     "BLOCKED",
 ]
@@ -204,7 +205,7 @@ class ExecutionDecision:
 class PositionManagementDecision:
     decision_id: str
     route_id: str
-    action: Literal["HOLD", "EXIT", "REDUCE", "PYRAMID", "UPDATE_PROTECTION", "BLOCKED"]
+    action: Literal["HOLD", "EXIT", "REDUCE", "PYRAMID", "COMPLETE_POSITION", "UPDATE_PROTECTION", "BLOCKED"]
     reason_code: str
     order_intents: list[OrderIntent]
     diagnostics: dict[str, Any]

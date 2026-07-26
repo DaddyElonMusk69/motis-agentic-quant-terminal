@@ -1217,6 +1217,8 @@ export type Stage4RealizedExpectancyState = {
     initial_capital_usdt?: number;
     margin_allocation_pct?: number;
     leverage?: number;
+    pause_rules?: Stage4PauseRule[] | null;
+    pause_rule?: Stage4PauseRule | null;
     loss_cooldown?: {
       consecutive_losses: number;
       cooldown_hours: number;
@@ -1230,6 +1232,8 @@ export type Stage4RealizedExpectancyState = {
       initial_capital_usdt?: number;
       margin_allocation_pct?: number;
       leverage?: number;
+      pause_rules?: Stage4PauseRule[] | null;
+      pause_rule?: Stage4PauseRule | null;
       loss_cooldown?: {
         consecutive_losses: number;
         cooldown_hours: number;
@@ -1242,6 +1246,24 @@ export type Stage4RealizedExpectancyState = {
   best_candidate: Partial<Stage4CandidateResult>;
   candidates: Stage4CandidateResult[];
 };
+
+export type Stage4PauseRule =
+  | {
+      type: "consecutive_losses";
+      consecutive_count: number;
+      cooldown_hours: number;
+    }
+  | {
+      type: "consecutive_wins";
+      consecutive_count: number;
+      cooldown_hours: number;
+    }
+  | {
+      type: "profit_burst";
+      profit_threshold_pct: number;
+      lookback_hours: number;
+      cooldown_hours: number;
+    };
 
 export type Stage4RunDeleteResult = {
   session_id: string;
@@ -2146,6 +2168,8 @@ export type Stage4RealizedExpectancyRequest = {
   initial_capital_usdt: number;
   margin_allocation_pct: number;
   leverage: number;
+  pause_rules?: Stage4PauseRule[] | null;
+  pause_rule?: Stage4PauseRule | null;
   consecutive_losses?: number | null;
   cooldown_hours?: number | null;
 };
@@ -2158,6 +2182,8 @@ export function runStage4RealizedExpectancy(request: Stage4RealizedExpectancyReq
       initial_capital_usdt: request.initial_capital_usdt,
       margin_allocation_pct: request.margin_allocation_pct,
       leverage: request.leverage,
+      pause_rules: request.pause_rules ?? null,
+      pause_rule: request.pause_rule ?? null,
       consecutive_losses: request.consecutive_losses ?? null,
       cooldown_hours: request.cooldown_hours ?? null
     })

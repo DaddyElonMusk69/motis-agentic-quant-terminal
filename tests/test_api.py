@@ -5317,6 +5317,61 @@ def test_stage4_endpoint_writes_realized_expectancy_from_full_decision_set(tmp_p
         "starts_at": "loss_exit",
     }
 
+    invalid_pause_rule = client.post(
+        "/api/v1/research/stage1-sessions/stage1-aave/stage4/realized-expectancy",
+        json={"pause_rule": {"type": "profit_burst", "profit_threshold_pct": 2.5, "cooldown_hours": 4}},
+    )
+    assert invalid_pause_rule.status_code == 400
+    assert invalid_pause_rule.json()["detail"] == "pause_rule.profit_threshold_pct and pause_rule.lookback_hours are required for profit_burst"
+
+    pause_rule_response = client.post(
+        "/api/v1/research/stage1-sessions/stage1-aave/stage4/realized-expectancy",
+        json={
+            "initial_capital_usdt": 1000,
+            "margin_allocation_pct": 30,
+            "leverage": 5,
+            "pause_rule": {
+                "type": "consecutive_wins",
+                "consecutive_count": 2,
+                "cooldown_hours": 4,
+            },
+        },
+    )
+    assert pause_rule_response.status_code == 200
+    assert pause_rule_response.json()["stage4_realized_expectancy"]["simulation_inputs"]["pause_rule"] == {
+        "type": "consecutive_wins",
+        "consecutive_count": 2,
+        "cooldown_hours": 4,
+        "counter_reset": "on_opposite_result_or_trigger",
+        "starts_at": "threshold_trade_exit",
+    }
+
+    pause_rules_response = client.post(
+        "/api/v1/research/stage1-sessions/stage1-aave/stage4/realized-expectancy",
+        json={
+            "initial_capital_usdt": 1000,
+            "margin_allocation_pct": 30,
+            "leverage": 5,
+            "pause_rules": [
+                {
+                    "type": "consecutive_losses",
+                    "consecutive_count": 2,
+                    "cooldown_hours": 4,
+                },
+                {
+                    "type": "consecutive_wins",
+                    "consecutive_count": 3,
+                    "cooldown_hours": 8,
+                },
+            ],
+        },
+    )
+    assert pause_rules_response.status_code == 200
+    assert [rule["type"] for rule in pause_rules_response.json()["stage4_realized_expectancy"]["simulation_inputs"]["pause_rules"]] == [
+        "consecutive_losses",
+        "consecutive_wins",
+    ]
+
 
 def test_stage4_run_delete_endpoint_restores_previous_latest(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)

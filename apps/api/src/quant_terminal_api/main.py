@@ -245,10 +245,20 @@ class Stage2ExitPolicyRequest(BaseModel):
     side_policies: dict[str, Stage2ExitPolicyValues] | None = None
 
 
+class Stage4PauseRuleRequest(BaseModel):
+    type: Literal["consecutive_losses", "consecutive_wins", "profit_burst"]
+    consecutive_count: int | None = Field(default=None, ge=1, le=20)
+    profit_threshold_pct: float | None = Field(default=None, gt=0, le=100)
+    lookback_hours: int | None = Field(default=None, ge=1, le=720)
+    cooldown_hours: int = Field(ge=1, le=168)
+
+
 class Stage4RealizedExpectancyRequest(BaseModel):
     initial_capital_usdt: float = Field(default=10_000.0, gt=0)
     margin_allocation_pct: float = Field(default=30.0, gt=0, le=100)
     leverage: float = Field(default=5.0, ge=1, le=125)
+    pause_rules: list[Stage4PauseRuleRequest] | None = None
+    pause_rule: Stage4PauseRuleRequest | None = None
     consecutive_losses: int | None = Field(default=None, ge=1, le=20)
     cooldown_hours: int | None = Field(default=None, ge=1, le=168)
 
@@ -268,6 +278,55 @@ class LegacySignalImportRequest(BaseModel):
 
 class SignalPoolExtendRequest(BaseModel):
     target_end: str | None = None
+
+
+def _stage4_pause_rules_from_request(request: Stage4RealizedExpectancyRequest) -> list[dict[str, Any]] | None:
+    legacy_requested = request.consecutive_losses is not None or request.cooldown_hours is not None
+    provided = sum(value is not None for value in (request.pause_rules, request.pause_rule)) + (1 if legacy_requested else 0)
+    if provided > 1:
+        raise HTTPException(status_code=400, detail="pause_rules, pause_rule, and consecutive_losses/cooldown_hours cannot be combined")
+    if legacy_requested:
+        if (request.consecutive_losses is None) != (request.cooldown_hours is None):
+            raise HTTPException(status_code=400, detail="consecutive_losses and cooldown_hours must be provided together")
+        return _validate_stage4_pause_rules([{
+            "type": "consecutive_losses",
+            "consecutive_count": request.consecutive_losses,
+            "cooldown_hours": request.cooldown_hours,
+        }])
+    if request.pause_rules is not None:
+        return _validate_stage4_pause_rules([_stage4_pause_rule_to_dict(rule) for rule in request.pause_rules]) or None
+    if request.pause_rule is None:
+        return None
+    return _validate_stage4_pause_rules([_stage4_pause_rule_to_dict(request.pause_rule)])
+
+
+def _stage4_pause_rule_to_dict(rule: Stage4PauseRuleRequest) -> dict[str, Any]:
+    if rule.type in {"consecutive_losses", "consecutive_wins"}:
+        if rule.consecutive_count is None:
+            raise HTTPException(status_code=400, detail="pause_rule.consecutive_count is required for consecutive pause rules")
+        return {
+            "type": rule.type,
+            "consecutive_count": rule.consecutive_count,
+            "cooldown_hours": rule.cooldown_hours,
+        }
+    if rule.profit_threshold_pct is None or rule.lookback_hours is None:
+        raise HTTPException(status_code=400, detail="pause_rule.profit_threshold_pct and pause_rule.lookback_hours are required for profit_burst")
+    return {
+        "type": "profit_burst",
+        "profit_threshold_pct": rule.profit_threshold_pct,
+        "lookback_hours": rule.lookback_hours,
+        "cooldown_hours": rule.cooldown_hours,
+    }
+
+
+def _validate_stage4_pause_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen_types: set[str] = set()
+    for rule in rules:
+        rule_type = str(rule["type"])
+        if rule_type in seen_types:
+            raise HTTPException(status_code=400, detail=f"duplicate pause rule type: {rule_type}")
+        seen_types.add(rule_type)
+    return rules
 
 
 class SignalEngineUpdateRequest(BaseModel):
@@ -438,14 +497,30 @@ def create_app(
         if route is None:
             raise ValueError(f"deployment route not found: {route_id}")
         non_data_blockers = [blocker for blocker in route.get("blockers", []) if blocker != "data_not_warmed"]
+        execution_adapter = build_execution_adapter(route)
+        candle_fill_service = fill_service or fill_raw_candle_dataset
+        binance_market_adapter = BinanceCLIAdapter(
+            {
+                "cli_path": os.environ.get("BINANCE_CLI_PATH"),
+                "profile": os.environ.get("BINANCE_PROFILE"),
+            }
+        )
         return run_route_lifecycle_cycle(
             route_id=route_id,
             runtime_repository=get_runtime_repository(),
             market_data_repository=None if non_data_blockers else get_market_data_repository(),
-            fill_service=fill_service or fill_raw_candle_dataset,
+            fill_service=candle_fill_service,
+            raw_fill_services={
+                "candles": candle_fill_service,
+                "open_interest": fill_raw_open_interest_dataset,
+            },
+            raw_adapters={
+                "candles": execution_adapter,
+                "open_interest": binance_market_adapter,
+            },
             signal_pool_extender=signal_pool_extender,
             live_signal_scanner=live_signal_scanner,
-            adapter=build_execution_adapter(route),
+            adapter=execution_adapter,
             workspace_root=Path.cwd(),
         )
 
@@ -1950,8 +2025,7 @@ def create_app(
         session = repository.get_stage1_research_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Stage 1 session not found")
-        if (request.consecutive_losses is None) != (request.cooldown_hours is None):
-            raise HTTPException(status_code=400, detail="consecutive_losses and cooldown_hours must be provided together")
+        pause_rules = _stage4_pause_rules_from_request(request)
         gate = build_stage1_gate_summary(workspace_root=Path.cwd(), session=session)
         if not (gate.get("stage3_pyramid") or {}).get("exists"):
             raise HTTPException(status_code=400, detail="Stage 4 requires completed Stage 3 pyramid")
@@ -1964,14 +2038,7 @@ def create_app(
                 "initial_capital_usdt": request.initial_capital_usdt,
                 "margin_allocation_pct": request.margin_allocation_pct,
                 "leverage": request.leverage,
-                "loss_cooldown": (
-                    {
-                        "consecutive_losses": request.consecutive_losses,
-                        "cooldown_hours": request.cooldown_hours,
-                    }
-                    if request.consecutive_losses is not None and request.cooldown_hours is not None
-                    else None
-                ),
+                "pause_rules": pause_rules,
             },
             current_step="queued",
         )
@@ -1986,14 +2053,7 @@ def create_app(
                 initial_capital_usdt=request.initial_capital_usdt,
                 margin_allocation_pct=request.margin_allocation_pct,
                 leverage=request.leverage,
-                loss_cooldown=(
-                    {
-                        "consecutive_losses": request.consecutive_losses,
-                        "cooldown_hours": request.cooldown_hours,
-                    }
-                    if request.consecutive_losses is not None and request.cooldown_hours is not None
-                    else None
-                ),
+                pause_rules=pause_rules,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

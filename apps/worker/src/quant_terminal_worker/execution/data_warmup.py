@@ -24,6 +24,8 @@ def warm_route_data(
     market_data_repository: Any,
     fill_service: Any,
     adapter: Any,
+    raw_fill_services: dict[str, Any] | None = None,
+    raw_adapters: dict[str, Any] | None = None,
     feature_service: Any | None = None,
     open_interest_feature_service: Any | None = None,
     workspace_root: Path | None = None,
@@ -86,11 +88,13 @@ def warm_route_data(
             blocked = True
             continue
 
+        selected_fill_service = (raw_fill_services or {}).get(str(data_type), fill_service)
+        selected_adapter = (raw_adapters or {}).get(str(data_type), adapter)
         fill_result = _call_fill_service(
-            fill_service=fill_service,
+            fill_service=selected_fill_service,
             registration=raw_ref,
             repository=market_data_repository,
-            adapter=adapter,
+            adapter=selected_adapter,
             as_of=checked_at,
         )
         raw_refs_by_key[(str(data_type), timeframe)] = raw_ref

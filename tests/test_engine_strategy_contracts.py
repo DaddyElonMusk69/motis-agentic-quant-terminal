@@ -185,6 +185,18 @@ def test_manage_position_return_shape_is_validated(tmp_path: Path):
         validate_strategy_module(strategy_path)
 
 
+def test_manage_position_accepts_position_completion_action(tmp_path: Path):
+    strategy_path = tmp_path / "strategy.py"
+    strategy_path.write_text(
+        "def decide(context):\n"
+        "    return {'action': 'SKIP', 'direction': 'FLAT', 'reason_code': 'idle'}\n"
+        "def manage_position(context):\n"
+        "    return {'action': 'COMPLETE_POSITION', 'direction': 'LONG', 'reason_code': 'size_incomplete'}\n"
+    )
+
+    assert validate_strategy_module(strategy_path) == []
+
+
 def test_execution_bundle_requires_live_exit_policy_fields():
     bundle = {
         "bundle_id": "bundle-1",
