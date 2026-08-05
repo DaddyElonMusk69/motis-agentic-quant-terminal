@@ -68,6 +68,12 @@ class FakeRepository:
             return None
         return {**self.route, "active_bundle": self.bundle}
 
+    def update_deployment_route_gate(self, route_id, **values):
+        if route_id != self.route["route_id"]:
+            return None
+        self.route = {**self.route, **values}
+        return {**self.route, "active_bundle": self.bundle}
+
     def get_open_owner_state(self, route_id):
         return self.owner_state
 
@@ -1854,6 +1860,300 @@ def test_wake_skips_duplicate_canonical_signal_without_backlog_consumption(tmp_p
     assert wake["signal_scan_result"]["status"] == "duplicate_canonical_signal"
     assert wake["signal_scan_result"]["signal_id"] == "fresh-sig-1"
     assert wake["order_intents"] == []
+
+
+def test_wake_triggers_consecutive_win_cooldown_from_exchange_close_fill(tmp_path):
+    bundle = _bundle(
+        tmp_path,
+        setup={
+            "setup": {"entry_model": "market", "leverage": 5, "tp_pct": 2.0, "sl_pct": 1.0},
+            "pause_rules": [{"type": "consecutive_wins", "consecutive_count": 2, "cooldown_hours": 6}],
+        },
+    )
+    close_time = datetime.now(UTC) - timedelta(minutes=5)
+    close_time_ms = datetime.fromtimestamp(int(close_time.timestamp() * 1000) / 1000, tz=UTC)
+    route = {
+        **_route(bundle),
+        "risk_limits": {
+            "max_notional_usd": 1000,
+            "max_daily_loss_usd": 250,
+            "pause_rule_state": {
+                "consecutive_wins": {
+                    "consecutive_wins": 1,
+                    "last_processed_close_event_id": "tradeId:previous-win",
+                }
+            },
+        },
+    }
+    repository = FakeRepository(
+        route=route,
+        bundle=bundle,
+        owner_state={"owner_state_id": "owner-1", "position_state": {"direction": "LONG"}},
+    )
+    adapter = FakeAdapter(
+        recent_fills=[
+            {
+                "instId": "AAVE-USDT-SWAP",
+                "tradeId": "close-win-2",
+                "side": "sell",
+                "fillTime": str(int(close_time.timestamp() * 1000)),
+                "realizedPnl": "12.5",
+                "fee": "-0.5",
+            }
+        ]
+    )
+
+    wake = run_route_wake(route_id="aave-live", repository=repository, adapter=adapter)
+
+    pause_state = repository.route["risk_limits"]["pause_rule_state"]["consecutive_wins"]
+    assert wake["status"] == "completed"
+    assert wake["branch"] == "idle"
+    assert wake["signal_scan_result"]["status"] == "skipped_pause_rule"
+    assert wake["signal_scan_result"]["reason"] == "pause_rule_consecutive_wins"
+    assert wake["order_intents"] == []
+    assert pause_state["consecutive_wins"] == 2
+    assert pause_state["last_processed_close_event_id"] == "tradeId:close-win-2"
+    assert pause_state["last_close_net_pnl_usdt"] == 12.0
+    assert pause_state["pause_until"] == (close_time_ms + timedelta(hours=6)).isoformat().replace("+00:00", "Z")
+
+
+def test_wake_resets_consecutive_win_cooldown_after_exchange_loss_close_fill(tmp_path):
+    bundle = _bundle(
+        tmp_path,
+        setup={
+            "setup": {"entry_model": "market", "leverage": 5, "tp_pct": 2.0, "sl_pct": 1.0},
+            "pause_rules": [{"type": "consecutive_wins", "consecutive_count": 2, "cooldown_hours": 6}],
+        },
+    )
+    close_time = datetime.now(UTC) - timedelta(minutes=5)
+    route = {
+        **_route(bundle),
+        "risk_limits": {
+            "max_notional_usd": 1000,
+            "max_daily_loss_usd": 250,
+            "pause_rule_state": {
+                "consecutive_wins": {
+                    "consecutive_wins": 2,
+                    "pause_until": (datetime.now(UTC) + timedelta(hours=2)).isoformat().replace("+00:00", "Z"),
+                    "last_processed_close_event_id": "tradeId:previous-win",
+                }
+            },
+        },
+    }
+    repository = FakeRepository(
+        route=route,
+        bundle=bundle,
+        owner_state={"owner_state_id": "owner-1", "position_state": {"direction": "SHORT"}},
+    )
+    adapter = FakeAdapter(
+        recent_fills=[
+            {
+                "instId": "AAVE-USDT-SWAP",
+                "tradeId": "close-loss-1",
+                "side": "buy",
+                "fillTime": str(int(close_time.timestamp() * 1000)),
+                "realizedPnl": "-8.0",
+                "fee": "-0.2",
+            }
+        ]
+    )
+
+    wake = run_route_wake(route_id="aave-live", repository=repository, adapter=adapter, allow_entry_scan=False)
+
+    pause_state = repository.route["risk_limits"]["pause_rule_state"]["consecutive_wins"]
+    assert wake["status"] == "blocked"
+    assert wake["signal_scan_result"]["status"] == "blocked"
+    assert pause_state["consecutive_wins"] == 0
+    assert pause_state["pause_until"] is None
+    assert pause_state["last_processed_close_event_id"] == "tradeId:close-loss-1"
+    assert pause_state["last_close_net_pnl_usdt"] == -8.2
+
+
+def test_wake_triggers_consecutive_loss_cooldown_from_instrument_exchange_fills(tmp_path):
+    bundle = _bundle(
+        tmp_path,
+        setup={
+            "setup": {"entry_model": "market", "leverage": 5, "tp_pct": 2.0, "sl_pct": 1.0},
+            "pause_rules": [{"type": "consecutive_losses", "consecutive_count": 2, "cooldown_hours": 6}],
+        },
+    )
+    close_time = datetime.now(UTC) - timedelta(minutes=5)
+    close_time_ms = datetime.fromtimestamp(int(close_time.timestamp() * 1000) / 1000, tz=UTC)
+    route = {
+        **_route(bundle),
+        "risk_limits": {
+            "max_notional_usd": 1000,
+            "max_daily_loss_usd": 250,
+            "pause_rule_state": {
+                "consecutive_losses": {
+                    "consecutive_losses": 1,
+                    "last_processed_close_event_id": "tradeId:previous-loss",
+                }
+            },
+        },
+    }
+    repository = FakeRepository(route=route, bundle=bundle)
+    adapter = FakeAdapter(
+        recent_fills=[
+            {
+                "instId": "AAVE-USDT-SWAP",
+                "tradeId": "close-loss-2",
+                "fillTime": str(int(close_time.timestamp() * 1000)),
+                "realizedPnl": "-10.0",
+                "fee": "-0.5",
+            }
+        ]
+    )
+
+    wake = run_route_wake(route_id="aave-live", repository=repository, adapter=adapter)
+
+    pause_state = repository.route["risk_limits"]["pause_rule_state"]["consecutive_losses"]
+    assert wake["status"] == "completed"
+    assert wake["branch"] == "idle"
+    assert wake["signal_scan_result"]["status"] == "skipped_pause_rule"
+    assert wake["signal_scan_result"]["reason"] == "pause_rule_consecutive_losses"
+    assert wake["order_intents"] == []
+    assert pause_state["consecutive_losses"] == 2
+    assert pause_state["last_processed_close_event_id"] == "tradeId:close-loss-2"
+    assert pause_state["last_close_net_pnl_usdt"] == -10.5
+    assert pause_state["pause_until"] == (close_time_ms + timedelta(hours=6)).isoformat().replace("+00:00", "Z")
+
+
+def test_wake_resets_consecutive_loss_cooldown_after_exchange_win_close_fill(tmp_path):
+    bundle = _bundle(
+        tmp_path,
+        setup={
+            "setup": {"entry_model": "market", "leverage": 5, "tp_pct": 2.0, "sl_pct": 1.0},
+            "pause_rules": [{"type": "consecutive_losses", "consecutive_count": 2, "cooldown_hours": 6}],
+        },
+    )
+    close_time = datetime.now(UTC) - timedelta(minutes=5)
+    route = {
+        **_route(bundle),
+        "risk_limits": {
+            "max_notional_usd": 1000,
+            "max_daily_loss_usd": 250,
+            "pause_rule_state": {
+                "consecutive_losses": {
+                    "consecutive_losses": 2,
+                    "pause_until": (datetime.now(UTC) + timedelta(hours=2)).isoformat().replace("+00:00", "Z"),
+                    "last_processed_close_event_id": "tradeId:previous-loss",
+                }
+            },
+        },
+    }
+    repository = FakeRepository(route=route, bundle=bundle)
+    adapter = FakeAdapter(
+        recent_fills=[
+            {
+                "instId": "AAVE-USDT-SWAP",
+                "tradeId": "close-win-1",
+                "fillTime": str(int(close_time.timestamp() * 1000)),
+                "realizedPnl": "8.0",
+                "fee": "-0.2",
+            }
+        ]
+    )
+
+    wake = run_route_wake(route_id="aave-live", repository=repository, adapter=adapter, allow_entry_scan=False)
+
+    pause_state = repository.route["risk_limits"]["pause_rule_state"]["consecutive_losses"]
+    assert wake["status"] == "blocked"
+    assert wake["signal_scan_result"]["status"] == "blocked"
+    assert pause_state["consecutive_losses"] == 0
+    assert pause_state["pause_until"] is None
+    assert pause_state["last_processed_close_event_id"] == "tradeId:close-win-1"
+    assert pause_state["last_close_net_pnl_usdt"] == 7.8
+
+
+def test_wake_triggers_profit_burst_pause_from_instrument_exchange_fills(tmp_path):
+    bundle = _bundle(
+        tmp_path,
+        setup={
+            "setup": {"entry_model": "market", "leverage": 5, "tp_pct": 2.0, "sl_pct": 1.0},
+            "sizing": {"initial_capital_usdt": 1000},
+            "pause_rules": [
+                {"type": "profit_burst", "profit_threshold_pct": 5, "lookback_hours": 24, "cooldown_hours": 6}
+            ],
+        },
+    )
+    close_time = datetime.now(UTC) - timedelta(minutes=5)
+    close_time_ms = datetime.fromtimestamp(int(close_time.timestamp() * 1000) / 1000, tz=UTC)
+    repository = FakeRepository(route=_route(bundle), bundle=bundle)
+    adapter = FakeAdapter(
+        recent_fills=[
+            {
+                "instId": "AAVE-USDT-SWAP",
+                "tradeId": "aave-close-1",
+                "fillTime": str(int((close_time - timedelta(hours=2)).timestamp() * 1000)),
+                "realizedPnl": "30",
+                "fee": "-1",
+            },
+            {
+                "instId": "AAVE-USDT-SWAP",
+                "tradeId": "aave-close-2",
+                "fillTime": str(int(close_time.timestamp() * 1000)),
+                "realizedPnl": "32",
+                "fee": "-1",
+            },
+        ]
+    )
+
+    wake = run_route_wake(route_id="aave-live", repository=repository, adapter=adapter)
+
+    pause_state = repository.route["risk_limits"]["pause_rule_state"]["profit_burst"]
+    assert wake["status"] == "completed"
+    assert wake["branch"] == "idle"
+    assert wake["signal_scan_result"]["status"] == "skipped_pause_rule"
+    assert wake["signal_scan_result"]["reason"] == "pause_rule_profit_burst"
+    assert wake["order_intents"] == []
+    assert pause_state["window_net_pnl_usdt"] == 60.0
+    assert pause_state["route_capital_usdt"] == 1000.0
+    assert pause_state["profit_growth_pct"] == 6.0
+    assert pause_state["last_trigger_close_event_id"] == "tradeId:aave-close-2"
+    assert pause_state["pause_until"] == (close_time_ms + timedelta(hours=6)).isoformat().replace("+00:00", "Z")
+
+
+def test_profit_burst_pause_ignores_other_instrument_fills(tmp_path):
+    bundle = _bundle(
+        tmp_path,
+        setup={
+            "setup": {"entry_model": "market", "leverage": 5, "tp_pct": 2.0, "sl_pct": 1.0},
+            "sizing": {"initial_capital_usdt": 1000},
+            "pause_rules": [
+                {"type": "profit_burst", "profit_threshold_pct": 5, "lookback_hours": 24, "cooldown_hours": 6}
+            ],
+        },
+    )
+    close_time = datetime.now(UTC) - timedelta(minutes=5)
+    repository = FakeRepository(route=_route(bundle), bundle=bundle)
+    adapter = FakeAdapter(
+        recent_fills=[
+            {
+                "instId": "AAVE-USDT-SWAP",
+                "tradeId": "aave-close-1",
+                "fillTime": str(int(close_time.timestamp() * 1000)),
+                "realizedPnl": "41",
+                "fee": "-1",
+            },
+            {
+                "instId": "ETH-USDT-SWAP",
+                "tradeId": "eth-close-1",
+                "fillTime": str(int(close_time.timestamp() * 1000)),
+                "realizedPnl": "500",
+                "fee": "-1",
+            },
+        ]
+    )
+
+    wake = run_route_wake(route_id="aave-live", repository=repository, adapter=adapter, allow_entry_scan=False)
+
+    pause_state = repository.route["risk_limits"]["pause_rule_state"]["profit_burst"]
+    assert wake["status"] == "blocked"
+    assert wake["signal_scan_result"]["status"] == "blocked"
+    assert pause_state["window_net_pnl_usdt"] == 40.0
+    assert pause_state["profit_growth_pct"] == 4.0
+    assert pause_state["pause_until"] is None
 
 
 def _route(bundle):

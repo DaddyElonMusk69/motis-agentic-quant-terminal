@@ -1406,7 +1406,7 @@ export function ResearchDevelopmentPage() {
   });
   const promoteMutation = useMutation({
     mutationFn: promoteExecutionBundle,
-    onSuccess: (_result, sessionId) => invalidateDevelopment(sessionId, pool?.universe_run_id)
+    onSuccess: (_result, variables) => invalidateDevelopment(variables.session_id, pool?.universe_run_id)
   });
 
   useEffect(() => {
@@ -1963,7 +1963,6 @@ export function ResearchDevelopmentPage() {
                 gate={gate}
                 onOpenCandidate={(candidate) => setSelectedStage4Candidate({ candidate, source: "stage4_realized_expectancy", label: "Stage 4A Candidate" })}
                 onOpenStage4BCandidate={(candidate) => setSelectedStage4Candidate({ candidate, source: "stage4b_timing", label: "Stage 4B Timing Candidate" })}
-                onPromote={() => session && promoteMutation.mutate(session.session_id)}
                 onGenerateStage4BPrompt={() => session && stage4BPromptMutation.mutate(session.session_id)}
                 onDeleteRun={(runId) => session && deleteStage4RunMutation.mutate({ session_id: session.session_id, run_id: runId })}
                 onRunStage4B={() => session && stage4BMutation.mutate(session.session_id)}
@@ -1971,7 +1970,6 @@ export function ResearchDevelopmentPage() {
                 inputs={stage4Inputs}
                 onInputsChange={setStage4Inputs}
                 deletingRunId={deleteStage4RunMutation.variables?.run_id}
-                promoting={promoteMutation.isPending}
                 stage4BPrompting={stage4BPromptMutation.isPending}
                 stage4BRunning={stage4BMutation.isPending || isJobRunning("stage4b")}
                 running={stage4Mutation.isPending || isJobRunning("stage4")}
@@ -2102,8 +2100,26 @@ export function ResearchDevelopmentPage() {
               {stage4CandidateDetailQuery.data?.detail ? <Stage4CandidateDetailPanel detail={stage4CandidateDetailQuery.data.detail} /> : null}
             </div>
             <footer className="terminal-modal__footer">
-              <span>Review realized equity and filled-trade outcomes before promoting or rerunning.</span>
+              <span>Promotion is manual: this button promotes the candidate shown in this modal.</span>
               <button className="button button--secondary" onClick={closeStage4CandidateDetail} type="button">Close</button>
+              <button
+                className={promoteMutation.isPending ? "button button--primary button--loading" : "button button--primary"}
+                disabled={!session || promoteMutation.isPending}
+                onClick={() => {
+                  if (!session || !selectedStage4Candidate) return;
+                  if (window.confirm(`Promote ${selectedStage4Candidate.source}/${selectedStage4Candidate.candidate.candidate_id} to live execution?`)) {
+                    promoteMutation.mutate({
+                      session_id: session.session_id,
+                      source: selectedStage4Candidate.source,
+                      candidate_id: selectedStage4Candidate.candidate.candidate_id
+                    });
+                  }
+                }}
+                type="button"
+              >
+                <UploadCloud aria-hidden="true" />
+                {promoteMutation.isPending ? "Promoting" : "Promote Candidate"}
+              </button>
             </footer>
           </section>
         </div>
@@ -3173,13 +3189,11 @@ function Stage4Panel({
   onOpenStage4BCandidate,
   onGenerateStage4BPrompt,
   onDeleteRun,
-  onPromote,
   onRunStage4B,
   onRun,
   inputs,
   onInputsChange,
   deletingRunId,
-  promoting,
   stage4BPrompting,
   stage4BRunning,
   running
@@ -3189,13 +3203,11 @@ function Stage4Panel({
   onOpenStage4BCandidate: (candidate: Stage4CandidateResult) => void;
   onGenerateStage4BPrompt: () => void;
   onDeleteRun: (runId: string) => void;
-  onPromote: () => void;
   onRunStage4B: () => void;
   onRun: (pauseRules?: Stage4PauseRule[] | null) => void;
   inputs: { initial_capital_usdt: number; margin_allocation_pct: number; leverage: number };
   onInputsChange: (inputs: { initial_capital_usdt: number; margin_allocation_pct: number; leverage: number }) => void;
   deletingRunId?: string;
-  promoting: boolean;
   stage4BPrompting: boolean;
   stage4BRunning: boolean;
   running: boolean;
@@ -3227,7 +3239,6 @@ function Stage4Panel({
   const stage4bBestSetup: Stage4CandidateResult["setup"] = stage4bBest.setup ?? {};
   const stage4bExitMode = stage4bBest.candidate_id ? formatStage4ExitMode(stage4bBestSetup) : "n/a";
   const stage4bPyramid = stage4bBestSetup.pyramid;
-  const promotionCandidate = gate?.promotion_candidate;
   const stage4bLocked = !complete;
   const stage4bReplayDisabled = stage4bLocked || !stage4b?.overlay_exists || inputsDirty || stage4BRunning;
   const stage4CandidateRows = useMemo(() => rankStage4Candidates(stage4?.candidates ?? []), [stage4?.candidates]);
@@ -3250,7 +3261,6 @@ function Stage4Panel({
               <TimerReset aria-hidden="true" />
               Pause Rules
             </button>
-            <button className="button button--secondary" disabled={!complete || promoting || inputsDirty} onClick={onPromote} type="button"><UploadCloud aria-hidden="true" />{promoting ? "Promoting" : "Promote"}</button>
           </>
         }
         eyebrow="stage 4"
@@ -3336,35 +3346,7 @@ function Stage4Panel({
           </div>
         </div>
         {best.candidate_id ? <Stage4ExitPolicyPanel setup={bestSetup} /> : null}
-        {promotionCandidate?.exists ? (
-          <div className="stage4-result-strip">
-            <div>
-              <span>Promotion Source</span>
-              <strong>{promotionCandidate.label ?? promotionCandidate.source ?? "Stage 4A"}</strong>
-            </div>
-            <div>
-              <span>Promotion Candidate</span>
-              <strong>{promotionCandidate.candidate_id ?? "n/a"}</strong>
-            </div>
-            <div>
-              <span>WF Return</span>
-              <strong>{formatPct(promotionCandidate.walk_forward_net_pnl_pct)}</strong>
-            </div>
-            <div>
-              <span>WF PF</span>
-              <strong>{promotionCandidate.walk_forward_profit_factor != null ? promotionCandidate.walk_forward_profit_factor.toFixed(2) : "-"}</strong>
-            </div>
-            <div>
-              <span>Net PnL</span>
-              <strong>{formatUsd(promotionCandidate.overall_net_pnl_usdt)}</strong>
-            </div>
-            <div>
-              <span>Timing Skips</span>
-              <strong>{formatNumber(promotionCandidate.timing_skips ?? 0)}</strong>
-            </div>
-          </div>
-        ) : null}
-        {promotionCandidate?.warning ? <div className="state-line state-line--warn">Promotion candidate selected by fallback: {promotionCandidate.warning}</div> : null}
+        {complete ? <div className="state-line">Open a Stage 4A or Stage 4B candidate row to promote that exact candidate.</div> : null}
         <div className="stage4-footnote-grid">
           <FieldRow label="Input" value="Stage 4 candidates + full canonical decisions" />
           <FieldRow label="Simulator" value="Sequential account backtest" />

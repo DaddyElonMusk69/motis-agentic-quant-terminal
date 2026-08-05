@@ -1,42 +1,157 @@
 {
-  "btc_multires_opportunity_v1": {
+  "derivatives_participation_impulse_v1": {
     "code_ref": {
-      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/btc_multires_opportunity_v1_base.py",
-      "model_path": "artifacts/signal_engine/models/btc_multires_opportunity_v1.pt",
-      "path": "apps/worker/src/quant_terminal_worker/signal_engines/btc_multires_opportunity_v1.py"
+      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/derivatives_participation_impulse_v1_base.py",
+      "path": "apps/worker/src/quant_terminal_worker/signal_engines/derivatives_participation_impulse_v1.py"
     },
     "configuration_schema": {
       "default_parameters": {
-        "context_bars": 96,
-        "dedupe_window_minutes": 480
+        "breakout_threshold_pct": "0.04",
+        "context_bars": 48,
+        "context_timeframes": [
+          "1h",
+          "4h"
+        ],
+        "dedupe_window_minutes": 120,
+        "max_abs_funding_zscore": "2.25",
+        "max_abs_premium_zscore": "2.25",
+        "min_oi_change_1h_pct": "0.02",
+        "min_oi_z_threshold": "0.65",
+        "min_stats_bars": 200,
+        "min_taker_imbalance_z": "0.35",
+        "min_trend_return_4h_pct": "0.25",
+        "min_volume_ratio": "1.05",
+        "neutral_global_ratio_high": "1.08",
+        "neutral_global_ratio_low": "0.92",
+        "oi_change_window_bars": 48,
+        "range_lookback_bars": 96,
+        "range_percentile_threshold": "0.55",
+        "range_window_bars": 96,
+        "stats_lookback_bars": 576,
+        "taker_buy_ratio_threshold": "1.03",
+        "taker_sell_ratio_threshold": "0.97"
       },
       "fixed_parameters": {
-        "dedupe_window_minutes": 480
+        "dedupe_window_minutes": 120
       }
     },
-    "description": "BTC-only supervised multi-resolution opportunity-state engine using causal raw price, volume, open interest, and positioning sequences from 5m through 1d. Trained with 48h-capped proportional episode weighting and a fixed 480-minute cadence.",
-    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.btc_multires_opportunity_v1:scan_live_signal",
-    "name": "BTC Multi-Resolution Opportunity v1",
+    "description": "General derivatives participation impulse engine: detects fresh leveraged participation entering a structural resolution or continuation move using 5m candles, volume, open interest, Binance futures positioning metrics, premium, and funding context. Emits neutral evidence packets with bounded 5m and higher-timeframe context for downstream strategy selection.",
+    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.derivatives_participation_impulse_v1:scan_live_signal",
+    "name": "Derivatives Participation Impulse v1",
     "output_envelope_version": "signal_packet.v2",
     "required_data": [
       {
         "data_type": "candles",
         "freshness_tolerance_seconds": 300,
-        "lookback_bars": 200000,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "open_interest",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
         "origin": "raw",
         "timeframe": "5m"
       },
       {
         "data_type": "futures_metrics",
         "freshness_tolerance_seconds": 300,
-        "lookback_bars": 200000,
+        "lookback_bars": 20000,
         "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "premium_index",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "funding_features",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "derived",
         "timeframe": "5m"
       }
     ],
-    "runtime_entrypoint": "quant_terminal_worker.signal_engines.btc_multires_opportunity_v1:generate_training_signals",
-    "signal_engine_id": "btc_multires_opportunity_v1",
-    "version": "1.0"
+    "runtime_entrypoint": "quant_terminal_worker.signal_engines.derivatives_participation_impulse_v1:generate_training_signals",
+    "signal_engine_id": "derivatives_participation_impulse_v1",
+    "version": "0.1"
+  },
+  "btc_derivatives_crowding_failure_v1": {
+    "code_ref": {
+      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/btc_derivatives_crowding_failure_v1_base.py",
+      "path": "apps/worker/src/quant_terminal_worker/signal_engines/btc_derivatives_crowding_failure_v1.py"
+    },
+    "configuration_schema": {
+      "default_parameters": {
+        "breakout_threshold_pct": "0.05",
+        "context_bars": 96,
+        "context_timeframes": [
+          "1h",
+          "4h",
+          "12h"
+        ],
+        "dedupe_window_minutes": 180,
+        "global_long_ratio_threshold": "1.05",
+        "global_short_ratio_threshold": "0.95",
+        "max_top_position_long_share_gap": "0.02",
+        "min_crowding_score": 4,
+        "min_oi_change_4h_pct": "0.10",
+        "min_rejection_wick_pct": "15.0",
+        "min_stats_bars": 200,
+        "min_top_position_long_share_gap": "-0.02",
+        "min_volume_ratio": "1.05",
+        "oi_change_window_bars": 48,
+        "oi_z_threshold": "0.6",
+        "range_lookback_bars": 96,
+        "stats_lookback_bars": 576,
+        "taker_buy_ratio_threshold": "1.05",
+        "taker_sell_ratio_threshold": "0.95"
+      },
+      "fixed_parameters": {
+        "dedupe_window_minutes": 180
+      }
+    },
+    "description": "Derivatives crowding failure engine: detects failed upside/downside range extensions when Binance futures OI, global account positioning, taker flow, top-trader divergence, premium, and funding context indicate leveraged crowding that failed to continue. Emits neutral evidence packets with 5m plus 1h/4h/12h candle and futures-metrics context.",
+    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.btc_derivatives_crowding_failure_v1:scan_live_signal",
+    "name": "Derivatives Crowding Failure v1",
+    "output_envelope_version": "signal_packet.v2",
+    "required_data": [
+      {
+        "data_type": "candles",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "futures_metrics",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "premium_index",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "funding_features",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "derived",
+        "timeframe": "5m"
+      }
+    ],
+    "runtime_entrypoint": "quant_terminal_worker.signal_engines.btc_derivatives_crowding_failure_v1:generate_training_signals",
+    "signal_engine_id": "btc_derivatives_crowding_failure_v1",
+    "version": "0.1"
   },
   "compression_participation_release_4h_v1": {
     "code_ref": {
@@ -85,52 +200,6 @@
     ],
     "runtime_entrypoint": "quant_terminal_worker.signal_engines.compression_participation_release_4h_v1:generate_training_signals",
     "signal_engine_id": "compression_participation_release_4h_v1",
-    "version": "0.1"
-  },
-  "compression_participation_release_v1": {
-    "code_ref": {
-      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/compression_participation_release_v1_base.py",
-      "path": "apps/worker/src/quant_terminal_worker/signal_engines/compression_participation_release_v1.py"
-    },
-    "configuration_schema": {
-      "default_parameters": {
-        "compression_percentile_threshold": "0.35",
-        "compression_window_bars": 144,
-        "context_bars": 96,
-        "context_timeframes": [
-          "2h",
-          "4h",
-          "8h"
-        ],
-        "dedupe_window_minutes": 480,
-        "min_stats_bars": 2016,
-        "range_zscore_threshold": "0.75",
-        "stats_lookback_bars": 8640,
-        "volume_zscore_threshold": "1.0"
-      }
-    },
-    "description": "Confirmed price, range, and volume release after causal 12h compression, with neutral Binance OI and positioning context. Stage 0A validated at 2h and 4h on BTC.",
-    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.compression_participation_release_v1:scan_live_signal",
-    "name": "Compression Participation Release v1",
-    "output_envelope_version": "signal_packet.v2",
-    "required_data": [
-      {
-        "data_type": "candles",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 10000,
-        "origin": "raw",
-        "timeframe": "5m"
-      },
-      {
-        "data_type": "open_interest",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 10000,
-        "origin": "raw",
-        "timeframe": "5m"
-      }
-    ],
-    "runtime_entrypoint": "quant_terminal_worker.signal_engines.compression_participation_release_v1:generate_training_signals",
-    "signal_engine_id": "compression_participation_release_v1",
     "version": "0.1"
   },
   "oi_compression_v1": {
@@ -761,6 +830,106 @@
     "signal_engine_id": "vegas_ema",
     "version": "0.1"
   },
+  "vegas_ema_5m_cluster": {
+    "code_ref": {
+      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/vegas_ema_5m_hft_base.py",
+      "path": "apps/worker/src/quant_terminal_worker/signal_engines/vegas_ema_5m_cluster.py"
+    },
+    "configuration_schema": {
+      "default_parameters": {
+        "context_bars": 80,
+        "context_timeframes": [
+          "2h",
+          "1d"
+        ],
+        "dedupe_window_minutes": 120,
+        "ema_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ],
+        "ema_mode": "precomputed_5m_ema_cluster",
+        "proximity_threshold": "0.002",
+        "vote_threshold": 3
+      }
+    },
+    "description": "5m-only Vegas EMA rail cluster proximity engine that emits when at least three EMA rails approach price within tolerance.",
+    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.vegas_ema_5m_cluster:scan_live_signal",
+    "name": "Vegas 5m EMA Cluster",
+    "output_envelope_version": "signal_packet.v2",
+    "required_data": [
+      {
+        "data_type": "candles",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "candles",
+        "lookback_bars": 80,
+        "origin": "derived",
+        "required_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ],
+        "source": {
+          "data_type": "candles",
+          "origin": "raw",
+          "timeframe": "5m"
+        },
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "candles",
+        "lookback_bars": 80,
+        "origin": "derived",
+        "required_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ],
+        "source": {
+          "data_type": "candles",
+          "origin": "raw",
+          "timeframe": "5m"
+        },
+        "timeframe": "2h"
+      },
+      {
+        "data_type": "candles",
+        "lookback_bars": 80,
+        "origin": "derived",
+        "required_columns": [
+          "ema_36",
+          "ema_43",
+          "ema_144",
+          "ema_169",
+          "ema_576",
+          "ema_676"
+        ],
+        "source": {
+          "data_type": "candles",
+          "origin": "raw",
+          "timeframe": "5m"
+        },
+        "timeframe": "1d"
+      }
+    ],
+    "runtime_entrypoint": "quant_terminal_worker.signal_engines.vegas_ema_5m_cluster:generate_training_signals",
+    "signal_engine_id": "vegas_ema_5m_cluster",
+    "version": "0.1"
+  },
   "vegas_ema_5m_cluster_Real": {
     "code_ref": {
       "base_strategy_path": "dev/training_sessions/btc-vegas_ema_5m_cluster-strategy-v01/stage1-btc-vegas_ema_5m_cluster-strategy-v01-btc-2025-05-01-2026-06-27-as-ema-5m-cluster-2025-05-01-2026-06-27-mqxmxdlv/promotion/frozen_stage1a_strategy_module/strategy.py",
@@ -860,106 +1029,6 @@
     ],
     "runtime_entrypoint": "quant_terminal_worker.signal_engines.vegas_ema_5m_cluster_real:generate_training_signals",
     "signal_engine_id": "vegas_ema_5m_cluster_Real",
-    "version": "0.1"
-  },
-  "vegas_ema_5m_cluster": {
-    "code_ref": {
-      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/vegas_ema_5m_hft_base.py",
-      "path": "apps/worker/src/quant_terminal_worker/signal_engines/vegas_ema_5m_cluster.py"
-    },
-    "configuration_schema": {
-      "default_parameters": {
-        "context_bars": 80,
-        "context_timeframes": [
-          "2h",
-          "1d"
-        ],
-        "dedupe_window_minutes": 120,
-        "ema_columns": [
-          "ema_36",
-          "ema_43",
-          "ema_144",
-          "ema_169",
-          "ema_576",
-          "ema_676"
-        ],
-        "ema_mode": "precomputed_5m_ema_cluster",
-        "proximity_threshold": "0.002",
-        "vote_threshold": 3
-      }
-    },
-    "description": "5m-only Vegas EMA rail cluster proximity engine that emits when at least three EMA rails approach price within tolerance.",
-    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.vegas_ema_5m_cluster:scan_live_signal",
-    "name": "Vegas 5m EMA Cluster",
-    "output_envelope_version": "signal_packet.v2",
-    "required_data": [
-      {
-        "data_type": "candles",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 20000,
-        "origin": "raw",
-        "timeframe": "5m"
-      },
-      {
-        "data_type": "candles",
-        "lookback_bars": 80,
-        "origin": "derived",
-        "required_columns": [
-          "ema_36",
-          "ema_43",
-          "ema_144",
-          "ema_169",
-          "ema_576",
-          "ema_676"
-        ],
-        "source": {
-          "data_type": "candles",
-          "origin": "raw",
-          "timeframe": "5m"
-        },
-        "timeframe": "5m"
-      },
-      {
-        "data_type": "candles",
-        "lookback_bars": 80,
-        "origin": "derived",
-        "required_columns": [
-          "ema_36",
-          "ema_43",
-          "ema_144",
-          "ema_169",
-          "ema_576",
-          "ema_676"
-        ],
-        "source": {
-          "data_type": "candles",
-          "origin": "raw",
-          "timeframe": "5m"
-        },
-        "timeframe": "2h"
-      },
-      {
-        "data_type": "candles",
-        "lookback_bars": 80,
-        "origin": "derived",
-        "required_columns": [
-          "ema_36",
-          "ema_43",
-          "ema_144",
-          "ema_169",
-          "ema_576",
-          "ema_676"
-        ],
-        "source": {
-          "data_type": "candles",
-          "origin": "raw",
-          "timeframe": "5m"
-        },
-        "timeframe": "1d"
-      }
-    ],
-    "runtime_entrypoint": "quant_terminal_worker.signal_engines.vegas_ema_5m_cluster:generate_training_signals",
-    "signal_engine_id": "vegas_ema_5m_cluster",
     "version": "0.1"
   }
 }

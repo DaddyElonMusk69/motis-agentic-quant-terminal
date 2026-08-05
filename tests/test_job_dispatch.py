@@ -116,3 +116,33 @@ def test_celery_worker_heartbeat_uses_eventer_hostname(monkeypatch):
     assert len(calls) == 1
     assert calls[0]["worker_id"] == "celery-celery@test-host"
     assert calls[0]["status"] == "idle"
+
+
+def test_celery_task_failure_marks_claimed_job_failed(monkeypatch):
+    calls = []
+
+    class FakeRepository:
+        def __init__(self, database_url):
+            calls.append({"database_url": database_url})
+
+        def fail_job(self, job_id, *, error):
+            calls.append({"job_id": job_id, "error": error})
+
+    sender = SimpleNamespace(name="quant_terminal_worker.run_job")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://test")
+    monkeypatch.setattr(celery_app_module, "RuntimeRepository", FakeRepository)
+
+    celery_app_module._on_task_failure(
+        sender=sender,
+        exception=RuntimeError("worker process exited unexpectedly"),
+        args=("job-crashed",),
+    )
+
+    assert calls[-1] == {
+        "job_id": "job-crashed",
+        "error": {
+            "type": "RuntimeError",
+            "message": "worker process exited unexpectedly",
+            "reason": "celery_task_failure",
+        },
+    }

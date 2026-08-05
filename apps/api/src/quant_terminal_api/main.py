@@ -34,6 +34,7 @@ from quant_terminal_worker.adapters.exchange import ExchangeAdapterError, build_
 from quant_terminal_worker.adapters.binance import BinanceCLIAdapter
 from quant_terminal_worker.adapters.okx import OKXAdapter
 from quant_terminal_worker.backtests.stage1 import run_stage1_backtest
+from quant_terminal_worker.ingestion.atr_enrichment import enrich_atr_datasets
 from quant_terminal_worker.ingestion.ema_enrichment import enrich_derived_ema_datasets
 from quant_terminal_worker.ingestion.feature_enrichment import enrich_feature_family_datasets
 from quant_terminal_worker.ingestion.open_interest_feature_enrichment import (
@@ -329,6 +330,45 @@ def _validate_stage4_pause_rules(rules: list[dict[str, Any]]) -> list[dict[str, 
     return rules
 
 
+def _live_pause_rules_from_simulation_inputs(simulation_inputs: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_rules = simulation_inputs.get("pause_rules")
+    if raw_rules is None and isinstance(simulation_inputs.get("pause_rule"), dict):
+        raw_rules = [simulation_inputs["pause_rule"]]
+    if not isinstance(raw_rules, list):
+        return []
+    live_rules: list[dict[str, Any]] = []
+    for rule in raw_rules:
+        if not isinstance(rule, dict):
+            continue
+        if rule.get("type") in {"consecutive_losses", "consecutive_wins"}:
+            consecutive_count = rule.get("consecutive_count")
+            cooldown_hours = rule.get("cooldown_hours")
+            if consecutive_count in (None, "") or cooldown_hours in (None, ""):
+                continue
+            live_rules.append(
+                {
+                    "type": rule["type"],
+                    "consecutive_count": int(consecutive_count),
+                    "cooldown_hours": int(cooldown_hours),
+                }
+            )
+        elif rule.get("type") == "profit_burst":
+            profit_threshold_pct = rule.get("profit_threshold_pct")
+            lookback_hours = rule.get("lookback_hours")
+            cooldown_hours = rule.get("cooldown_hours")
+            if profit_threshold_pct in (None, "") or lookback_hours in (None, "") or cooldown_hours in (None, ""):
+                continue
+            live_rules.append(
+                {
+                    "type": "profit_burst",
+                    "profit_threshold_pct": float(profit_threshold_pct),
+                    "lookback_hours": int(lookback_hours),
+                    "cooldown_hours": int(cooldown_hours),
+                }
+            )
+    return live_rules
+
+
 class SignalEngineUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1)
 
@@ -376,6 +416,8 @@ class ExecuteStage0CandidateBatchRequest(BaseModel):
 class ExecutionBundlePromotionRequest(BaseModel):
     account_mode: str = "live"
     execution_adapter: str = "okx"
+    source: Literal["stage4_realized_expectancy", "stage4b_timing"] | None = None
+    candidate_id: str | None = None
     risk_limits: dict[str, Any] = Field(
         default_factory=lambda: {
             "max_notional_usd": 1000,
@@ -513,10 +555,16 @@ def create_app(
             raw_fill_services={
                 "candles": candle_fill_service,
                 "open_interest": fill_raw_open_interest_dataset,
+                "futures_metrics": fill_raw_futures_metrics_dataset,
+                "premium_index": fill_raw_premium_index_dataset,
+                "funding": fill_raw_funding_dataset,
             },
             raw_adapters={
                 "candles": execution_adapter,
                 "open_interest": binance_market_adapter,
+                "futures_metrics": binance_market_adapter,
+                "premium_index": binance_market_adapter,
+                "funding": binance_market_adapter,
             },
             signal_pool_extender=signal_pool_extender,
             live_signal_scanner=live_signal_scanner,
@@ -2256,6 +2304,8 @@ def create_app(
         gate = build_stage1_gate_summary(workspace_root=Path.cwd(), session=session)
         if not (gate.get("stage4_realized_expectancy") or {}).get("exists"):
             raise HTTPException(status_code=400, detail="Execution bundle promotion requires completed Stage 4 evidence")
+        if not request.source or not request.candidate_id:
+            raise HTTPException(status_code=400, detail="Execution bundle promotion requires selecting a Stage 4 candidate")
         try:
             bundle = _materialize_execution_bundle(
                 workspace_root=Path.cwd(),
@@ -2265,6 +2315,8 @@ def create_app(
                 account_mode=request.account_mode,
                 execution_adapter=request.execution_adapter,
                 risk_limits=request.risk_limits,
+                promotion_source=request.source,
+                promotion_candidate_id=request.candidate_id,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -3022,6 +3074,27 @@ def create_app(
         registration = get_market_data_repository().get_ref(dataset_id)
         if registration is None:
             raise HTTPException(status_code=404, detail="dataset not found")
+        if registration.get("data_type") == "technical_indicator_atr":
+            queued = enqueue_runtime_job(
+                get_runtime_repository(),
+                job_type="market_data_atr_refresh",
+                scope_key=f"asset:{registration['asset']}:atr",
+                payload={
+                    "asset": registration["asset"],
+                    "timeframes": [registration["timeframe"]],
+                    "period": (registration.get("schema_descriptor") or {}).get("period", 14),
+                },
+                current_step="queued",
+            )
+            if queued:
+                return queued
+            return enrich_atr_datasets(
+                repository=get_market_data_repository(),
+                asset=registration["asset"],
+                timeframes=(registration["timeframe"],),
+                period=int((registration.get("schema_descriptor") or {}).get("period", 14)),
+                target_root=Path(".data/market-data"),
+            )
         plan = build_refresh_plan(registration)
         if plan["status"] == "blocked":
             return plan
@@ -3081,6 +3154,24 @@ def create_app(
         if queued:
             return queued
         return enrich_derived_ema_datasets(repository=get_market_data_repository(), asset=asset)
+
+    @app.post("/api/v1/market-data/assets/{asset}/atr/refresh")
+    def refresh_asset_atr_data(asset: str) -> dict[str, Any]:
+        asset = asset.upper()
+        queued = enqueue_runtime_job(
+            get_runtime_repository(),
+            job_type="market_data_atr_refresh",
+            scope_key=f"asset:{asset}:atr",
+            payload={"asset": asset, "timeframes": ["1h", "2h", "4h"], "period": 14},
+            current_step="queued",
+        )
+        if queued:
+            return queued
+        return enrich_atr_datasets(
+            repository=get_market_data_repository(),
+            asset=asset,
+            target_root=Path(".data/market-data"),
+        )
 
     @app.post("/api/v1/market-data/assets/{asset}/features/{family}/refresh")
     def refresh_asset_feature_family_data(asset: str, family: str) -> dict[str, Any]:
@@ -3498,6 +3589,8 @@ def _materialize_execution_bundle(
     account_mode: str,
     execution_adapter: str,
     risk_limits: dict[str, Any],
+    promotion_source: str | None = None,
+    promotion_candidate_id: str | None = None,
 ) -> dict[str, Any]:
     if account_mode not in {"demo", "live", "paper"}:
         raise ValueError("account_mode must be demo, live, or paper")
@@ -3506,7 +3599,11 @@ def _materialize_execution_bundle(
         artifact_root = workspace_root / artifact_root
     promotion_root = artifact_root / "promotion"
     strategy_path = _stage1_strategy_path(artifact_root=artifact_root, promotion_root=promotion_root)
-    selection = _resolve_stage4_promotion_candidate(promotion_root=promotion_root)
+    selection = _resolve_stage4_promotion_candidate(
+        promotion_root=promotion_root,
+        source=promotion_source,
+        candidate_id=promotion_candidate_id,
+    )
     selected_source = selection["source"]
     selected_result = selection["result"]
     selected_result_path = selection["result_path"]
@@ -3520,6 +3617,7 @@ def _materialize_execution_bundle(
         )
 
     simulation_inputs = selected_result.get("simulation_inputs") if isinstance(selected_result.get("simulation_inputs"), dict) else {}
+    live_pause_rules = _live_pause_rules_from_simulation_inputs(simulation_inputs)
     source_universe_run = repository.get_stage0_universe_run(session["source_universe_run_id"])
     if source_universe_run is None:
         raise ValueError("Source Stage 0 universe run is missing")
@@ -3574,6 +3672,8 @@ def _materialize_execution_bundle(
             "warning": selection.get("warning"),
         },
     }
+    if live_pause_rules:
+        execution_setup["pause_rules"] = live_pause_rules
 
     engine_spec = _resolve_engine_spec_for_promotion(
         repository=repository,
@@ -3717,7 +3817,14 @@ def _copy_strategy_sidecars(strategy_path: Path, target_root: Path) -> dict[str,
     return copied
 
 
-def _resolve_stage4_promotion_candidate(*, promotion_root: Path) -> dict[str, Any]:
+def _resolve_stage4_promotion_candidate(
+    *,
+    promotion_root: Path,
+    source: str | None = None,
+    candidate_id: str | None = None,
+) -> dict[str, Any]:
+    if (source is None) != (candidate_id is None):
+        raise ValueError("Execution bundle promotion requires both source and candidate_id when selecting a candidate manually")
     optimal_path = promotion_root / "stage4_optimal.json"
     realized_path = promotion_root / "stage4_realized_expectancy.json"
     summary_path = promotion_root / "stage4_summary.md"
@@ -3738,6 +3845,18 @@ def _resolve_stage4_promotion_candidate(*, promotion_root: Path) -> dict[str, An
         summary_path=summary_path,
     )
     candidates.extend(_stage4b_promotion_candidates(promotion_root=promotion_root, latest_stage4a_run_id=str(realized.get("run_id") or "")))
+    if source is not None and candidate_id is not None:
+        selected = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate["source"] == source and str(candidate["best"].get("candidate_id") or "") == candidate_id
+            ),
+            None,
+        )
+        if selected is None:
+            raise ValueError(f"Selected promotion candidate not found: {source}/{candidate_id}")
+        return {**selected, "criterion": "manual_candidate_selection"}
     protected_eligible = [candidate for candidate in candidates if _candidate_has_protected_sl(candidate["best"]) and _walk_forward_net_pnl_pct(candidate["best"]) > 0]
     if protected_eligible:
         selected = max(protected_eligible, key=_promotion_rank_key)

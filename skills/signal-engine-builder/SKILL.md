@@ -70,6 +70,9 @@ Use this section before designing any multi-timeframe or indicator-heavy engine.
 - Prefer one canonical `candles` structure per timeframe where each row has enough metadata for strategy code to know `timeframe`, `open_time`, `close_time` or equivalent timestamp convention, and `complete`. Avoid storing duplicate `completed_candles` plus `candles` copies unless compatibility requires it.
 - Indicators must be causal. EMA/SMA/RSI style indicators are acceptable only when calculated using rows available at or before the signal timestamp. Never use centered windows, full-series normalization, future-filled features, or postcomputed higher-timeframe values attached retroactively.
 - Make every resample and as-of join availability-aware. Bucket membership by open time does not make a higher-timeframe aggregate available before its close, and a join must never select a later observation merely because its source timestamp sorts before `T`.
+- Classify every non-candle source before implementation as either a **hard-aligned decision channel** or an **as-of/context channel**. Hard-aligned channels such as 5m OI or 5m futures metrics must have the exact signal timestamp row; never substitute a prior row for a missing required timestamp. As-of/context channels such as funding state may use the latest observation known at or before the signal timestamp, but this must be explicit in code, packet fields, and tests.
+- Training generation must report `scan_coverage_end_ts` as the latest timestamp actually evaluated with all hard-aligned decision channels present, not as the requested target or raw candle end. If candles reach `06:05` but a hard-aligned side channel only reaches `06:00`, coverage is `06:00`. This prevents live extension from permanently skipping late-arriving required rows.
+- Live/latest scanners for multi-source engines must scan the latest fully eligible hard-aligned timestamp and avoid stale substitution. Signal-pool extension should use recent overlap rescans for multi-source engines and rely on engine-reported actual coverage to recover delayed side-channel rows.
 - Use outcome labels, brackets, and future excursions only as authorized offline training evaluation evidence. They may guide hypothesis and fixed-threshold selection inside the training window, but must never become runtime feature values, preprocessing state, leaf-routing inputs, dedupe state, packet fields, or implementation fixtures.
 - Training generation and live generation must use the same packet-building function. Live must not have a richer or poorer context shape than training.
 - Dedupe/cadence state must be continuous across repeated generation calls. If training uses a 2h post-fill dedupe, extending a signal pool every 5m must look back to the latest existing canonical signal and preserve the same cadence instead of resetting the dedupe window.
@@ -182,9 +185,10 @@ Use this workflow when the task is driven by a frozen fixed-R opportunity target
    - registry/spec validation
    - API engine catalog includes registry-only entries with `signal_set_count: 0` and `packet_count: 0`
    - training dispatch from Parquet
-   - live scan from Parquet
-   - point-in-time safety: no emitted packet may include data whose close/availability time is after the signal timestamp, especially higher-timeframe context candles and derived features
-   - future-mutation invariance: for a representative timestamp `T`, mutate or append every source row with `available_at > T` and assert byte-identical trigger/no-trigger, selected leaves, dedupe admission, and emitted packet at `T`
+  - live scan from Parquet
+  - point-in-time safety: no emitted packet may include data whose close/availability time is after the signal timestamp, especially higher-timeframe context candles and derived features
+  - lagged required-data coverage: when a hard-aligned side channel is one or more bars behind raw candles, the engine must not evaluate that missing timestamp and must report `scan_coverage_end_ts` as the latest fully aligned evaluated timestamp
+  - future-mutation invariance: for a representative timestamp `T`, mutate or append every source row with `available_at > T` and assert byte-identical trigger/no-trigger, selected leaves, dedupe admission, and emitted packet at `T`
    - repeated extension/cadence parity: a second generator call must respect existing dedupe state and not append signals inside the training dedupe window
    - packet neutrality
    - paired base strategy validates
@@ -211,6 +215,8 @@ Use this workflow when the task is driven by a frozen fixed-R opportunity target
 - Emitting only engine-specific price aliases such as `evidence.close`. Stage 0/2/3/4 need a standard reference price field.
 - Selecting higher-timeframe context by candle open timestamp instead of close/availability timestamp. A 2h/1d candle is not available to a 5m signal until that higher-timeframe candle has closed.
 - Proving only that packet fields exclude future rows while trigger routing, normalization, resampling, joins, or dedupe admission still use post-signal information.
+- Reporting scan coverage from raw candle end or `context.end` when hard-aligned side channels lag. This falsely marks un-evaluated timestamps as scanned and can permanently miss live signals after delayed data arrives.
+- Forward-filling hard-aligned 5m decision channels such as OI or futures metrics to make a missing timestamp look complete. If a source is meant to be as-of context, declare and test it as as-of context instead.
 - Calling a partially formed 2h/8h/1d candle "latest completed" because its open timestamp is before the signal. If it is useful, emit it as forming context with `complete: false`.
 - Letting training generation and live extension use different packet builders, different dedupe windows, or different HTF availability rules.
 - Resetting a post-fill dedupe window on every generator call, which makes live append clustered signals that could never appear in the training pool.
@@ -236,6 +242,7 @@ Use this workflow when the task is driven by a frozen fixed-R opportunity target
 - `validate_signal_packet(...)` passes for emitted packets.
 - `validate_strategy_module(base_strategy_path)` passes.
 - Tests prove the entire emission decision is point-in-time safe: trigger/no-trigger, selected leaves, feature state, resampling/joins, dedupe admission, and packet evidence exclude observations unavailable at signal generation time.
+- Tests prove lagged hard-aligned required data does not advance scan coverage past the latest fully aligned timestamp.
 - A future-mutation test proves that changing or appending all rows with `available_at > T` cannot change the decision or packet at `T`.
 - Repeated signal-pool extension preserves the same dedupe/cadence behavior as full-window training generation.
 - Representative packet size is inspected; duplicate candle payloads are avoided unless explicitly needed for backward compatibility.

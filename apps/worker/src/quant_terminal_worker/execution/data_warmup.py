@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from quant_terminal_worker.ingestion.atr_enrichment import DATA_TYPE as ATR_DATA_TYPE, enrich_atr_datasets
 from quant_terminal_worker.ingestion.feature_enrichment import FEATURE_FAMILIES, enrich_feature_family_datasets
 from quant_terminal_worker.ingestion.open_interest_feature_enrichment import (
     FEATURE_DATA_TYPE as OPEN_INTEREST_FEATURE_DATA_TYPE,
@@ -14,7 +15,11 @@ from quant_terminal_worker.ingestion.open_interest_feature_enrichment import (
 
 FEATURE_DATA_TYPE_TO_FAMILY = {family.data_type: key for key, family in FEATURE_FAMILIES.items()}
 FEATURE_DATA_TYPE_TO_FAMILY[OPEN_INTEREST_FEATURE_DATA_TYPE] = OPEN_INTEREST_FEATURE_FAMILY
-RAW_FILLABLE_DATA_TYPES = {"candles", "open_interest"}
+RAW_FILLABLE_DATA_TYPES = {"candles", "open_interest", "futures_metrics", "premium_index", "funding"}
+REFRESHABLE_DERIVED_DATA_DEPENDENCIES = {
+    "funding_features": {"data_type": "funding", "origin": "raw", "timeframe": "8h"}
+}
+FUNDING_DEPENDENCY_GRACE_SECONDS = 2 * 60 * 60
 
 
 def warm_route_data(
@@ -28,6 +33,7 @@ def warm_route_data(
     raw_adapters: dict[str, Any] | None = None,
     feature_service: Any | None = None,
     open_interest_feature_service: Any | None = None,
+    atr_service: Any | None = None,
     workspace_root: Path | None = None,
     as_of: datetime | None = None,
 ) -> dict[str, Any]:
@@ -63,7 +69,12 @@ def warm_route_data(
 
     for requirement in required_data:
         data_type = requirement.get("data_type")
-        if data_type not in RAW_FILLABLE_DATA_TYPES and data_type not in FEATURE_DATA_TYPE_TO_FAMILY:
+        if (
+            data_type not in RAW_FILLABLE_DATA_TYPES
+            and data_type not in FEATURE_DATA_TYPE_TO_FAMILY
+            and data_type not in REFRESHABLE_DERIVED_DATA_DEPENDENCIES
+            and data_type != ATR_DATA_TYPE
+        ):
             requirement_results.append(_requirement_result(requirement, "blocked", "unsupported_data_type"))
             blocked = True
             continue
@@ -90,13 +101,24 @@ def warm_route_data(
 
         selected_fill_service = (raw_fill_services or {}).get(str(data_type), fill_service)
         selected_adapter = (raw_adapters or {}).get(str(data_type), adapter)
-        fill_result = _call_fill_service(
-            fill_service=selected_fill_service,
-            registration=raw_ref,
-            repository=market_data_repository,
-            adapter=selected_adapter,
-            as_of=checked_at,
-        )
+        try:
+            fill_result = _call_fill_service(
+                fill_service=selected_fill_service,
+                registration=raw_ref,
+                repository=market_data_repository,
+                adapter=selected_adapter,
+                as_of=checked_at,
+            )
+        except Exception as exc:
+            requirement_results.append(
+                {
+                    **_requirement_result(requirement, "blocked", "raw_fill_failed"),
+                    "dataset_id": raw_ref["dataset_id"],
+                    "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                }
+            )
+            blocked = True
+            continue
         raw_refs_by_key[(str(data_type), timeframe)] = raw_ref
         raw_results_by_key[(str(data_type), timeframe)] = fill_result
         requirement_results.append(
@@ -152,6 +174,194 @@ def warm_route_data(
                 **_requirement_result(requirement, "satisfied_by_raw_rebuild"),
                 "dataset_id": matching_ref["dataset_id"],
                 "source_timeframe": source_timeframe,
+            }
+        )
+
+    refreshed_derived_keys: set[tuple[str, str | None]] = set()
+    for requirement in required_data:
+        data_type = requirement.get("data_type")
+        if data_type not in REFRESHABLE_DERIVED_DATA_DEPENDENCIES or requirement.get("origin") != "derived":
+            continue
+        dependency = REFRESHABLE_DERIVED_DATA_DEPENDENCIES[str(data_type)]
+        source_ref = _get_ref(
+            market_data_repository,
+            asset=route["asset"],
+            timeframe=dependency.get("timeframe"),
+            origin=str(dependency.get("origin") or "raw"),
+            data_type=str(dependency["data_type"]),
+        )
+        if source_ref is None:
+            requirement_results.append(
+                _requirement_result(
+                    requirement,
+                    "blocked",
+                    f"missing_raw_{dependency['data_type']}_ref_for_{data_type}",
+                )
+            )
+            blocked = True
+            continue
+        selected_fill_service = (raw_fill_services or {}).get(str(dependency["data_type"]))
+        if selected_fill_service is None:
+            requirement_results.append(
+                _requirement_result(
+                    requirement,
+                    "blocked",
+                    f"missing_raw_{dependency['data_type']}_fill_service_for_{data_type}",
+                )
+            )
+            blocked = True
+            continue
+        selected_adapter = (raw_adapters or {}).get(str(dependency["data_type"]), adapter)
+        try:
+            fill_result = _call_fill_service(
+                fill_service=selected_fill_service,
+                registration=source_ref,
+                repository=market_data_repository,
+                adapter=selected_adapter,
+                as_of=checked_at,
+            )
+        except Exception as exc:
+            requirement_results.append(
+                {
+                    **_requirement_result(requirement, "blocked", "raw_dependency_fill_failed"),
+                    "source_dataset_id": source_ref["dataset_id"],
+                    "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                }
+            )
+            blocked = True
+            continue
+        matching_ref = _get_ref(
+            market_data_repository,
+            asset=route["asset"],
+            timeframe=requirement.get("timeframe"),
+            origin="derived",
+            data_type=str(data_type),
+        )
+        if matching_ref is None:
+            requirement_results.append(
+                _requirement_result(requirement, "blocked", f"missing_derived_{data_type}_ref")
+            )
+            blocked = True
+            continue
+        requirement_results.append(
+            {
+                **_requirement_result(requirement, "refreshed_from_raw_dependency"),
+                "dataset_id": matching_ref["dataset_id"],
+                "source_dataset_id": source_ref["dataset_id"],
+                "source_fill_result": fill_result,
+            }
+        )
+        refreshed_derived_keys.add((str(data_type), requirement.get("timeframe")))
+
+    for requirement in required_data:
+        data_type = requirement.get("data_type")
+        if data_type != ATR_DATA_TYPE or requirement.get("origin") != "derived":
+            continue
+        source = requirement.get("source") or {}
+        source_timeframe = source.get("timeframe") or "5m"
+        if source_timeframe != "5m":
+            requirement_results.append(_requirement_result(requirement, "blocked", "technical_indicator_atr_requires_raw_5m_source"))
+            blocked = True
+            continue
+        source_ref = market_data_repository.get_raw_candle_ref(route["asset"], source_timeframe)
+        if source_ref is None:
+            requirement_results.append(_requirement_result(requirement, "blocked", "missing_raw_candle_ref_for_technical_indicator_atr"))
+            blocked = True
+            continue
+        source_key = ("candles", source_timeframe)
+        if source_key not in raw_results_by_key:
+            try:
+                fill_result = _call_fill_service(
+                    fill_service=(raw_fill_services or {}).get("candles", fill_service),
+                    registration=source_ref,
+                    repository=market_data_repository,
+                    adapter=(raw_adapters or {}).get("candles", adapter),
+                    as_of=checked_at,
+                )
+            except Exception as exc:
+                requirement_results.append(
+                    {
+                        **_requirement_result(requirement, "blocked", "raw_atr_dependency_fill_failed"),
+                        "source_dataset_id": source_ref["dataset_id"],
+                        "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                    }
+                )
+                blocked = True
+                continue
+            raw_results_by_key[source_key] = fill_result
+            raw_refs_by_key[source_key] = source_ref
+        service = atr_service or enrich_atr_datasets
+        atr_result = service(
+            repository=market_data_repository,
+            asset=route["asset"],
+            timeframes=(requirement.get("timeframe") or "2h",),
+            target_root=(workspace_root or Path(".")) / ".data" / "market-data",
+        )
+        matching_atr = next(
+            (
+                item
+                for item in atr_result.get("datasets", [])
+                if item.get("data_type") == ATR_DATA_TYPE and item.get("timeframe") == requirement.get("timeframe")
+            ),
+            None,
+        )
+        if matching_atr is None:
+            matching_ref = _get_ref(
+                market_data_repository,
+                asset=route["asset"],
+                timeframe=requirement.get("timeframe"),
+                origin="derived",
+                data_type=ATR_DATA_TYPE,
+            )
+            if matching_ref is not None:
+                matching_atr = {
+                    "dataset_id": matching_ref["dataset_id"],
+                    "timeframe": matching_ref.get("timeframe"),
+                    "row_count": matching_ref.get("row_count"),
+                    "data_type": matching_ref.get("data_type"),
+                }
+        if matching_atr is None:
+            requirement_results.append(
+                {
+                    **_requirement_result(requirement, "blocked", "atr_refresh_produced_no_matching_dataset"),
+                    "atr_result": atr_result,
+                }
+            )
+            blocked = True
+            continue
+        requirement_results.append(
+            {
+                **_requirement_result(requirement, "atr_enriched"),
+                "dataset_id": matching_atr["dataset_id"],
+                "source_dataset_id": source_ref["dataset_id"],
+                "atr_result": atr_result,
+            }
+        )
+    for requirement in required_data:
+        data_type = requirement.get("data_type")
+        if data_type not in REFRESHABLE_DERIVED_DATA_DEPENDENCIES or requirement.get("origin") != "derived":
+            continue
+        if (str(data_type), requirement.get("timeframe")) in refreshed_derived_keys:
+            continue
+        if blocked:
+            continue
+        matching_ref = _get_ref(
+            market_data_repository,
+            asset=route["asset"],
+            timeframe=requirement.get("timeframe"),
+            origin="derived",
+            data_type=str(data_type),
+        )
+        if matching_ref is None:
+            requirement_results.append(
+                _requirement_result(requirement, "blocked", f"missing_derived_{data_type}_ref")
+            )
+            blocked = True
+            continue
+        requirement_results.append(
+            {
+                **_requirement_result(requirement, "satisfied_by_existing_ref"),
+                "dataset_id": matching_ref["dataset_id"],
             }
         )
 
@@ -339,6 +549,8 @@ def _route_data_freshness(
     ) if derived_required else None
     raw_status = _freshness_ref_status(raw_ref, checked_at=checked_at, max_age_seconds=max_age_seconds)
     derived_status = _freshness_ref_status(derived_ref, checked_at=checked_at, max_age_seconds=max_age_seconds)
+    required_ref_statuses: list[dict[str, Any]] = []
+    dependency_ref_statuses: list[dict[str, Any]] = []
 
     status = "fresh"
     reason = None
@@ -361,6 +573,72 @@ def _route_data_freshness(
             status = "stale"
             reason = "derived_5m_lagging_raw"
 
+    for requirement in requirements:
+        data_type = str(requirement.get("data_type") or "")
+        origin = str(requirement.get("origin") or "")
+        timeframe = requirement.get("timeframe") or "5m"
+        if timeframe != "5m" or origin not in {"raw", "derived"} or not data_type:
+            continue
+        ref = (
+            market_data_repository.get_raw_candle_ref(route["asset"], "5m")
+            if origin == "raw" and data_type == "candles"
+            else _get_ref(
+                market_data_repository,
+                asset=route["asset"],
+                timeframe="5m",
+                origin=origin,
+                data_type=data_type,
+            )
+        )
+        ref_status = _freshness_ref_status(ref, checked_at=checked_at, max_age_seconds=max_age_seconds)
+        required_ref_statuses.append(
+            {
+                "data_type": data_type,
+                "origin": origin,
+                "timeframe": timeframe,
+                **ref_status,
+            }
+        )
+        if status == "fresh" and ref_status["status"] in {"missing", "stale"}:
+            status = "stale"
+            reason = f"{origin}_{data_type}_5m_{ref_status['status']}"
+
+        dependency = REFRESHABLE_DERIVED_DATA_DEPENDENCIES.get(data_type)
+        if origin == "derived" and dependency is not None:
+            dependency_timeframe = str(dependency.get("timeframe") or "5m")
+            dependency_type = str(dependency["data_type"])
+            dependency_origin = str(dependency.get("origin") or "raw")
+            dependency_ref = _get_ref(
+                market_data_repository,
+                asset=route["asset"],
+                timeframe=dependency_timeframe,
+                origin=dependency_origin,
+                data_type=dependency_type,
+            )
+            dependency_max_age_seconds = (
+                _timeframe_seconds(dependency_timeframe)
+                + wake_interval_seconds
+                + FUNDING_DEPENDENCY_GRACE_SECONDS
+            )
+            dependency_status = _freshness_ref_status(
+                dependency_ref,
+                checked_at=checked_at,
+                max_age_seconds=dependency_max_age_seconds,
+            )
+            dependency_ref_statuses.append(
+                {
+                    "data_type": dependency_type,
+                    "origin": dependency_origin,
+                    "timeframe": dependency_timeframe,
+                    "required_by": data_type,
+                    "max_age_seconds": dependency_max_age_seconds,
+                    **dependency_status,
+                }
+            )
+            if status == "fresh" and dependency_status["status"] in {"missing", "stale"}:
+                status = "stale"
+                reason = f"{dependency_origin}_{dependency_type}_{dependency_timeframe}_{dependency_status['status']}_for_{data_type}"
+
     return {
         "status": status,
         "reason": reason,
@@ -371,6 +649,8 @@ def _route_data_freshness(
         "max_age_seconds": max_age_seconds,
         "raw_5m": raw_status if raw_required else None,
         "derived_5m": derived_status if derived_required else None,
+        "required_refs": required_ref_statuses,
+        "dependency_refs": dependency_ref_statuses,
     }
 
 

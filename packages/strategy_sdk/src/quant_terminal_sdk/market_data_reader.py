@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
@@ -115,7 +115,7 @@ def read_candles_from_ref(
     end_ts = _coerce_optional_datetime(end)
     rows_by_timestamp: dict[datetime, MarketDataCandle] = {}
 
-    for file in sorted(storage_uri.glob("year=*/month=*/data.parquet")):
+    for file in _iter_parquet_files(storage_uri, start_ts=start_ts, end_ts=end_ts):
         for row in _read_parquet_rows(file, dataset_id=str(ref.get("dataset_id") or "unknown")):
             candle = _coerce_candle(row)
             if confirmed_only and candle.confirm != 1:
@@ -145,7 +145,7 @@ def read_rows_from_ref(
     end_ts = _coerce_optional_datetime(end)
     rows_by_timestamp: dict[datetime, dict[str, Any]] = {}
 
-    for file in sorted(storage_uri.glob("year=*/month=*/data.parquet")):
+    for file in _iter_parquet_files(storage_uri, start_ts=start_ts, end_ts=end_ts):
         for row in _read_parquet_rows(file, dataset_id=str(ref.get("dataset_id") or "unknown")):
             timestamp = _coerce_datetime(row.get("timestamp") or row.get("ts"))
             if confirmed_only and int(row.get("confirm", 1)) != 1:
@@ -169,6 +169,45 @@ def _read_parquet_rows(file: Path, *, dataset_id: str) -> list[dict[str, Any]]:
         return pq.read_table(file).to_pylist()
     except (pa.ArrowInvalid, pa.ArrowIOError, OSError) as exc:
         raise ValueError(f"Corrupt parquet shard for {dataset_id}: {file}") from exc
+
+
+def _iter_parquet_files(
+    storage_uri: Path,
+    *,
+    start_ts: datetime | None,
+    end_ts: datetime | None,
+) -> list[Path]:
+    files = sorted(storage_uri.glob("year=*/month=*/data.parquet"))
+    if start_ts is None and end_ts is None:
+        return files
+    return [
+        file
+        for file in files
+        if _month_partition_may_overlap(file, start_ts=start_ts, end_ts=end_ts)
+    ]
+
+
+def _month_partition_may_overlap(
+    file: Path,
+    *,
+    start_ts: datetime | None,
+    end_ts: datetime | None,
+) -> bool:
+    try:
+        year = int(file.parent.parent.name.removeprefix("year="))
+        month = int(file.parent.name.removeprefix("month="))
+    except ValueError:
+        return True
+    month_start = datetime(year, month, 1, tzinfo=UTC)
+    if month == 12:
+        month_end = datetime(year + 1, 1, 1, tzinfo=UTC) - timedelta(microseconds=1)
+    else:
+        month_end = datetime(year, month + 1, 1, tzinfo=UTC) - timedelta(microseconds=1)
+    if end_ts is not None and month_start > end_ts:
+        return False
+    if start_ts is not None and month_end < start_ts:
+        return False
+    return True
 
 
 def _coerce_candle(row: dict[str, Any]) -> MarketDataCandle:

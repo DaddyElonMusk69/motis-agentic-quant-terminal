@@ -13,12 +13,14 @@ SUPPORTED_REQUIRED_DATA_TYPES = {
     "futures_metrics",
     "open_interest",
     "premium_index",
+    "technical_indicator_atr",
     "feature_base_candle",
     "feature_volatility_range",
     "feature_volume",
     "feature_ema_vegas_structure",
     "feature_bollinger",
     "feature_regime_momentum",
+    "feature_saty_atr_levels",
     "feature_open_interest_regime",
 }
 SUPPORTED_REQUIRED_DATA_ORIGINS = {"raw", "derived"}

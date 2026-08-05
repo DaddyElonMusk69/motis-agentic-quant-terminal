@@ -96,9 +96,18 @@ def run_stage4b_timing_replay(
     inputs = realized.get("simulation_inputs") or {}
     costs = realized.get("cost_assumptions") or {}
     slice_windows = _slice_windows(session)
+    realized_candidates_by_id = {
+        str(candidate.get("candidate_id")): candidate
+        for candidate in realized.get("candidates", [])
+        if isinstance(candidate, dict) and candidate.get("candidate_id")
+    }
     results = []
     ledger_candidates = []
     for candidate in candidates:
+        realized_candidate = realized_candidates_by_id.get(str(candidate["candidate_id"])) or {}
+        pause_rules = realized_candidate.get("pause_rules") or None
+        pause_rule = None if pause_rules else realized_candidate.get("pause_rule") or None
+        loss_cooldown = None if pause_rules or pause_rule else realized_candidate.get("loss_cooldown") or None
         result, trades = _score_candidate(
             candidate=candidate,
             records=filtered_records,
@@ -110,6 +119,9 @@ def run_stage4b_timing_replay(
             fees_bps_per_side=float(costs.get("fees_bps_per_side", DEFAULT_FEES_BPS_PER_SIDE)),
             slippage_bps_per_side=float(costs.get("slippage_bps_per_side", DEFAULT_SLIPPAGE_BPS_PER_SIDE)),
             slice_windows=slice_windows,
+            pause_rules=pause_rules,
+            pause_rule=pause_rule,
+            loss_cooldown=loss_cooldown,
         )
         result["skipped_timing_filter"] = sum(1 for trade in trades if trade.get("skip_reason") == "timing_filter")
         results.append(result)

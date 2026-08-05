@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left, insort
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from quant_terminal_worker.signal_engines.runtime import (
 
 
 SIGNAL_ENGINE_VERSION = "0.1"
+DEFAULT_MULTI_SOURCE_EXTENSION_OVERLAP_MINUTES = 24 * 60
 
 
 def extend_signal_pool_from_local_candles(
@@ -47,16 +49,32 @@ def extend_signal_pool_from_local_candles(
 
     existing_signals = repository.list_signals(signal_set_key=signal_set_key, limit=1_000_000)
     existing_timestamps = {_parse_timestamp(signal["timestamp"]) for signal in existing_signals}
+    admitted_timestamps = sorted(existing_timestamps)
     previous_signal_end = max(existing_timestamps) if existing_timestamps else None
     previous_scan_coverage = _scan_coverage(signal_set)
     previous_scan_end = previous_scan_coverage.get("end_ts")
+
+    resolved = resolve_signal_engine(
+        signal_engine_id,
+        version=signal_set.get("signal_engine_version"),
+        repository=repository,
+        workspace_root=root,
+    )
+    parameters = apply_fixed_engine_parameters(
+        resolved.spec,
+        _engine_parameters(signal_set, defaults=_spec_default_parameters(resolved.spec)),
+    )
+    overlap = _parquet_extension_overlap(spec=resolved.spec, parameters=parameters)
     scan_start = _scan_start(
         previous_signal_end=previous_signal_end,
         previous_scan_coverage=previous_scan_coverage,
         fallback_start=raw_5m[0].timestamp,
+        overlap=overlap,
     )
 
-    if previous_scan_end is not None and requested_target <= previous_scan_end:
+    if previous_scan_end is not None and requested_target <= previous_scan_end and (
+        overlap <= timedelta(0) or scan_start > requested_target
+    ):
         return _build_response(
             status="noop",
             signal_engine_id=signal_engine_id,
@@ -74,25 +92,15 @@ def extend_signal_pool_from_local_candles(
             import_result={"status": "skipped", "reason": "already_scanned_to_target"},
         )
 
-    resolved = resolve_signal_engine(
-        signal_engine_id,
-        version=signal_set.get("signal_engine_version"),
-        repository=repository,
-        workspace_root=root,
-    )
-    parameters = apply_fixed_engine_parameters(
-        resolved.spec,
-        _engine_parameters(signal_set, defaults=_spec_default_parameters(resolved.spec)),
-    )
     generation_parameters = dict(parameters)
-    if previous_signal_end is not None:
-        generation_parameters["_dedupe_seed_timestamp"] = _iso_z(previous_signal_end)
+    dedupe_seed = _latest_admitted_before(admitted_timestamps, scan_start)
+    if dedupe_seed is not None:
+        generation_parameters["_dedupe_seed_timestamp"] = _iso_z(dedupe_seed)
     dedupe_window = timedelta(minutes=int(parameters.get("dedupe_window_minutes", 120)))
     stream_state = {
         "generated_packet_count": 0,
         "appended_packet_count": 0,
         "final_signal_end": previous_signal_end,
-        "last_admitted_signal_ts": previous_signal_end,
     }
 
     def packet_sink(packets: list[dict[str, Any]]) -> None:
@@ -104,11 +112,10 @@ def extend_signal_pool_from_local_candles(
             timestamp = _parse_timestamp(str(packet["timestamp"]))
             if timestamp in existing_timestamps:
                 continue
-            last_admitted = stream_state["last_admitted_signal_ts"]
-            if isinstance(last_admitted, datetime) and timestamp - last_admitted < dedupe_window:
+            if _has_dedupe_conflict(timestamp, admitted_timestamps, dedupe_window):
                 continue
             new_packets.append(packet)
-            stream_state["last_admitted_signal_ts"] = timestamp
+            insort(admitted_timestamps, timestamp)
         if not new_packets:
             return
         _append_packets_to_signal_set(
@@ -145,11 +152,12 @@ def extend_signal_pool_from_local_candles(
     )
     training_result = getattr(training_output, "result", None)
     reported_coverage = getattr(training_result, "scan_coverage_end_ts", None)
-    scan_coverage_end = (
-        min(requested_target, _parse_timestamp(reported_coverage))
-        if reported_coverage
-        else requested_target
-    )
+    if reported_coverage:
+        scan_coverage_end = min(requested_target, _parse_timestamp(reported_coverage))
+    elif isinstance(previous_scan_end, datetime):
+        scan_coverage_end = previous_scan_end
+    else:
+        scan_coverage_end = requested_target
     generated_packets = list(training_output.packets)
 
     if generated_packets:
@@ -282,6 +290,16 @@ def _spec_default_parameters(spec: Any) -> dict[str, Any]:
     return dict(defaults) if isinstance(defaults, dict) else {}
 
 
+def _parquet_extension_overlap(*, spec: Any, parameters: dict[str, Any]) -> timedelta:
+    configured = parameters.get("parquet_extension_overlap_minutes")
+    if configured not in (None, ""):
+        return timedelta(minutes=max(0, int(configured)))
+    required_data = getattr(spec, "required_data", None)
+    if any(isinstance(item, dict) and item.get("data_type") != "candles" for item in required_data or []):
+        return timedelta(minutes=DEFAULT_MULTI_SOURCE_EXTENSION_OVERLAP_MINUTES)
+    return timedelta(0)
+
+
 def _packet_data_refs(signal_set: dict[str, Any]) -> list[str]:
     manifest = signal_set.get("manifest") if isinstance(signal_set.get("manifest"), dict) else {}
     data_manifest = manifest.get("data_manifest")
@@ -321,14 +339,35 @@ def _scan_start(
     previous_signal_end: datetime | None,
     previous_scan_coverage: dict[str, Any],
     fallback_start: datetime,
+    overlap: timedelta = timedelta(0),
 ) -> datetime:
     previous_scan_end = previous_scan_coverage.get("end_ts")
     if (
         previous_scan_coverage.get("source") == "parquet_market_data"
         and isinstance(previous_scan_end, datetime)
     ):
+        if overlap > timedelta(0):
+            return max(fallback_start, previous_scan_end - overlap + timedelta(minutes=5))
         return previous_scan_end + timedelta(minutes=5)
     return previous_signal_end or fallback_start
+
+
+def _latest_admitted_before(timestamps: list[datetime], timestamp: datetime) -> datetime | None:
+    index = bisect_left(timestamps, timestamp)
+    if index <= 0:
+        return None
+    return timestamps[index - 1]
+
+
+def _has_dedupe_conflict(timestamp: datetime, admitted_timestamps: list[datetime], dedupe_window: timedelta) -> bool:
+    if dedupe_window <= timedelta(0):
+        return False
+    index = bisect_left(admitted_timestamps, timestamp)
+    for neighbor_index in (index - 1, index):
+        if 0 <= neighbor_index < len(admitted_timestamps):
+            if abs(timestamp - admitted_timestamps[neighbor_index]) < dedupe_window:
+                return True
+    return False
 
 
 def _final_signal_end(

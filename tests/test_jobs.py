@@ -137,6 +137,41 @@ def test_market_data_feature_refresh_routes_open_interest_regime_to_specialized_
     assert "family" not in calls[0]
 
 
+def test_market_data_atr_refresh_routes_to_atr_enrichment(monkeypatch):
+    calls = []
+
+    def fake_enrich_atr_datasets(**kwargs):
+        calls.append(kwargs)
+        return {
+            "status": "enriched",
+            "asset": kwargs["asset"],
+            "data_type": "technical_indicator_atr",
+            "dataset_count": 3,
+            "datasets": [],
+        }
+
+    monkeypatch.setattr(jobs, "enrich_atr_datasets", fake_enrich_atr_datasets)
+
+    market_repository = FakeMarketDataRepository()
+    result = jobs.execute_job(
+        repository=object(),
+        market_data_repository=market_repository,
+        workspace_root=Path("/workspace"),
+        job={
+            "job_id": "job-atr-btc",
+            "job_type": "market_data_atr_refresh",
+            "payload": {"asset": "btc"},
+        },
+    )
+
+    assert result["data_type"] == "technical_indicator_atr"
+    assert calls[0]["repository"] is market_repository
+    assert calls[0]["asset"] == "BTC"
+    assert calls[0]["timeframes"] == ("1h", "2h", "4h")
+    assert calls[0]["period"] == 14
+    assert calls[0]["target_root"] == Path("/workspace/.data/market-data")
+
+
 def test_market_data_refresh_job_routes_funding_to_binance_fill(monkeypatch):
     calls = []
 

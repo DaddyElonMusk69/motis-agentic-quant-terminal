@@ -942,11 +942,18 @@ async function runStage4RealizedExpectancy(request: {
 
 async function promoteExecutionBundle(request: {
   session_id: string;
+  source: "stage4_realized_expectancy" | "stage4b_timing";
+  candidate_id: string;
 }): Promise<{ bundle: ExecutionBundle; route: DeploymentRoute }> {
   const response = await fetch(`${API_BASE_URL}/api/v1/research/stage1-sessions/${request.session_id}/promote-execution-bundle`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ account_mode: "live", execution_adapter: "okx" })
+    body: JSON.stringify({
+      account_mode: "live",
+      execution_adapter: "okx",
+      source: request.source,
+      candidate_id: request.candidate_id
+    })
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => undefined);
@@ -1993,6 +2000,8 @@ function DevelopmentPanel({
   }>>;
   promoteExecutionBundleMutation: ReturnType<typeof useMutation<{ bundle: ExecutionBundle; route: DeploymentRoute }, Error, {
     session_id: string;
+    source: "stage4_realized_expectancy" | "stage4b_timing";
+    candidate_id: string;
   }>>;
 }) {
   const [selectedRunId, setSelectedRunId] = React.useState<string | null>(focusedRunId ?? null);
@@ -2367,7 +2376,11 @@ function DevelopmentPanel({
               running={runStage4RealizedExpectancyMutation.isPending}
               onRun={() => selectedSession && runStage4RealizedExpectancyMutation.mutate({ session_id: selectedSession.session_id })}
               promoting={promoteExecutionBundleMutation.isPending}
-              onPromote={() => selectedSession && promoteExecutionBundleMutation.mutate({ session_id: selectedSession.session_id })}
+              onPromote={(candidateId) => selectedSession && promoteExecutionBundleMutation.mutate({
+                session_id: selectedSession.session_id,
+                source: "stage4_realized_expectancy",
+                candidate_id: candidateId
+              })}
             />
           )}
         </section>
@@ -2914,7 +2927,7 @@ function DevelopmentStage4Panel({
   running: boolean;
   onRun: () => void;
   promoting: boolean;
-  onPromote: () => void;
+  onPromote: (candidateId: string) => void;
 }) {
   const pyramidComplete = Boolean(gate?.stage3_pyramid.exists);
   const stage4 = gate?.stage4_realized_expectancy;
@@ -2930,9 +2943,6 @@ function DevelopmentStage4Panel({
         <div className="stage-action-row">
           <button type="button" className="primary" disabled={!pyramidComplete || complete || running} onClick={onRun}>
             <Play size={16} />{complete ? "Stage 4 Complete" : running ? "Running..." : "Run Realized Expectancy"}
-          </button>
-          <button type="button" disabled={!complete || promoting} onClick={onPromote}>
-            <UploadCloud size={16} />{promoting ? "Promoting..." : "Promote Bundle"}
           </button>
         </div>
       </div>
@@ -2968,6 +2978,7 @@ function DevelopmentStage4Panel({
               <span>Skipped</span>
               <span>Win Rate</span>
               <span>Net PnL</span>
+              <span>Action</span>
             </div>
             {stage4.candidates.map((candidate) => (
               <div className="row" key={candidate.candidate_id}>
@@ -2977,6 +2988,11 @@ function DevelopmentStage4Panel({
                 <span>{formatNumber(candidate.skipped_decisions ?? 0)}</span>
                 <span>{formatStage3Pct(candidate.win_rate_pct)}</span>
                 <span>{formatStage3Pct(candidate.net_pnl_pct)}</span>
+                <span>
+                  <button type="button" disabled={promoting} onClick={() => onPromote(candidate.candidate_id)}>
+                    <UploadCloud size={14} />{promoting ? "Promoting..." : "Promote"}
+                  </button>
+                </span>
               </div>
             ))}
           </div>

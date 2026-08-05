@@ -32,7 +32,7 @@ export type CatalogResponse = {
 };
 
 export type RefreshPlan = {
-  dataset_id: string;
+  dataset_id?: string;
   status: string;
   asset?: string;
   family?: string;
@@ -48,8 +48,10 @@ export type RefreshPlan = {
   derived_rebuilt?: Array<{ dataset_id: string; timeframe: string; row_count: number }>;
   enriched?: Array<{ dataset_id: string; timeframe: string; row_count: number; ema_columns?: string[] }>;
   features?: Array<{ dataset_id: string; timeframe: string; row_count: number; columns?: string[] }>;
+  datasets?: Array<{ dataset_id: string; timeframe: string; row_count: number; period?: number }>;
   feature_count?: number;
   enriched_count?: number;
+  dataset_count?: number;
   skipped_count?: number;
   reason?: string;
 };
@@ -1583,6 +1585,12 @@ export function refreshMarketDataEma(asset: string): Promise<RefreshPlan | Async
   });
 }
 
+export function refreshMarketDataAtr(asset: string): Promise<RefreshPlan | AsyncJobResponse> {
+  return requestJson<RefreshPlan | AsyncJobResponse>(`/api/v1/market-data/assets/${asset}/atr/refresh`, {
+    method: "POST"
+  });
+}
+
 export function refreshMarketDataFeatureFamily(asset: string, family: string): Promise<RefreshPlan | AsyncJobResponse> {
   return requestJson<RefreshPlan | AsyncJobResponse>(`/api/v1/market-data/assets/${asset}/features/${family}/refresh`, {
     method: "POST"
@@ -2207,11 +2215,22 @@ export function fetchStage4CandidateDetail(request: {
   return requestJson(`/api/v1/research/stage1-sessions/${request.session_id}/stage4/candidates/${encodeURIComponent(request.candidate_id)}/details${search}`);
 }
 
-export function promoteExecutionBundle(sessionId: string): Promise<{ bundle: ExecutionBundle; route: DeploymentRoute }> {
-  return requestJson<{ bundle: ExecutionBundle; route: DeploymentRoute }>(`/api/v1/research/stage1-sessions/${sessionId}/promote-execution-bundle`, {
+export type PromoteExecutionBundleRequest = {
+  session_id: string;
+  source?: "stage4_realized_expectancy" | "stage4b_timing" | string | null;
+  candidate_id?: string | null;
+};
+
+export function promoteExecutionBundle(request: PromoteExecutionBundleRequest): Promise<{ bundle: ExecutionBundle; route: DeploymentRoute }> {
+  return requestJson<{ bundle: ExecutionBundle; route: DeploymentRoute }>(`/api/v1/research/stage1-sessions/${request.session_id}/promote-execution-bundle`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ account_mode: "live", execution_adapter: "okx" })
+    body: JSON.stringify({
+      account_mode: "live",
+      execution_adapter: "okx",
+      source: request.source ?? null,
+      candidate_id: request.candidate_id ?? null
+    })
   });
 }
 

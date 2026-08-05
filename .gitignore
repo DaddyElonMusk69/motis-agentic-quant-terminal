@@ -31,13 +31,16 @@ live/*
 apps/worker/src/quant_terminal_worker/signal_engines/*.py
 !apps/worker/src/quant_terminal_worker/signal_engines/__init__.py
 !apps/worker/src/quant_terminal_worker/signal_engines/runtime.py
+!apps/worker/src/quant_terminal_worker/signal_engines/btc_derivatives_crowding_failure_v1.py
 !apps/worker/src/quant_terminal_worker/signal_engines/btc_multires_opportunity_v1.py
+!apps/worker/src/quant_terminal_worker/signal_engines/derivatives_participation_impulse_v1.py
 !apps/worker/src/quant_terminal_worker/signal_engines/multires_tcn_runtime.py
 !apps/worker/src/quant_terminal_worker/signal_engines/liquidity_sweep_v1.py
 !apps/worker/src/quant_terminal_worker/signal_engines/vegas_5m_cluster_v6.py
 packages/strategy_modules/src/quant_terminal_strategies/*.py
 !packages/strategy_modules/src/quant_terminal_strategies/__init__.py
 !packages/strategy_modules/src/quant_terminal_strategies/btc_multires_opportunity_v1_base.py
+!packages/strategy_modules/src/quant_terminal_strategies/derivatives_participation_impulse_v1_base.py
 !packages/strategy_modules/src/quant_terminal_strategies/liquidity_sweep_v1_base.py
 !packages/strategy_modules/src/quant_terminal_strategies/vegas_ema_5m_hft_v6_base.py
 !packages/strategy_modules/src/quant_terminal_strategies/stage1a_supervised_features.py

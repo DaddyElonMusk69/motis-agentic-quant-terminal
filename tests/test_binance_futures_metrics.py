@@ -6,6 +6,7 @@ import zipfile
 
 import pyarrow.parquet as pq
 
+import quant_terminal_worker.ingestion.binance_futures_metrics as futures_metrics
 from quant_terminal_worker.ingestion.binance_futures_metrics import (
     build_live_futures_metrics_rows,
     derive_futures_metrics_rows,
@@ -96,7 +97,45 @@ def test_live_rows_align_snapshot_end_timestamps_with_taker_interval_start() -> 
     assert rows[0]["taker_buy_sell_volume_ratio"] == 1.3468
     assert rows[0]["ingest_source"] == "rest"
     assert adapter.oi_calls[0]["start_time_ms"] == 1783814700000
+    assert adapter.oi_calls[0]["end_time_ms"] == 1783815300000
     assert adapter.taker_calls[0]["start_time_ms"] == 1783814400000
+    assert adapter.taker_calls[0]["end_time_ms"] == 1783815000000
+
+
+def test_live_rows_fetch_extra_boundary_for_exclusive_binance_end_time() -> None:
+    adapter = _ExclusiveEndTimeAdapter()
+
+    rows = build_live_futures_metrics_rows(
+        adapter=adapter,
+        symbol="BTCUSDT",
+        from_ts=datetime(2026, 7, 12, 0, 0, tzinfo=UTC),
+        target=datetime(2026, 7, 12, 0, 5, tzinfo=UTC),
+        limit=2,
+    )
+
+    assert [row["timestamp"] for row in rows] == [
+        "2026-07-12T00:00:00Z",
+        "2026-07-12T00:05:00Z",
+    ]
+
+
+def test_live_rows_can_use_latest_rolling_window_without_time_bounds() -> None:
+    adapter = _ExactArchiveMatchAdapter()
+
+    rows = build_live_futures_metrics_rows(
+        adapter=adapter,
+        symbol="BTCUSDT",
+        from_ts=datetime(2026, 7, 12, 0, 0, tzinfo=UTC),
+        target=datetime(2026, 7, 12, 0, 5, tzinfo=UTC),
+        limit=2,
+        latest_window=True,
+    )
+
+    assert len(rows) == 2
+    assert "start_time_ms" not in adapter.oi_calls[0]
+    assert "end_time_ms" not in adapter.oi_calls[0]
+    assert "start_time_ms" not in adapter.taker_calls[0]
+    assert "end_time_ms" not in adapter.taker_calls[0]
 
 
 def test_live_rows_stop_before_first_incomplete_interval() -> None:
@@ -289,6 +328,163 @@ def test_fill_appends_complete_rest_rows(tmp_path: Path) -> None:
     assert repository.updated[-1]["row_count"] == 3
 
 
+def test_fill_reports_partial_status_when_page_stops_before_target(tmp_path: Path) -> None:
+    source_dir = tmp_path / "downloads"
+    source_dir.mkdir()
+    _write_zip(
+        source_dir / "BTCUSDT-metrics-2026-07-11.zip",
+        "BTCUSDT-metrics-2026-07-11.csv",
+        [
+            "create_time,symbol,sum_open_interest,sum_open_interest_value,count_toptrader_long_short_ratio,sum_toptrader_long_short_ratio,count_long_short_ratio,sum_taker_long_short_vol_ratio",
+            "2026-07-11 23:55:00,BTCUSDT,100,200,1.1,1.2,1.3,1.4",
+        ],
+    )
+    repository = FakeRepository()
+    import_binance_futures_metrics_history(
+        source_dir=source_dir,
+        target_root=tmp_path / ".data" / "market-data",
+        repository=repository,
+        asset="BTC",
+        symbol="BTCUSDT",
+        ingestion_version="binance-futures-metrics.v1",
+    )
+    registration = repository.upserted[0]
+    adapter = _ExactArchiveMatchAdapter()
+    adapter.global_rows = adapter.global_rows[:1]
+
+    result = fill_raw_futures_metrics_dataset(
+        registration=registration,
+        repository=repository,
+        adapter=adapter,
+        as_of=datetime(2026, 7, 12, 0, 10, tzinfo=UTC),
+        limit=2,
+    )
+
+    assert result["status"] == "partial_filled"
+    assert result["rows_added"] == 1
+    assert result["end_ts"] == "2026-07-12T00:00:00Z"
+    assert result["to_ts"] == "2026-07-12T00:05:00Z"
+    assert result["next_from_ts"] == "2026-07-12T00:05:00Z"
+
+
+def test_fill_bridges_stale_cutoff_with_archive_then_latest_window(tmp_path: Path) -> None:
+    initial_dir = tmp_path / "initial"
+    initial_dir.mkdir()
+    _write_zip(
+        initial_dir / "BTCUSDT-metrics-2026-07-11.zip",
+        "BTCUSDT-metrics-2026-07-11.csv",
+        [
+            "create_time,symbol,sum_open_interest,sum_open_interest_value,count_toptrader_long_short_ratio,sum_toptrader_long_short_ratio,count_long_short_ratio,sum_taker_long_short_vol_ratio",
+            "2026-07-11 23:55:00,BTCUSDT,100,200,1.1,1.2,1.3,1.4",
+        ],
+    )
+    repository = FakeRepository()
+    import_binance_futures_metrics_history(
+        source_dir=initial_dir,
+        target_root=tmp_path / ".data" / "market-data",
+        repository=repository,
+        asset="BTC",
+        symbol="BTCUSDT",
+    )
+    registration = repository.upserted[0]
+
+    archive_dir = tmp_path / "archive_bridge"
+    archive_dir.mkdir()
+    archive_lines = [
+        "create_time,symbol,sum_open_interest,sum_open_interest_value,count_toptrader_long_short_ratio,sum_toptrader_long_short_ratio,count_long_short_ratio,sum_taker_long_short_vol_ratio"
+    ]
+    archive_start = datetime(2026, 7, 12, 0, 0, tzinfo=UTC)
+    for offset in range(288):
+        timestamp = archive_start + timedelta(minutes=5 * offset)
+        archive_lines.append(
+            f"{timestamp.strftime('%Y-%m-%d %H:%M:%S')},BTCUSDT,100,200,1.1,1.2,1.3,1.4"
+        )
+    _write_zip(
+        archive_dir / "BTCUSDT-metrics-2026-07-12.zip",
+        "BTCUSDT-metrics-2026-07-12.csv",
+        archive_lines,
+    )
+    download_calls = []
+
+    def fake_downloader(**kwargs):
+        download_calls.append(kwargs)
+        return {"status": "existing"}
+
+    adapter = _GeneratedLatestWindowAdapter(
+        start=datetime(2026, 7, 13, 0, 0, tzinfo=UTC),
+        end=datetime(2026, 7, 14, 0, 5, tzinfo=UTC),
+    )
+    result = fill_raw_futures_metrics_dataset(
+        registration=registration,
+        repository=repository,
+        adapter=adapter,
+        as_of=datetime(2026, 7, 14, 0, 10, tzinfo=UTC),
+        archive_source_dir=archive_dir,
+        archive_downloader=fake_downloader,
+    )
+
+    assert result["status"] == "filled"
+    assert result["rows_added"] == 578
+    assert result["archive_rows_added"] == 288
+    assert result["live_rows_added"] == 290
+    assert result["end_ts"] == "2026-07-14T00:05:00Z"
+    assert result["source"] == "binance_archive_and_cli"
+    assert download_calls[0]["start_date"].isoformat() == "2026-07-12"
+    assert download_calls[0]["end_date"].isoformat() == "2026-07-12"
+    assert "start_time_ms" not in adapter.oi_calls[0]
+    assert "end_time_ms" not in adapter.oi_calls[0]
+
+
+def test_fill_refreshes_derived_tail_without_loading_full_raw_history(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_dir = tmp_path / "downloads"
+    source_dir.mkdir()
+    _write_zip(
+        source_dir / "BTCUSDT-metrics-2026-07-11.zip",
+        "BTCUSDT-metrics-2026-07-11.csv",
+        [
+            "create_time,symbol,sum_open_interest,sum_open_interest_value,count_toptrader_long_short_ratio,sum_toptrader_long_short_ratio,count_long_short_ratio,sum_taker_long_short_vol_ratio",
+            "2026-07-11 23:45:00,BTCUSDT,100,200,1.1,1.2,1.3,1.4",
+            "2026-07-11 23:50:00,BTCUSDT,100,200,1.1,1.2,1.3,1.4",
+            "2026-07-11 23:55:00,BTCUSDT,100,200,1.1,1.2,1.3,1.4",
+        ],
+    )
+    repository = FakeRepository()
+    import_binance_futures_metrics_history(
+        source_dir=source_dir,
+        target_root=tmp_path / ".data" / "market-data",
+        repository=repository,
+        asset="BTC",
+        symbol="BTCUSDT",
+        derived_timeframes=("15m",),
+    )
+    registration = repository.upserted[0]
+    monkeypatch.setattr(
+        futures_metrics,
+        "_read_dataset_rows",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("full raw history should not be loaded during fill")
+        ),
+    )
+
+    result = fill_raw_futures_metrics_dataset(
+        registration=registration,
+        repository=repository,
+        adapter=_GeneratedLatestWindowAdapter(
+            start=datetime(2026, 7, 12, 0, 0, tzinfo=UTC),
+            end=datetime(2026, 7, 12, 0, 10, tzinfo=UTC),
+        ),
+        as_of=datetime(2026, 7, 12, 0, 15, tzinfo=UTC),
+        limit=3,
+    )
+
+    assert result["rows_added"] == 3
+    assert result["derived_rebuilt"][0]["row_count"] == 2
+    assert result["derived_rebuilt"][0]["end_ts"] == "2026-07-12T00:00:00Z"
+
+
 class _ExactArchiveMatchAdapter:
     def __init__(self) -> None:
         self.oi_calls = []
@@ -340,6 +536,85 @@ class _ExactArchiveMatchAdapter:
     def taker_buy_sell_volume(self, **kwargs):
         self.taker_calls.append(kwargs)
         return self.taker_rows
+
+
+class _ExclusiveEndTimeAdapter(_ExactArchiveMatchAdapter):
+    def open_interest_statistics(self, **kwargs):
+        self.oi_calls.append(kwargs)
+        return _exclusive_rows(self.oi_rows, kwargs)
+
+    def top_trader_account_ratio(self, **kwargs):
+        return _exclusive_rows(self.account_rows, kwargs)
+
+    def top_trader_position_ratio(self, **kwargs):
+        return _exclusive_rows(self.position_rows, kwargs)
+
+    def global_account_ratio(self, **kwargs):
+        return _exclusive_rows(self.global_rows, kwargs)
+
+    def taker_buy_sell_volume(self, **kwargs):
+        self.taker_calls.append(kwargs)
+        return _exclusive_rows(self.taker_rows, kwargs)
+
+
+class _GeneratedLatestWindowAdapter:
+    def __init__(self, *, start: datetime, end: datetime) -> None:
+        self.oi_calls = []
+        starts = []
+        current = start
+        while current <= end:
+            starts.append(current)
+            current += timedelta(minutes=5)
+        self.oi_rows = [
+            {
+                "symbol": "BTCUSDT",
+                "sumOpenInterest": "100",
+                "sumOpenInterestValue": "200",
+                "timestamp": int((timestamp + timedelta(minutes=5)).timestamp() * 1000),
+            }
+            for timestamp in starts
+        ]
+        self.ratio_rows = [
+            {
+                "longShortRatio": "1.2",
+                "timestamp": int((timestamp + timedelta(minutes=5)).timestamp() * 1000),
+            }
+            for timestamp in starts
+        ]
+        self.taker_rows = [
+            {
+                "buySellRatio": "1.1",
+                "timestamp": int(timestamp.timestamp() * 1000),
+            }
+            for timestamp in starts
+        ]
+
+    def open_interest_statistics(self, **kwargs):
+        self.oi_calls.append(kwargs)
+        return self.oi_rows
+
+    def top_trader_account_ratio(self, **kwargs):
+        return self.ratio_rows
+
+    def top_trader_position_ratio(self, **kwargs):
+        return self.ratio_rows
+
+    def global_account_ratio(self, **kwargs):
+        return self.ratio_rows
+
+    def taker_buy_sell_volume(self, **kwargs):
+        return self.taker_rows
+
+
+def _exclusive_rows(rows, kwargs):
+    start_time_ms = int(kwargs["start_time_ms"])
+    end_time_ms = int(kwargs["end_time_ms"])
+    limit = int(kwargs["limit"])
+    return [
+        row
+        for row in rows
+        if start_time_ms <= int(row["timestamp"]) < end_time_ms
+    ][:limit]
 
 
 def _write_zip(path: Path, name: str, lines: list[str]) -> None:

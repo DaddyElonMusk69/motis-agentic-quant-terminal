@@ -6,6 +6,7 @@ import zipfile
 
 import pyarrow.parquet as pq
 
+import quant_terminal_worker.ingestion.binance_premium_index as premium_index
 from quant_terminal_worker.ingestion.binance_premium_index import (
     _archive_specs,
     build_live_premium_index_rows,
@@ -339,6 +340,31 @@ def test_build_live_rows_excludes_forming_bar_and_stops_at_gap():
     assert rows[-1]["sample_count"] == 58
 
 
+def test_build_live_rows_can_use_latest_window_without_start_end_times():
+    calls = []
+
+    class Adapter:
+        def premium_index_klines(self, **kwargs):
+            calls.append(kwargs)
+            return [_kline(1672531500000), _kline(1672531800000)]
+
+    rows = build_live_premium_index_rows(
+        adapter=Adapter(),
+        symbol="BTCUSDT",
+        from_ts=datetime(2023, 1, 1, 0, 5, tzinfo=UTC),
+        target=datetime(2023, 1, 1, 0, 10, tzinfo=UTC),
+        as_of=datetime(2023, 1, 1, 0, 16, tzinfo=UTC),
+        latest_window=True,
+    )
+
+    assert [row["timestamp"] for row in rows] == [
+        "2023-01-01T00:05:00Z",
+        "2023-01-01T00:10:00Z",
+    ]
+    assert "start_time_ms" not in calls[0]
+    assert "end_time_ms" not in calls[0]
+
+
 def test_fill_appends_only_closed_contiguous_rows(tmp_path: Path):
     repository = FakeRepository()
     source_dir = tmp_path / "downloads"
@@ -376,6 +402,126 @@ def test_fill_appends_only_closed_contiguous_rows(tmp_path: Path):
     assert result["rows_added"] == 2
     assert result["end_ts"] == "2023-01-01T00:10:00Z"
     assert repository.updated[0]["row_count"] == 3
+
+
+def test_fill_bridges_stale_cutoff_with_archive_then_latest_window(tmp_path: Path):
+    repository = FakeRepository()
+    initial_dir = tmp_path / "initial"
+    initial_dir.mkdir()
+    _write_zip(
+        initial_dir / "BTCUSDT-5m-2026-07-11.zip",
+        "BTCUSDT-5m-2026-07-11.csv",
+        [
+            "open_time,open,high,low,close,volume,close_time,quote_volume,count,taker_buy_volume,taker_buy_quote_volume,ignore",
+            "1783814100000,-0.00028,-0.00020,-0.00040,-0.00030,0,1783814399999,0,60,0,0,0",
+        ],
+    )
+    import_binance_premium_index_history(
+        source_dir=initial_dir,
+        target_root=tmp_path / ".data" / "market-data",
+        repository=repository,
+        asset="BTC",
+        symbol="BTCUSDT",
+    )
+    registration = repository.upserted[0]
+
+    archive_dir = tmp_path / "archive_bridge"
+    archive_dir.mkdir()
+    archive_lines = [
+        "open_time,open,high,low,close,volume,close_time,quote_volume,count,taker_buy_volume,taker_buy_quote_volume,ignore"
+    ]
+    archive_start = datetime(2026, 7, 12, 0, 0, tzinfo=UTC)
+    for offset in range(288):
+        timestamp = archive_start + timedelta(minutes=5 * offset)
+        open_time = int(timestamp.timestamp() * 1000)
+        archive_lines.append(
+            f"{open_time},-0.00028,-0.00020,-0.00040,-0.00030,0,{open_time + 299999},0,60,0,0,0"
+        )
+    _write_zip(
+        archive_dir / "BTCUSDT-5m-2026-07-12.zip",
+        "BTCUSDT-5m-2026-07-12.csv",
+        archive_lines,
+    )
+    download_calls = []
+
+    def fake_downloader(**kwargs):
+        download_calls.append(kwargs)
+        return {"status": "existing"}
+
+    adapter = _GeneratedPremiumLatestWindowAdapter(
+        start=datetime(2026, 7, 13, 0, 0, tzinfo=UTC),
+        end=datetime(2026, 7, 14, 0, 5, tzinfo=UTC),
+    )
+    result = fill_raw_premium_index_dataset(
+        registration=registration,
+        repository=repository,
+        adapter=adapter,
+        as_of=datetime(2026, 7, 14, 0, 10, tzinfo=UTC),
+        limit=500,
+        archive_source_dir=archive_dir,
+        archive_downloader=fake_downloader,
+    )
+
+    assert result["status"] == "filled"
+    assert result["rows_added"] == 578
+    assert result["archive_rows_added"] == 288
+    assert result["live_rows_added"] == 290
+    assert result["end_ts"] == "2026-07-14T00:05:00Z"
+    assert result["source"] == "binance_archive_and_cli"
+    assert download_calls[0]["start_date"].isoformat() == "2026-07-12"
+    assert download_calls[0]["end_date"].isoformat() == "2026-07-12"
+    assert "start_time_ms" not in adapter.calls[0]
+    assert "end_time_ms" not in adapter.calls[0]
+
+
+def test_fill_refreshes_derived_tail_without_loading_full_raw_history(
+    tmp_path: Path,
+    monkeypatch,
+):
+    repository = FakeRepository()
+    source_dir = tmp_path / "downloads"
+    source_dir.mkdir()
+    _write_zip(
+        source_dir / "BTCUSDT-5m-2026-07-11.zip",
+        "BTCUSDT-5m-2026-07-11.csv",
+        [
+            "open_time,open,high,low,close,volume,close_time,quote_volume,count,taker_buy_volume,taker_buy_quote_volume,ignore",
+            "1783813500000,-0.00028,-0.00020,-0.00040,-0.00030,0,1783813799999,0,60,0,0,0",
+            "1783813800000,-0.00028,-0.00020,-0.00040,-0.00030,0,1783814099999,0,60,0,0,0",
+            "1783814100000,-0.00028,-0.00020,-0.00040,-0.00030,0,1783814399999,0,60,0,0,0",
+        ],
+    )
+    import_binance_premium_index_history(
+        source_dir=source_dir,
+        target_root=tmp_path / ".data" / "market-data",
+        repository=repository,
+        asset="BTC",
+        symbol="BTCUSDT",
+        derived_timeframes=("15m",),
+    )
+    registration = repository.upserted[0]
+    monkeypatch.setattr(
+        premium_index,
+        "_read_dataset_rows",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("full raw history should not be loaded during fill")
+        ),
+    )
+
+    result = fill_raw_premium_index_dataset(
+        registration=registration,
+        repository=repository,
+        adapter=_GeneratedPremiumLatestWindowAdapter(
+            start=datetime(2026, 7, 12, 0, 0, tzinfo=UTC),
+            end=datetime(2026, 7, 12, 0, 10, tzinfo=UTC),
+        ),
+        as_of=datetime(2026, 7, 12, 0, 15, tzinfo=UTC),
+        limit=3,
+    )
+
+    assert result["rows_added"] == 3
+    assert result["derived_rebuilt"][0]["row_count"] == 2
+    assert result["derived_rebuilt"][0]["end_ts"] == "2026-07-12T00:00:00Z"
 
 
 def test_repair_fills_internal_archive_gap(tmp_path: Path):
@@ -440,6 +586,20 @@ def _kline(open_time: int, *, count: int = 60) -> list[object]:
         "0",
         "0",
     ]
+
+
+class _GeneratedPremiumLatestWindowAdapter:
+    def __init__(self, *, start: datetime, end: datetime) -> None:
+        self.calls = []
+        self.rows = []
+        current = start
+        while current <= end:
+            self.rows.append(_kline(int(current.timestamp() * 1000)))
+            current += timedelta(minutes=5)
+
+    def premium_index_klines(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.rows
 
 
 def _premium_row(

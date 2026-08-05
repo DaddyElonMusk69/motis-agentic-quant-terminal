@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import create_engine, insert, select, update
 
-from quant_terminal_api.db.models import decisions, deployment_routes, execution_bundles, metadata, owner_states, signal_sets, signals, stage1_research_sessions, wake_runs
+from quant_terminal_api.db.models import decisions, deployment_routes, execution_bundles, jobs, metadata, owner_states, signal_sets, signals, stage1_research_sessions, wake_runs
 from quant_terminal_api.repositories.runtime import RuntimeRepository
 
 
@@ -418,6 +418,31 @@ def test_runtime_repository_cancels_only_queued_jobs():
     repository.claim_next_job(worker_id="worker-1")
 
     assert repository.cancel_job(running["job_id"]) is None
+
+
+def test_runtime_repository_cancels_stale_running_job():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+
+    queued = repository.enqueue_job(
+        job_type="stage1_score",
+        scope_key="stage1_session:stage1-stale",
+        payload={"session_id": "stage1-stale"},
+    )
+    running = repository.claim_job(job_id=queued["job_id"], worker_id="worker-1")
+    with engine.begin() as connection:
+        connection.execute(
+            jobs.update()
+            .where(jobs.c.job_id == running["job_id"])
+            .values(heartbeat_at=datetime.now(UTC) - timedelta(seconds=120))
+        )
+
+    cancelled = repository.cancel_job(running["job_id"], running_stale_after_seconds=60)
+
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["error"] == {"reason": "stale_running_cancelled"}
+    assert cancelled["lock_expires_at"] is None
 
 
 def test_runtime_repository_reports_worker_runtime_status():
@@ -1535,6 +1560,14 @@ def test_runtime_repository_persists_execution_bundle_route_wake_and_signal_cons
     assert settings_route["exchange_account"] == "main-live-01"
     assert settings_route["margin_allocation_pct"] == 30.0
     assert settings_route["leverage"] == 5.0
+    risk_route = repository.update_deployment_route_gate(
+        route["route_id"],
+        risk_limits={
+            "max_notional_usd": 1000,
+            "pause_rule_state": {"consecutive_wins": {"consecutive_wins": 2}},
+        },
+    )
+    assert risk_route["risk_limits"]["pause_rule_state"]["consecutive_wins"]["consecutive_wins"] == 2
     assert repository.list_wake_runs(route["route_id"])[0]["wake_id"] == "wake-1"
 
     updated_wake = repository.update_wake_execution_results(

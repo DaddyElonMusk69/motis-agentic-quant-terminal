@@ -88,11 +88,11 @@ def read_parquet_candles(storage_uri: Path, *, limit: int = 200) -> list[dict[st
     files = sorted(storage_uri.glob("year=*/month=*/data.parquet"))
     rows: list[dict[str, Any]] = []
     for file in files:
-        rows.extend(pq.read_table(file).to_pylist())
+        rows.extend(pq.ParquetFile(file).read().to_pylist())
         if len(rows) >= limit:
             break
 
-    partition_columns = {"source", "type", "asset", "timeframe", "year", "month", "origin"}
+    partition_columns = {"source", "type", "asset", "year", "month", "origin"}
     return [
         {key: value for key, value in row.items() if key not in partition_columns}
         for row in rows[:limit]

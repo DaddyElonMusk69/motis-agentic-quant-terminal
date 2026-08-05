@@ -4,7 +4,13 @@ import os
 from datetime import UTC, datetime
 
 from celery import Celery
-from celery.signals import heartbeat_sent, worker_process_shutdown, worker_ready, worker_shutting_down
+from celery.signals import (
+    heartbeat_sent,
+    task_failure,
+    worker_process_shutdown,
+    worker_ready,
+    worker_shutting_down,
+)
 
 from quant_terminal_api.db.engine import dispose_cached_engines
 from quant_terminal_api.repositories.runtime import RuntimeRepository
@@ -80,3 +86,32 @@ def _on_worker_shutdown(sender: object, **_: object) -> None:
 @worker_process_shutdown.connect
 def _on_worker_process_shutdown(**_: object) -> None:
     dispose_cached_engines()
+
+
+@task_failure.connect
+def _on_task_failure(
+    sender: object | None = None,
+    exception: BaseException | None = None,
+    args: tuple[object, ...] | None = None,
+    **_: object,
+) -> None:
+    if getattr(sender, "name", None) != "quant_terminal_worker.run_job":
+        return
+    if not args or not args[0]:
+        return
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        return
+    error_type = exception.__class__.__name__ if exception is not None else "TaskFailure"
+    message = str(exception) if exception is not None else "Celery task failed outside job handler"
+    try:
+        RuntimeRepository(database_url).fail_job(
+            str(args[0]),
+            error={
+                "type": error_type,
+                "message": message[:1000],
+                "reason": "celery_task_failure",
+            },
+        )
+    except Exception:
+        pass

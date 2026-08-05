@@ -14,6 +14,14 @@ from quant_terminal_worker.ingestion.raw_candle_fill import _read_dataset_rows, 
 
 TIMEFRAMES = ("5m", "2h", "8h", "12h", "1d")
 EMA_PERIODS = (36, 43, 144, 169, 576, 676)
+SATY_ATR_LENGTH = 14
+SATY_EMA_PERIODS = (8, 21, 34)
+SATY_LEVEL_MULTIPLIERS = (0.382, 0.5, 0.618, 0.786, 1.0, 1.236, 1.382, 1.5, 1.618, 1.786, 2.0, 2.236, 2.382, 2.5, 2.618, 2.786, 3.0)
+SATY_LEVEL_COLUMNS = tuple(
+    column
+    for multiplier in SATY_LEVEL_MULTIPLIERS
+    for column in (f"lower_{int(round(multiplier * 1000)):04d}", f"upper_{int(round(multiplier * 1000)):04d}")
+)
 FEATURE_METADATA_COLUMNS = (
     "available_at",
     "complete",
@@ -28,6 +36,7 @@ FEATURE_LOOKBACK_BARS = {
     "ema_vegas_structure": 2,
     "bollinger": 20,
     "regime_momentum": 49,
+    "saty_atr_levels": SATY_ATR_LENGTH * 288,
 }
 
 
@@ -84,6 +93,32 @@ FEATURE_FAMILIES: dict[str, FeatureFamily] = {
         label="Regime / Momentum",
         columns=("return_pct_12", "return_pct_48", "range_position_pct_48", "trend_efficiency_48"),
     ),
+    "saty_atr_levels": FeatureFamily(
+        key="saty_atr_levels",
+        data_type="feature_saty_atr_levels",
+        label="Saty ATR Levels",
+        columns=(
+            "anchor_timeframe",
+            "period_open_ts",
+            "period_close_ts",
+            "period_complete",
+            "previous_period_open_ts",
+            "previous_period_close_ts",
+            "previous_period_close",
+            "atr_14",
+            "current_period_high",
+            "current_period_low",
+            "current_period_range",
+            "current_range_pct_of_atr",
+            "lower_trigger",
+            "upper_trigger",
+            *SATY_LEVEL_COLUMNS,
+            "ema_8",
+            "ema_21",
+            "ema_34",
+            "ribbon_state",
+        ),
+    ),
 }
 
 
@@ -106,6 +141,7 @@ def enrich_feature_family_datasets(
 ) -> dict[str, Any]:
     asset = asset.upper()
     family_spec = _feature_family(family)
+    eligible_timeframes = _feature_timeframes(family_spec, timeframes)
     start = _coerce_date(start_date)
     source_refs = [
         ref
@@ -113,7 +149,7 @@ def enrich_feature_family_datasets(
         if ref.get("asset") == asset
         and ref.get("data_type") == "candles"
         and ref.get("data_origin") == "derived"
-        and ref.get("timeframe") in timeframes
+        and ref.get("timeframe") in eligible_timeframes
     ]
     enriched: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -202,6 +238,8 @@ def build_feature_rows(
     timeframe: str | None = None,
 ) -> list[dict[str, Any]]:
     family_spec = _feature_family(family)
+    if family_spec.key == "saty_atr_levels":
+        return _build_saty_atr_level_rows(rows, timeframe=timeframe)
     sorted_rows = sorted(rows, key=lambda row: _coerce_datetime(row["timestamp"]))
     enriched: list[dict[str, Any]] = []
     true_ranges: list[float] = []
@@ -323,6 +361,144 @@ def _family_values(
     if family == "regime_momentum":
         return _regime_values(rows=rows, index=index)
     raise ValueError(f"Unsupported feature family: {family}")
+
+
+def _build_saty_atr_level_rows(
+    rows: list[dict[str, Any]],
+    *,
+    timeframe: str | None,
+) -> list[dict[str, Any]]:
+    if timeframe not in ("5m", None):
+        raise ValueError("saty_atr_levels is defined for 5m source candles only")
+    sorted_rows = sorted(rows, key=lambda row: _coerce_datetime(row["timestamp"]))
+    if not sorted_rows:
+        return []
+
+    daily_rows, day_to_index, day_first_source_index = _daily_anchor_rows(sorted_rows)
+    ema_state: dict[int, float | None] = {period: None for period in SATY_EMA_PERIODS}
+    current_day: date | None = None
+    current_high: float | None = None
+    current_low: float | None = None
+    feature_rows: list[dict[str, Any]] = []
+
+    for source_index, row in enumerate(sorted_rows):
+        timestamp = _coerce_datetime(row["timestamp"])
+        day = timestamp.date()
+        high = _float(row["high"])
+        low = _float(row["low"])
+        close = _float(row["close"])
+        if day != current_day:
+            current_day = day
+            current_high = high
+            current_low = low
+        else:
+            current_high = max(current_high if current_high is not None else high, high)
+            current_low = min(current_low if current_low is not None else low, low)
+
+        for period in SATY_EMA_PERIODS:
+            alpha = 2.0 / (period + 1.0)
+            previous_ema = ema_state[period]
+            ema_state[period] = close if previous_ema is None else close * alpha + previous_ema * (1.0 - alpha)
+
+        day_index = day_to_index.get(day)
+        previous_daily = daily_rows[day_index - 1] if day_index is not None and day_index > 0 else None
+        previous_close = previous_daily.get("close") if previous_daily else None
+        atr = previous_daily.get("atr_14") if previous_daily else None
+        current_range = current_high - current_low if current_high is not None and current_low is not None else None
+        source_start_day_index = max(0, (day_index or 0) - SATY_ATR_LENGTH)
+        source_start_index = day_first_source_index.get(daily_rows[source_start_day_index]["day"], 0)
+
+        feature_row: dict[str, Any] = {
+            "timestamp": row["timestamp"],
+            "anchor_timeframe": "1d",
+            "period_open_ts": _to_iso(_day_open(day)),
+            "period_close_ts": _to_iso(_day_open(day) + timedelta(days=1)),
+            "period_complete": timestamp + timedelta(minutes=5) >= _day_open(day) + timedelta(days=1),
+            "previous_period_open_ts": previous_daily.get("period_open_ts") if previous_daily else None,
+            "previous_period_close_ts": previous_daily.get("period_close_ts") if previous_daily else None,
+            "previous_period_close": previous_close,
+            "atr_14": atr,
+            "current_period_high": current_high,
+            "current_period_low": current_low,
+            "current_period_range": current_range,
+            "current_range_pct_of_atr": _safe_pct(current_range, atr),
+            "lower_trigger": previous_close - atr * 0.236 if previous_close is not None and atr is not None else None,
+            "upper_trigger": previous_close + atr * 0.236 if previous_close is not None and atr is not None else None,
+            "ema_8": ema_state[8],
+            "ema_21": ema_state[21],
+            "ema_34": ema_state[34],
+            "ribbon_state": _saty_ribbon_state(close=close, ema_8=ema_state[8], ema_21=ema_state[21], ema_34=ema_state[34]),
+            "available_at": _to_iso(timestamp + timedelta(minutes=5)),
+            "complete": True,
+            "source_window_start_ts": sorted_rows[source_start_index]["timestamp"],
+            "source_window_end_ts": row["timestamp"],
+            "source_row_count": source_index - source_start_index + 1,
+        }
+        for multiplier in SATY_LEVEL_MULTIPLIERS:
+            suffix = _saty_level_suffix(multiplier)
+            feature_row[f"lower_{suffix}"] = previous_close - atr * multiplier if previous_close is not None and atr is not None else None
+            feature_row[f"upper_{suffix}"] = previous_close + atr * multiplier if previous_close is not None and atr is not None else None
+        feature_rows.append(feature_row)
+    return feature_rows
+
+
+def _daily_anchor_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[date, int], dict[date, int]]:
+    daily: list[dict[str, Any]] = []
+    day_to_index: dict[date, int] = {}
+    day_first_source_index: dict[date, int] = {}
+    for source_index, row in enumerate(rows):
+        timestamp = _coerce_datetime(row["timestamp"])
+        day = timestamp.date()
+        if day not in day_to_index:
+            day_to_index[day] = len(daily)
+            day_first_source_index[day] = source_index
+            daily.append(
+                {
+                    "day": day,
+                    "period_open_ts": _to_iso(_day_open(day)),
+                    "period_close_ts": _to_iso(_day_open(day) + timedelta(days=1)),
+                    "open": _float(row["open"]),
+                    "high": _float(row["high"]),
+                    "low": _float(row["low"]),
+                    "close": _float(row["close"]),
+                }
+            )
+            continue
+        item = daily[day_to_index[day]]
+        item["high"] = max(float(item["high"]), _float(row["high"]))
+        item["low"] = min(float(item["low"]), _float(row["low"]))
+        item["close"] = _float(row["close"])
+
+    true_ranges: list[float] = []
+    previous_atr: float | None = None
+    for index, row in enumerate(daily):
+        previous = daily[index - 1] if index > 0 else None
+        true_range = _true_range(row, previous)
+        true_ranges.append(true_range)
+        if index == SATY_ATR_LENGTH - 1:
+            previous_atr = mean(true_ranges[:SATY_ATR_LENGTH])
+        elif index >= SATY_ATR_LENGTH and previous_atr is not None:
+            previous_atr = (previous_atr * (SATY_ATR_LENGTH - 1) + true_range) / SATY_ATR_LENGTH
+        row["atr_14"] = previous_atr
+    return daily, day_to_index, day_first_source_index
+
+
+def _saty_ribbon_state(*, close: float, ema_8: float | None, ema_21: float | None, ema_34: float | None) -> str:
+    if ema_8 is None or ema_21 is None or ema_34 is None:
+        return "unknown"
+    if close >= ema_8 >= ema_21 >= ema_34:
+        return "bullish"
+    if close <= ema_8 <= ema_21 <= ema_34:
+        return "bearish"
+    return "mixed"
+
+
+def _saty_level_suffix(multiplier: float) -> str:
+    return f"{int(round(multiplier * 1000)):04d}"
+
+
+def _day_open(value: date) -> datetime:
+    return datetime(value.year, value.month, value.day, tzinfo=UTC)
 
 
 def _base_candle_values(*, row: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any]:
@@ -488,6 +664,12 @@ def _feature_family_for_ref(ref: dict[str, Any]) -> FeatureFamily:
 
 def _feature_dataset_id(source_registration: dict[str, Any], family: FeatureFamily) -> str:
     return f"{source_registration['asset']}-{family.data_type}-{source_registration['timeframe']}"
+
+
+def _feature_timeframes(family: FeatureFamily, requested: tuple[str, ...]) -> tuple[str, ...]:
+    if family.key == "saty_atr_levels":
+        return tuple(timeframe for timeframe in requested if timeframe == "5m") or ("5m",)
+    return requested
 
 
 def _feature_family(value: str) -> FeatureFamily:

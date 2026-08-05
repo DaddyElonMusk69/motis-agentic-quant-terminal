@@ -95,7 +95,7 @@ def test_required_data_accepts_futures_metrics():
     assert spec.required_data[0]["data_type"] == "futures_metrics"
 
 
-@pytest.mark.parametrize("data_type", ["funding_features", "premium_index"])
+@pytest.mark.parametrize("data_type", ["funding_features", "premium_index", "feature_saty_atr_levels", "technical_indicator_atr"])
 def test_required_data_accepts_new_binance_derived_types(data_type):
     spec = SignalEngineSpec.from_mapping(
         {

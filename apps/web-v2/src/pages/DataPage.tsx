@@ -8,6 +8,7 @@ import {
   fetchJobs,
   fetchMarketDataCatalog,
   isJobResponse,
+  refreshMarketDataAtr,
   refreshMarketDataFeatureFamily,
   refreshMarketDataEma,
   refreshMarketDataDataset,
@@ -35,12 +36,14 @@ type DatasetTypeOption = {
 type RefreshRequest =
   | { kind: "candles"; datasetId: string }
   | { kind: "dataset"; datasetId: string }
+  | { kind: "atr"; asset: string }
   | { kind: "ema"; asset: string }
   | { kind: "feature"; asset: string; family: string };
 
 const FEATURE_CATEGORIES = [
   { dataType: "feature_base_candle", family: "base_candle", label: "Base Candle Features" },
   { dataType: "feature_volatility_range", family: "volatility_range", label: "Volatility / Range" },
+  { dataType: "feature_saty_atr_levels", family: "saty_atr_levels", label: "Saty ATR Levels" },
   { dataType: "feature_volume", family: "volume", label: "Volume" },
   { dataType: "feature_ema_vegas_structure", family: "ema_vegas_structure", label: "EMA / Vegas Structure" },
   { dataType: "feature_bollinger", family: "bollinger", label: "Bollinger Context" },
@@ -52,12 +55,27 @@ const DATA_TYPE_PRIORITY = new Map<string, number>([
   ["candles", 0],
   ["open_interest", 1],
   ["futures_metrics", 2],
-  ["funding", 3],
-  ["ema", 4]
+  ["premium_index", 3],
+  ["funding", 4],
+  ["ema", 5],
+  ["technical_indicator_atr", 6],
+  ["feature_saty_atr_levels", 7]
 ]);
+
+const REFRESHABLE_RAW_DATA_TYPES = new Set(["candles", "open_interest", "funding", "futures_metrics", "premium_index"]);
 
 function featureCategoryForDataType(dataType: string) {
   return FEATURE_CATEGORIES.find((category) => category.dataType === dataType);
+}
+
+function dataTypeLabel(dataType: string): string {
+  if (dataType === "candles") {
+    return "Candle data";
+  }
+  if (dataType === "technical_indicator_atr") {
+    return "ATR";
+  }
+  return featureCategoryForDataType(dataType)?.label ?? titleize(dataType);
 }
 
 function getSelectedAsset(catalog: CatalogResponse | undefined, searchParams: URLSearchParams): string {
@@ -85,9 +103,19 @@ function getDataTypeOptions(catalog: CatalogResponse | undefined, selectedAsset:
   for (const dataset of datasets) {
     counts.set(dataset.data_type, (counts.get(dataset.data_type) ?? 0) + 1);
   }
+  const hasDerivedCandles = datasets.some((dataset) => dataset.data_type === "candles" && dataset.data_origin === "derived");
+  const hasRaw5mCandles = datasets.some((dataset) => dataset.data_type === "candles" && dataset.data_origin === "raw" && dataset.timeframe === "5m");
+  if (hasDerivedCandles) {
+    for (const category of FEATURE_CATEGORIES) {
+      counts.set(category.dataType, counts.get(category.dataType) ?? 0);
+    }
+  }
+  if (hasRaw5mCandles || counts.has("technical_indicator_atr")) {
+    counts.set("technical_indicator_atr", counts.get("technical_indicator_atr") ?? 0);
+  }
   const options = Array.from(counts.entries()).map(([dataType, count]) => ({
       dataType,
-      label: dataType === "candles" ? "Candle data" : featureCategoryForDataType(dataType)?.label ?? titleize(dataType),
+      label: dataTypeLabel(dataType),
       count
     }));
   const derivedCandles = datasets.filter((dataset) => dataset.data_type === "candles" && dataset.data_origin === "derived");
@@ -150,6 +178,9 @@ function getPrimaryDatasetForType(datasets: Dataset[], dataType?: string): Datas
 }
 
 function getRefreshTargetForType(datasets: Dataset[], dataType: string, selectedAsset: string): RefreshRequest | undefined {
+  if (dataType === "technical_indicator_atr") {
+    return { kind: "atr", asset: selectedAsset };
+  }
   if (dataType === "ema" && datasets.length) {
     return { kind: "ema", asset: selectedAsset };
   }
@@ -157,7 +188,7 @@ function getRefreshTargetForType(datasets: Dataset[], dataType: string, selected
   if (featureCategory) {
     return { kind: "feature", asset: selectedAsset, family: featureCategory.family };
   }
-  if (dataType !== "candles" && dataType !== "open_interest" && dataType !== "funding" && dataType !== "futures_metrics") {
+  if (!REFRESHABLE_RAW_DATA_TYPES.has(dataType)) {
     return undefined;
   }
   const preferredTimeframe = dataType === "funding" ? "8h" : "5m";
@@ -166,7 +197,7 @@ function getRefreshTargetForType(datasets: Dataset[], dataType: string, selected
 }
 
 function datasetStatusTone(dataset: Dataset): "pass" | "warn" | "info" | "idle" {
-  if (dataset.quality_status === "updated" || dataset.quality_status === "ingested" || dataset.quality_status === "rebuilt" || dataset.quality_status === "ema_enriched" || dataset.quality_status === "derived") {
+  if (dataset.quality_status === "updated" || dataset.quality_status === "ingested" || dataset.quality_status === "rebuilt" || dataset.quality_status === "ema_enriched" || dataset.quality_status === "atr_enriched" || dataset.quality_status === "derived") {
     return "pass";
   }
   if (dataset.quality_status === "blocked" || dataset.quality_status === "failed") {
@@ -189,6 +220,9 @@ function refreshResultText(result: RefreshPlan | undefined): string {
     return `Added ${formatNumber(result.rows_added ?? 0)} rows, rebuilt ${formatNumber(result.derived_rebuilt?.length ?? 0)} derived datasets.`;
   }
   if (result.status === "enriched") {
+    if (result.data_type === "technical_indicator_atr") {
+      return `Enriched ${formatNumber(result.dataset_count ?? result.datasets?.length ?? 0)} ATR datasets.`;
+    }
     if (result.feature_count !== undefined) {
       return `Enriched ${formatNumber(result.feature_count ?? result.features?.length ?? 0)} feature datasets.`;
     }
@@ -231,6 +265,9 @@ function refreshRequestKey(request: RefreshRequest | undefined): string | undefi
   }
   if (request.kind === "ema") {
     return `ema:${request.asset}`;
+  }
+  if (request.kind === "atr") {
+    return `atr:${request.asset}`;
   }
   if (request.kind === "feature") {
     return `feature:${request.asset}:${request.family}`;
@@ -277,6 +314,8 @@ export function DataPage() {
   const activeScopeKey = refreshTarget
     ? (refreshTarget.kind === "ema"
       ? `asset:${refreshTarget.asset}:ema`
+      : refreshTarget.kind === "atr"
+        ? `asset:${refreshTarget.asset}:atr`
       : refreshTarget.kind === "feature"
         ? `asset:${refreshTarget.asset}:feature:${refreshTarget.family}`
         : `dataset:${refreshTarget.datasetId}`)
@@ -289,6 +328,9 @@ export function DataPage() {
 
   const refreshMutation = useMutation({
     mutationFn: (request: RefreshRequest) => {
+      if (request.kind === "atr") {
+        return refreshMarketDataAtr(request.asset);
+      }
       if (request.kind === "ema") {
         return refreshMarketDataEma(request.asset);
       }
@@ -303,7 +345,9 @@ export function DataPage() {
         return;
       }
       void queryClient.invalidateQueries({ queryKey: ["market-data-catalog"] });
-      void queryClient.invalidateQueries({ queryKey: ["market-data-rows", result.dataset_id] });
+      if (result.dataset_id) {
+        void queryClient.invalidateQueries({ queryKey: ["market-data-rows", result.dataset_id] });
+      }
     }
   });
 
@@ -312,6 +356,8 @@ export function DataPage() {
   const selectedRefreshResult = refreshResult && (
     selectedDataType === "ema"
       ? refreshResult.asset === selectedAsset || refreshResult.status === "enriched"
+      : selectedDataType === "technical_indicator_atr"
+        ? refreshResult.asset === selectedAsset && refreshResult.data_type === "technical_indicator_atr"
       : featureCategoryForDataType(selectedDataType)
         ? refreshResult.asset === selectedAsset && refreshResult.family === featureCategoryForDataType(selectedDataType)?.family
         : refreshResult.dataset_id === refreshTargetKey
@@ -412,7 +458,7 @@ export function DataPage() {
 
             <TerminalPanel
               actions={
-                selectedDataset ? (
+                selectedAsset ? (
                   <button
                     className="button button--primary"
                     disabled={!canRefreshType || isRefreshingType}
@@ -431,13 +477,19 @@ export function DataPage() {
                 <div className="progress-card">
                   <div className="progress-card__header">
                     <strong>Updating {selectedTypeLabel.toLowerCase()}</strong>
-                    <span>{refreshJob ? `${refreshJob.status} · ${refreshJob.current_step ?? "waiting"}` : selectedDataType === "ema" ? "Derived candle scan + EMA enrichment" : featureCategoryForDataType(selectedDataType) ? "Derived candle scan + feature enrichment" : selectedDataType === "funding" ? "Binance archive/live fill + Parquet persist" : selectedDataType === "futures_metrics" ? "Binance five-endpoint live fill + Parquet persist" : selectedDataType === "open_interest" ? "Binance metrics fill + Parquet persist + derived rebuild" : "OKX download + Parquet persist + derived rebuild"}</span>
+                    <span>{refreshJob ? `${refreshJob.status} · ${refreshJob.current_step ?? "waiting"}` : selectedDataType === "technical_indicator_atr" ? "Raw 5m candle scan + Wilder ATR enrichment" : selectedDataType === "ema" ? "Derived candle scan + EMA enrichment" : featureCategoryForDataType(selectedDataType) ? "Derived candle scan + feature enrichment" : selectedDataType === "funding" ? "Binance archive/live fill + Parquet persist" : selectedDataType === "premium_index" ? "Binance premium index live fill + Parquet persist" : selectedDataType === "futures_metrics" ? "Binance five-endpoint live fill + Parquet persist" : selectedDataType === "open_interest" ? "Binance metrics fill + Parquet persist + derived rebuild" : "OKX download + Parquet persist + derived rebuild"}</span>
                   </div>
                   <div className="progress-rail" aria-label="Data fill in progress">
                     <span />
                   </div>
                   <div className="progress-steps">
-                    {selectedDataType === "ema" ? (
+                    {selectedDataType === "technical_indicator_atr" ? (
+                      <>
+                        <span>Read raw 5m candles</span>
+                        <span>Build closed HTF buckets</span>
+                        <span>Persist Wilder ATR Parquet</span>
+                      </>
+                    ) : selectedDataType === "ema" ? (
                       <>
                         <span>Read derived candles</span>
                         <span>Compute recursive EMA</span>
@@ -460,6 +512,12 @@ export function DataPage() {
                         <span>Fetch raw OI rows</span>
                         <span>Persist canonical Parquet</span>
                         <span>Rebuild derived OI</span>
+                      </>
+                    ) : selectedDataType === "premium_index" ? (
+                      <>
+                        <span>Fetch premium index klines</span>
+                        <span>Align completed 5m intervals</span>
+                        <span>Persist canonical Parquet</span>
                       </>
                     ) : selectedDataType === "futures_metrics" ? (
                       <>
@@ -542,7 +600,7 @@ export function DataPage() {
               </TerminalPanel>
             </div>
 
-            <TerminalPanel title={selectedDataType === "ema" ? "EMA Preview" : featureCategoryForDataType(selectedDataType) ? "Feature Preview" : selectedDataType === "funding" ? "Funding Preview" : selectedDataType === "futures_metrics" ? "Futures Metrics Preview" : selectedDataType === "open_interest" ? "Open Interest Preview" : "Candle Preview"}>
+            <TerminalPanel title={selectedDataType === "technical_indicator_atr" ? "ATR Preview" : selectedDataType === "ema" ? "EMA Preview" : featureCategoryForDataType(selectedDataType) ? "Feature Preview" : selectedDataType === "funding" ? "Funding Preview" : selectedDataType === "futures_metrics" ? "Futures Metrics Preview" : selectedDataType === "open_interest" ? "Open Interest Preview" : "Candle Preview"}>
               {rowPreviewQuery.error ? <div className="state-line state-line--error">{rowPreviewQuery.error.message}</div> : null}
               {selectedDataset ? (
                 <DataTable
@@ -566,6 +624,18 @@ export function DataPage() {
 }
 
 function previewColumns(selectedDataType: string, rows: Array<Record<string, unknown>>) {
+  if (selectedDataType === "technical_indicator_atr") {
+    return [
+      { key: "timestamp", header: "Timestamp", render: (row: Record<string, unknown>) => <span className="mono">{formatTimestamp(String(row.timestamp ?? row.ts ?? ""))}</span> },
+      { key: "timeframe", header: "TF", render: (row: Record<string, unknown>) => <span className="mono">{String(row.timeframe ?? "")}</span> },
+      { key: "period", header: "Period", align: "right" as const, render: (row: Record<string, unknown>) => formatCompactValue(row.period) },
+      { key: "true_range", header: "TR", align: "right" as const, render: (row: Record<string, unknown>) => formatCompactValue(row.true_range) },
+      { key: "atr", header: "ATR", align: "right" as const, render: (row: Record<string, unknown>) => formatCompactValue(row.atr) },
+      { key: "atr_pct", header: "ATR %", align: "right" as const, render: (row: Record<string, unknown>) => formatCompactValue(row.atr_pct) },
+      { key: "available_at", header: "Available", render: (row: Record<string, unknown>) => <span className="mono">{formatTimestamp(String(row.available_at ?? ""))}</span> },
+      { key: "warmup_complete", header: "Warmup", align: "right" as const, render: (row: Record<string, unknown>) => <StatusBadge tone={row.warmup_complete ? "pass" : "idle"}>{row.warmup_complete ? "Ready" : "Warmup"}</StatusBadge> }
+    ];
+  }
   if (featureCategoryForDataType(selectedDataType)) {
     const sample = rows[0] ?? {};
     const featureKeys = Object.keys(sample).filter((key) => key !== "timestamp" && key !== "ts").slice(0, 8);

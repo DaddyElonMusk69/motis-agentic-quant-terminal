@@ -116,6 +116,39 @@ def test_market_data_reader_reports_corrupt_parquet_shard(tmp_path: Path):
         reader.get_candles(asset="bnb", timeframe="5m", origin="raw")
 
 
+def test_market_data_reader_prunes_month_partitions_before_loading(tmp_path: Path):
+    storage_uri = tmp_path / ".data" / "market-data" / "origin=raw" / "source=okx" / "type=candles" / "asset=BTC" / "timeframe=5m"
+    old_path = storage_uri / "year=2026" / "month=05" / "data.parquet"
+    old_path.parent.mkdir(parents=True)
+    old_path.write_bytes(b"old shard should not be loaded")
+    month_path = storage_uri / "year=2026" / "month=06" / "data.parquet"
+    month_path.parent.mkdir(parents=True)
+    pq.write_table(
+        pa.Table.from_pylist([_row("2026-06-01T00:05:00Z", close=105, confirm=1)]),
+        month_path,
+    )
+    reader = MarketDataReader(
+        repository=FakeRepository(
+            {
+                "dataset_id": "btc-raw-5m",
+                "storage_backend": "parquet",
+                "storage_uri": str(storage_uri),
+            }
+        ),
+        workspace_root=tmp_path,
+    )
+
+    candles = reader.get_candles(
+        asset="btc",
+        timeframe="5m",
+        origin="raw",
+        start="2026-06-01T00:00:00Z",
+        end="2026-06-01T00:10:00Z",
+    )
+
+    assert [str(candle.close) for candle in candles] == ["105"]
+
+
 def _row(timestamp: str, *, close: int, confirm: int) -> dict[str, object]:
     return {
         "timestamp": timestamp,

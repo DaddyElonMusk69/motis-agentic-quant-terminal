@@ -550,6 +550,94 @@ def test_extend_signal_pool_persists_engine_limited_scan_coverage(
     assert refreshed["coverage_end_ts"].isoformat() == "2026-05-15T00:00:00+00:00"
 
 
+def test_extend_signal_pool_rescans_configured_overlap_when_target_already_covered(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = _make_workspace(tmp_path)
+    repository = _repository_with_signal_pool(
+        root,
+        scan_coverage={
+            "start_ts": "2026-05-10T00:00:00Z",
+            "end_ts": "2026-05-20T00:10:00Z",
+            "source": "parquet_market_data",
+        },
+        parameters={
+            "dedupe_window_minutes": 0,
+            "parquet_extension_overlap_minutes": 10,
+        },
+    )
+    _register_default_refs(
+        repository,
+        root=root,
+        asset="AAVE",
+        timestamps=[
+            "2026-05-10T00:00:00Z",
+            "2026-05-20T00:00:00Z",
+            "2026-05-20T00:05:00Z",
+            "2026-05-20T00:10:00Z",
+        ],
+    )
+    calls = []
+
+    def fake_resolve_signal_engine(*args, **kwargs):
+        class FakeSpec:
+            configuration_schema = {}
+            required_data = [
+                {"data_type": "candles", "origin": "raw", "timeframe": "5m"},
+                {"data_type": "futures_metrics", "origin": "raw", "timeframe": "5m"},
+            ]
+
+        class FakeResolved:
+            spec = FakeSpec()
+
+            @staticmethod
+            def generate_training_signals(context):
+                calls.append(context)
+
+                class FakeOutput:
+                    packets = [
+                        {
+                            "schema_version": "signal_packet.v2",
+                            "asset": "AAVE",
+                            "timestamp": "2026-05-20T00:05:00Z",
+                        }
+                    ]
+                    result = TrainingSignalGenerationResult(
+                        status="appended",
+                        generated_packet_count=1,
+                        appended_packet_count=0,
+                        raw_candle_end_ts="2026-05-20T00:10:00Z",
+                        scan_coverage_end_ts="2026-05-20T00:10:00Z",
+                    )
+
+                return FakeOutput()
+
+        return FakeResolved()
+
+    monkeypatch.setattr(
+        "quant_terminal_worker.ingestion.signal_pool_extension.resolve_signal_engine",
+        fake_resolve_signal_engine,
+    )
+
+    result = extend_signal_pool_from_local_candles(
+        workspace_root=root,
+        repository=repository,
+        signal_engine_id="vegas_ema",
+        asset="AAVE",
+        target_end="2026-05-20T00:10:00Z",
+    )
+
+    assert result["status"] == "extended"
+    assert calls[0].start.isoformat() == "2026-05-20T00:05:00+00:00"
+    assert calls[0].end.isoformat() == "2026-05-20T00:10:00+00:00"
+    assert result["appended_packet_count"] == 1
+    assert [_iso_z(signal["timestamp"]) for signal in repository.list_signals(signal_set_key=result["signal_set_key"])] == [
+        "2026-05-10T00:00:00+00:00",
+        "2026-05-20T00:05:00+00:00",
+    ]
+
+
 def test_extend_signal_pool_resumes_after_existing_parquet_scan_coverage(
     tmp_path: Path,
     monkeypatch,
@@ -599,6 +687,7 @@ def _repository_with_signal_pool(
     root: Path,
     *,
     scan_coverage: dict[str, str] | None = None,
+    parameters: dict[str, object] | None = None,
 ) -> RuntimeRepository:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     metadata.create_all(engine)
@@ -647,6 +736,7 @@ def _repository_with_signal_pool(
                 "parameters": {
                     "vote_threshold": 2,
                     "dedupe_window_minutes": 120,
+                    **(parameters or {}),
                 },
                 **({"scan_coverage": scan_coverage} if scan_coverage else {}),
             },

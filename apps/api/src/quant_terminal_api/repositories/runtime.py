@@ -123,16 +123,27 @@ class RuntimeRepository:
         with self.engine.connect() as connection:
             return [_normalize_job_row(dict(row)) for row in connection.execute(statement).mappings()]
 
-    def cancel_job(self, job_id: str) -> dict[str, Any] | None:
+    def cancel_job(self, job_id: str, *, running_stale_after_seconds: int = 60) -> dict[str, Any] | None:
         now = datetime.now(UTC)
         with self.engine.begin() as connection:
             row = connection.execute(select(jobs).where(jobs.c.job_id == job_id)).mappings().first()
-            if not row or row["status"] != "queued":
+            if not row:
+                return None
+            stale_running = (
+                row["status"] == "running"
+                and row["heartbeat_at"] is not None
+                and _coerce_datetime(row["heartbeat_at"]) < now - timedelta(seconds=running_stale_after_seconds)
+            )
+            if row["status"] == "queued":
+                reason = "cancelled"
+            elif stale_running:
+                reason = "stale_running_cancelled"
+            else:
                 return None
             connection.execute(
                 jobs.update()
                 .where(jobs.c.job_id == job_id)
-                .values(status="cancelled", finished_at=now, error={"reason": "cancelled"})
+                .values(status="cancelled", finished_at=now, lock_expires_at=None, error={"reason": reason})
             )
             updated = connection.execute(select(jobs).where(jobs.c.job_id == job_id)).mappings().one()
             return _normalize_job_row(dict(updated))
@@ -1677,6 +1688,7 @@ class RuntimeRepository:
             "last_wake_id",
             "next_wake_at",
             "last_lifecycle_error",
+            "risk_limits",
             "archived",
             "archived_at",
         }
@@ -1686,6 +1698,8 @@ class RuntimeRepository:
                 updates[key] = _coerce_datetime(updates[key])
         if "last_lifecycle_error" in updates:
             updates["last_lifecycle_error"] = _json_safe(updates["last_lifecycle_error"] or {})
+        if "risk_limits" in updates:
+            updates["risk_limits"] = _json_safe(updates["risk_limits"] or {})
         if updates:
             statement = deployment_routes.update().where(deployment_routes.c.route_id == route_id).values(**updates)
             with self.engine.begin() as connection:

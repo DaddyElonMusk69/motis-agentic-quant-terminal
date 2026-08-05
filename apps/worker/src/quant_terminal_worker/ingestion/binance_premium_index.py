@@ -13,6 +13,8 @@ import time
 from typing import Any, Iterable, Sequence
 import zipfile
 
+import pyarrow.parquet as pq
+
 from quant_terminal_sdk.parquet_store import read_candles
 from quant_terminal_worker.ingestion.binance_open_interest import (
     _coerce_datetime,
@@ -225,6 +227,7 @@ def build_live_premium_index_rows(
     target: datetime,
     as_of: datetime,
     limit: int = 1000,
+    latest_window: bool = False,
 ) -> list[dict[str, Any]]:
     start = _floor_to_5m_boundary(_coerce_datetime(from_ts))
     end = _floor_to_5m_boundary(_coerce_datetime(target))
@@ -232,13 +235,19 @@ def build_live_premium_index_rows(
     if start > end:
         return []
 
-    payload = adapter.premium_index_klines(
-        symbol=symbol,
-        interval=TIMEFRAME,
-        limit=limit,
-        start_time_ms=_to_epoch_ms(start),
-        end_time_ms=_to_epoch_ms(end + BASE_INTERVAL) - 1,
-    )
+    request_kwargs: dict[str, Any] = {
+        "symbol": symbol,
+        "interval": TIMEFRAME,
+        "limit": limit,
+    }
+    if not latest_window:
+        request_kwargs.update(
+            {
+                "start_time_ms": _to_epoch_ms(start),
+                "end_time_ms": _to_epoch_ms(end + BASE_INTERVAL) - 1,
+            }
+        )
+    payload = adapter.premium_index_klines(**request_kwargs)
     by_timestamp: dict[datetime, dict[str, Any]] = {}
     for item in payload:
         row = normalize_live_premium_index_row(item, symbol=symbol)
@@ -265,6 +274,8 @@ def fill_raw_premium_index_dataset(
     adapter: Any,
     as_of: datetime | None = None,
     limit: int = 1000,
+    archive_source_dir: Path | None = None,
+    archive_downloader: Any | None = None,
 ) -> dict[str, Any]:
     if (
         registration.get("data_type") != DATA_TYPE
@@ -290,23 +301,54 @@ def fill_raw_premium_index_dataset(
             "row_count": int(registration["row_count"]),
         }
 
+    symbol = str(registration["instrument"]).upper()
     fetched: list[dict[str, Any]] = []
     page_start = from_ts
-    while page_start <= target:
-        page_target = min(target, page_start + BASE_INTERVAL * (limit - 1))
-        page_rows = build_live_premium_index_rows(
+    archive_row_count = 0
+    rolling_window = BASE_INTERVAL * (limit - 1)
+    if target - page_start > rolling_window:
+        source_dir = archive_source_dir or (
+            Path(".data/downloads/binance/premium_index") / symbol
+        )
+        # Daily archives arrive with a delay. Leave the latest two UTC dates to
+        # the rolling endpoint so an unpublished archive cannot block refresh.
+        archive_end_date = (now - timedelta(days=2)).date()
+        if archive_end_date >= page_start.date():
+            downloader = archive_downloader or download_binance_premium_index_archives
+            downloader(
+                source_dir=source_dir,
+                symbol=symbol,
+                start_date=page_start.date(),
+                end_date=archive_end_date,
+            )
+            archive_candidates = _read_archive_rows(
+                source_dir=source_dir,
+                symbol=symbol,
+                min_timestamp=page_start,
+                max_timestamp=target,
+            )
+            archive_rows = _contiguous_rows_from(
+                rows=archive_candidates,
+                start=page_start,
+            )
+            fetched.extend(archive_rows)
+            archive_row_count = len(archive_rows)
+            if archive_rows:
+                page_start = _coerce_datetime(archive_rows[-1]["timestamp"]) + BASE_INTERVAL
+
+    live_row_count = 0
+    if page_start <= target:
+        live_rows = build_live_premium_index_rows(
             adapter=adapter,
-            symbol=str(registration["instrument"]),
+            symbol=symbol,
             from_ts=page_start,
-            target=page_target,
+            target=target,
             as_of=now,
             limit=limit,
+            latest_window=True,
         )
-        fetched.extend(page_rows)
-        expected = int((page_target - page_start) / BASE_INTERVAL) + 1
-        if len(page_rows) != expected:
-            break
-        page_start = page_target + BASE_INTERVAL
+        fetched.extend(live_rows)
+        live_row_count = len(live_rows)
 
     if not fetched:
         return {
@@ -324,14 +366,22 @@ def fill_raw_premium_index_dataset(
 
     storage_uri = Path(registration["storage_uri"])
     _append_dataset_rows(storage_uri, fetched)
+    stored_row_count = _dataset_row_count(storage_uri)
+    previous_row_count = int(registration["row_count"])
+    if stored_row_count < previous_row_count:
+        raise RuntimeError(
+            f"stored premium-index row count regressed for {registration['dataset_id']}: "
+            f"{stored_row_count} < {previous_row_count}"
+        )
+    registered_rows_added = stored_row_count - previous_row_count
     quality = _increment_quality_summary(
         registration.get("schema_descriptor"),
-        new_rows=fetched,
+        new_rows=fetched[-registered_rows_added:] if registered_rows_added else [],
     )
     updated = {
         **registration,
         "end_ts": fetched[-1]["timestamp"],
-        "row_count": int(registration["row_count"]) + len(fetched),
+        "row_count": stored_row_count,
         "quality_status": (
             "source_gaps"
             if quality["missing_interval_count"] or quality["incomplete_row_count"]
@@ -343,25 +393,49 @@ def fill_raw_premium_index_dataset(
         },
     }
     repository.update_ref(updated)
-    derived_rebuilt = _rebuild_derived_refs(
+    derived_rebuilt = _refresh_derived_refs_incrementally(
         raw_registration=updated,
-        raw_rows=_dedupe_sort_rows(
-            [*_read_dataset_rows(storage_uri), *fetched]
-        ),
+        raw_storage_uri=storage_uri,
+        first_changed_ts=_coerce_datetime(fetched[0]["timestamp"]),
+        last_changed_ts=_coerce_datetime(fetched[-1]["timestamp"]),
         repository=repository,
     )
-    return {
+    final_end_ts = _coerce_datetime(fetched[-1]["timestamp"])
+    status = "filled" if final_end_ts >= target else "partial_filled"
+    result = {
         "dataset_id": registration["dataset_id"],
-        "status": "filled",
-        "rows_added": len(fetched),
+        "status": status,
+        "rows_added": registered_rows_added,
         "start_ts": _to_iso(_coerce_datetime(registration["start_ts"])),
         "end_ts": fetched[-1]["timestamp"],
-        "row_count": int(registration["row_count"]) + len(fetched),
+        "row_count": stored_row_count,
         "from_ts": _to_iso(from_ts),
         "to_ts": _to_iso(target),
-        "source": "binance_cli",
+        "source": "binance_archive_and_cli" if archive_row_count else "binance_cli",
+        "archive_rows_added": archive_row_count,
+        "live_rows_added": live_row_count,
         "derived_rebuilt": derived_rebuilt,
     }
+    if status == "partial_filled":
+        result["reason"] = "source_returned_partial_contiguous_rows"
+        result["next_from_ts"] = _to_iso(final_end_ts + BASE_INTERVAL)
+    return result
+
+
+def _contiguous_rows_from(*, rows: list[dict[str, Any]], start: datetime) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    current = _floor_to_5m_boundary(_coerce_datetime(start))
+    rows_by_timestamp = {
+        _coerce_datetime(row["timestamp"]): row
+        for row in _dedupe_sort_rows(rows)
+    }
+    while True:
+        row = rows_by_timestamp.get(current)
+        if row is None:
+            break
+        output.append(row)
+        current += BASE_INTERVAL
+    return output
 
 
 def repair_premium_index_gaps(
@@ -625,10 +699,25 @@ def _valid_archive(path: Path) -> bool:
         return False
 
 
-def _read_archive_rows(*, source_dir: Path, symbol: str) -> list[dict[str, Any]]:
+def _read_archive_rows(
+    *,
+    source_dir: Path,
+    symbol: str,
+    min_timestamp: datetime | None = None,
+    max_timestamp: datetime | None = None,
+) -> list[dict[str, Any]]:
+    minimum = _coerce_datetime(min_timestamp) if min_timestamp is not None else None
+    maximum = _coerce_datetime(max_timestamp) if max_timestamp is not None else None
     rows: list[dict[str, Any]] = []
     pattern = f"{symbol.upper()}-{TIMEFRAME}-*.zip"
     for path in sorted(source_dir.rglob(pattern)):
+        archive_range = _premium_archive_range(path, symbol=symbol)
+        if archive_range is not None:
+            archive_start, archive_end = archive_range
+            if minimum is not None and archive_end < minimum.date():
+                continue
+            if maximum is not None and archive_start > maximum.date():
+                continue
         with zipfile.ZipFile(path) as archive:
             csv_name = next(
                 (name for name in archive.namelist() if name.endswith(".csv")), None
@@ -641,20 +730,61 @@ def _read_archive_rows(*, source_dir: Path, symbol: str) -> list[dict[str, Any]]
                 if first is None:
                     continue
                 if first and first[0] != "open_time":
-                    rows.append(
-                        normalize_archive_premium_index_row(
-                            dict(zip(ARCHIVE_COLUMNS, first)),
-                            symbol=symbol,
-                        )
+                    _append_archive_row_in_range(
+                        rows,
+                        values=first,
+                        symbol=symbol,
+                        minimum=minimum,
+                        maximum=maximum,
                     )
                 for values in reader:
-                    rows.append(
-                        normalize_archive_premium_index_row(
-                            dict(zip(ARCHIVE_COLUMNS, values)),
-                            symbol=symbol,
-                        )
+                    _append_archive_row_in_range(
+                        rows,
+                        values=values,
+                        symbol=symbol,
+                        minimum=minimum,
+                        maximum=maximum,
                     )
     return _dedupe_sort_rows(rows)
+
+
+def _append_archive_row_in_range(
+    rows: list[dict[str, Any]],
+    *,
+    values: Sequence[Any],
+    symbol: str,
+    minimum: datetime | None,
+    maximum: datetime | None,
+) -> None:
+    row = normalize_archive_premium_index_row(
+        dict(zip(ARCHIVE_COLUMNS, values)),
+        symbol=symbol,
+    )
+    timestamp = _coerce_datetime(row["timestamp"])
+    if minimum is not None and timestamp < minimum:
+        return
+    if maximum is not None and timestamp > maximum:
+        return
+    rows.append(row)
+
+
+def _premium_archive_range(path: Path, *, symbol: str) -> tuple[date, date] | None:
+    prefix = f"{symbol.upper()}-{TIMEFRAME}-"
+    name = path.name
+    if not name.startswith(prefix) or not name.endswith(".zip"):
+        return None
+    period = name[len(prefix) : -4]
+    try:
+        if len(period) == 7:
+            start = date.fromisoformat(f"{period}-01")
+            return (
+                start,
+                date(start.year, start.month, calendar.monthrange(start.year, start.month)[1]),
+            )
+        day = date.fromisoformat(period)
+        return day, day
+    except ValueError:
+        return None
 
 
 def _registration(
@@ -819,6 +949,76 @@ def _rebuild_derived_refs(
     return results
 
 
+def _refresh_derived_refs_incrementally(
+    *,
+    raw_registration: dict[str, Any],
+    raw_storage_uri: Path,
+    first_changed_ts: datetime,
+    last_changed_ts: datetime,
+    repository: Any,
+) -> list[dict[str, Any]]:
+    list_refs = getattr(repository, "list_derived_refs_for_raw", None)
+    if not callable(list_refs):
+        return []
+    registrations = [
+        registration
+        for registration in list_refs(raw_registration)
+        if registration.get("data_type") == DATA_TYPE
+    ]
+    if not registrations:
+        return []
+
+    starts = {
+        str(registration["timeframe"]): _floor_to_timeframe_boundary(
+            first_changed_ts,
+            str(registration["timeframe"]),
+        )
+        for registration in registrations
+    }
+    raw_rows = _read_dataset_rows_between(
+        raw_storage_uri,
+        start=min(starts.values()),
+        end=last_changed_ts,
+    )
+    results: list[dict[str, Any]] = []
+    for registration in registrations:
+        timeframe = str(registration["timeframe"])
+        rebuild_start = starts[timeframe]
+        rows = [
+            row
+            for row in derive_premium_index_rows(
+                raw_rows=raw_rows,
+                raw_timeframe=TIMEFRAME,
+                derived_timeframe=timeframe,
+            )
+            if _coerce_datetime(row["timestamp"]) >= rebuild_start
+        ]
+        if not rows:
+            continue
+        storage_uri = Path(registration["storage_uri"])
+        _append_dataset_rows(storage_uri, rows)
+        stored_row_count = _dataset_row_count(storage_uri)
+        prior_end = _coerce_datetime(registration["end_ts"])
+        final_end = max(prior_end, _coerce_datetime(rows[-1]["timestamp"]))
+        descriptor = registration.get("schema_descriptor") or {}
+        updated = {
+            **registration,
+            "end_ts": _to_iso(final_end),
+            "row_count": stored_row_count,
+            "schema_descriptor": {
+                **descriptor,
+                "quality": {
+                    "complete_row_count": stored_row_count,
+                    "incomplete_row_count": 0,
+                },
+            },
+            "quality_status": "derived",
+        }
+        repository.update_ref(updated)
+        results.append(_summary(updated, status="rebuilt"))
+    return results
+
+
 def _storage_uri(*, target_root: Path, asset: str) -> Path:
     return (
         target_root
@@ -905,18 +1105,67 @@ def _increment_quality_summary(
     }
 
 
-def _append_dataset_rows(storage_uri: Path, rows: list[dict[str, Any]]) -> None:
+def _append_dataset_rows(storage_uri: Path, rows: list[dict[str, Any]]) -> int:
     grouped: dict[tuple[int, int], list[dict[str, Any]]] = {}
     for row in rows:
         timestamp = _coerce_datetime(row["timestamp"])
         grouped.setdefault((timestamp.year, timestamp.month), []).append(row)
+    rows_added = 0
     for (year, month), additions in sorted(grouped.items()):
         path = storage_uri / f"year={year:04d}" / f"month={month:02d}" / "data.parquet"
         existing = read_candles(path) if path.is_file() else []
+        merged = _dedupe_sort_rows([*existing, *additions])
+        rows_added += len(merged) - len(existing)
         _write_dataset_rows(
             storage_uri,
-            _dedupe_sort_rows([*existing, *additions]),
+            merged,
         )
+    return rows_added
+
+
+def _read_dataset_rows_between(
+    storage_uri: Path,
+    *,
+    start: datetime,
+    end: datetime,
+) -> list[dict[str, Any]]:
+    minimum = _coerce_datetime(start)
+    maximum = _coerce_datetime(end)
+    rows: list[dict[str, Any]] = []
+    current = datetime(minimum.year, minimum.month, 1, tzinfo=UTC)
+    while current <= maximum:
+        path = (
+            storage_uri
+            / f"year={current.year:04d}"
+            / f"month={current.month:02d}"
+            / "data.parquet"
+        )
+        if path.is_file():
+            rows.extend(
+                row
+                for row in read_candles(path)
+                if minimum <= _coerce_datetime(row["timestamp"]) <= maximum
+            )
+        current = (
+            datetime(current.year + 1, 1, 1, tzinfo=UTC)
+            if current.month == 12
+            else datetime(current.year, current.month + 1, 1, tzinfo=UTC)
+        )
+    return _dedupe_sort_rows(rows)
+
+
+def _dataset_row_count(storage_uri: Path) -> int:
+    return sum(
+        int(pq.ParquetFile(path).metadata.num_rows)
+        for path in storage_uri.glob("year=*/month=*/data.parquet")
+    )
+
+
+def _floor_to_timeframe_boundary(value: datetime, timeframe: str) -> datetime:
+    timestamp = _coerce_datetime(value)
+    seconds = int(_timeframe_delta(timeframe).total_seconds())
+    bucket_epoch = int(timestamp.timestamp()) // seconds * seconds
+    return datetime.fromtimestamp(bucket_epoch, tz=UTC)
 
 
 def _upsert_data_source(repository: Any) -> None:

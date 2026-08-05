@@ -6,6 +6,7 @@ from typing import Any
 JOB_QUEUE_BY_TYPE = {
     "market_data_refresh": "market_data",
     "market_data_ema_refresh": "market_data",
+    "market_data_atr_refresh": "market_data",
     "market_data_feature_refresh": "market_data",
     "signal_pool_extend": "signal_generation",
     "stage0_candidate": "research",

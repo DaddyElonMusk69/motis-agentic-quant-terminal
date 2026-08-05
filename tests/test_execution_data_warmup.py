@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from quant_terminal_worker.execution.data_warmup import warm_route_data
 
@@ -91,6 +92,35 @@ class FakeMarketDataRepository:
             "data_type": "open_interest",
             "data_origin": "raw",
         }
+        self.futures_metrics_ref = {
+            **self.raw_ref,
+            "dataset_id": "aave-binance-futures_metrics-raw-5m",
+            "instrument": "AAVEUSDT",
+            "data_type": "futures_metrics",
+            "data_origin": "raw",
+        }
+        self.premium_index_ref = {
+            **self.raw_ref,
+            "dataset_id": "aave-binance-premium_index-raw-5m",
+            "instrument": "AAVEUSDT",
+            "data_type": "premium_index",
+            "data_origin": "raw",
+        }
+        self.funding_ref = {
+            **self.raw_ref,
+            "dataset_id": "aave-binance-funding-raw-8h",
+            "instrument": "AAVEUSDT",
+            "data_type": "funding",
+            "data_origin": "raw",
+            "timeframe": "8h",
+        }
+        self.funding_features_ref = {
+            **self.raw_ref,
+            "dataset_id": "aave-binance-funding_features-derived-5m",
+            "instrument": "AAVEUSDT",
+            "data_type": "funding_features",
+            "data_origin": "derived",
+        }
 
     def get_raw_candle_ref(self, asset, timeframe="5m"):
         if asset == "AAVE" and timeframe == "5m":
@@ -131,6 +161,34 @@ class FakeMarketDataRepository:
             and data_type == "open_interest"
         ):
             return dict(self.open_interest_ref)
+        if (
+            asset == "AAVE"
+            and timeframe == "5m"
+            and origin == "raw"
+            and data_type == "futures_metrics"
+        ):
+            return dict(self.futures_metrics_ref)
+        if (
+            asset == "AAVE"
+            and timeframe == "5m"
+            and origin == "raw"
+            and data_type == "premium_index"
+        ):
+            return dict(self.premium_index_ref)
+        if (
+            asset == "AAVE"
+            and timeframe == "8h"
+            and origin == "raw"
+            and data_type == "funding"
+        ):
+            return dict(self.funding_ref)
+        if (
+            asset == "AAVE"
+            and timeframe == "5m"
+            and origin == "derived"
+            and data_type == "funding_features"
+        ):
+            return dict(self.funding_features_ref)
         return None
 
 
@@ -222,6 +280,158 @@ def test_warm_route_data_fills_required_open_interest_with_data_type_service():
     assert runtime_repository.gate_updates == [{"data_warmed": True}]
 
 
+def test_warm_route_data_supports_derivatives_engine_data_channels():
+    runtime_repository = FakeRuntimeRepository()
+    runtime_repository.engines[0]["required_data"] = [
+        {"data_type": "candles", "origin": "raw", "timeframe": "5m"},
+        {"data_type": "futures_metrics", "origin": "raw", "timeframe": "5m"},
+        {"data_type": "premium_index", "origin": "raw", "timeframe": "5m"},
+        {"data_type": "funding_features", "origin": "derived", "timeframe": "5m"},
+    ]
+    market_repository = FakeMarketDataRepository()
+    fill_calls = []
+
+    def fill_service(*, registration, repository, adapter):
+        fill_calls.append(registration["data_type"])
+        return {"dataset_id": registration["dataset_id"], "status": "current", "rows_added": 0}
+
+    result = warm_route_data(
+        route_id="aave-live",
+        runtime_repository=runtime_repository,
+        market_data_repository=market_repository,
+        fill_service=fill_service,
+        raw_fill_services={
+            "candles": fill_service,
+            "futures_metrics": fill_service,
+            "premium_index": fill_service,
+            "funding": fill_service,
+        },
+        adapter=FakeAdapter(),
+    )
+
+    assert result["status"] == "warmed"
+    assert fill_calls == ["candles", "futures_metrics", "premium_index", "funding"]
+    assert [item["status"] for item in result["requirements"]] == [
+        "current",
+        "current",
+        "current",
+        "refreshed_from_raw_dependency",
+    ]
+    assert result["requirements"][3]["dataset_id"] == "aave-binance-funding_features-derived-5m"
+    assert result["requirements"][3]["source_dataset_id"] == "aave-binance-funding-raw-8h"
+    assert runtime_repository.gate_updates == [{"data_warmed": True}]
+
+
+def test_warm_route_data_blocks_when_required_derivatives_ref_remains_stale():
+    runtime_repository = FakeRuntimeRepository()
+    runtime_repository.route["cron_interval_minutes"] = 5
+    runtime_repository.engines[0]["required_data"] = [
+        {"data_type": "premium_index", "origin": "raw", "timeframe": "5m"},
+        {"data_type": "funding_features", "origin": "derived", "timeframe": "5m"},
+    ]
+    market_repository = FakeMarketDataRepository()
+    as_of = datetime(2026, 6, 1, 0, 30, tzinfo=UTC)
+    stale = as_of - timedelta(minutes=20)
+    stale_funding = as_of - timedelta(hours=11)
+    market_repository.premium_index_ref["end_ts"] = stale
+    market_repository.funding_ref["end_ts"] = stale_funding
+    market_repository.funding_features_ref["end_ts"] = stale
+    fill_calls = []
+
+    def fill_service(*, registration, repository, adapter):
+        fill_calls.append(registration["dataset_id"])
+        return {"dataset_id": registration["dataset_id"], "status": "no_new_rows", "rows_added": 0}
+
+    result = warm_route_data(
+        route_id="aave-live",
+        runtime_repository=runtime_repository,
+        market_data_repository=market_repository,
+        fill_service=fill_service,
+        raw_fill_services={
+            "premium_index": fill_service,
+            "funding": fill_service,
+        },
+        adapter=FakeAdapter(),
+        as_of=as_of,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["reason"] == "market_data_stale"
+    assert result["data_freshness"]["status"] == "stale"
+    assert result["data_freshness"]["reason"] == "raw_premium_index_5m_stale"
+    assert [
+        (item["data_type"], item["origin"], item["status"])
+        for item in result["data_freshness"]["required_refs"]
+    ] == [
+        ("premium_index", "raw", "stale"),
+        ("funding_features", "derived", "stale"),
+    ]
+    assert result["data_freshness"]["dependency_refs"][0]["data_type"] == "funding"
+    assert result["data_freshness"]["dependency_refs"][0]["status"] == "stale"
+    assert fill_calls == ["aave-binance-premium_index-raw-5m", "aave-binance-funding-raw-8h"]
+    assert runtime_repository.gate_updates == [{"data_warmed": False}]
+
+
+def test_warm_route_data_blocks_cleanly_when_required_raw_fill_raises():
+    runtime_repository = FakeRuntimeRepository()
+    runtime_repository.route["cron_interval_minutes"] = 5
+    runtime_repository.engines[0]["required_data"] = [
+        {"data_type": "futures_metrics", "origin": "raw", "timeframe": "5m"}
+    ]
+    market_repository = FakeMarketDataRepository()
+
+    def fill_service(**kwargs):
+        raise RuntimeError("binance cli failed")
+
+    result = warm_route_data(
+        route_id="aave-live",
+        runtime_repository=runtime_repository,
+        market_data_repository=market_repository,
+        fill_service=fill_service,
+        raw_fill_services={"futures_metrics": fill_service},
+        adapter=FakeAdapter(),
+        as_of=datetime(2026, 6, 1, 0, 30, tzinfo=UTC),
+    )
+
+    assert result["status"] == "blocked"
+    requirement = result["requirements"][0]
+    assert requirement["status"] == "blocked"
+    assert requirement["reason"] == "raw_fill_failed"
+    assert requirement["dataset_id"] == "aave-binance-futures_metrics-raw-5m"
+    assert requirement["error"] == {"type": "RuntimeError", "message": "binance cli failed"}
+    assert runtime_repository.gate_updates == [{"data_warmed": False}]
+
+
+def test_warm_route_data_blocks_cleanly_when_refreshable_dependency_fill_raises():
+    runtime_repository = FakeRuntimeRepository()
+    runtime_repository.route["cron_interval_minutes"] = 5
+    runtime_repository.engines[0]["required_data"] = [
+        {"data_type": "funding_features", "origin": "derived", "timeframe": "5m"}
+    ]
+    market_repository = FakeMarketDataRepository()
+
+    def fill_service(**kwargs):
+        raise RuntimeError("funding cli failed")
+
+    result = warm_route_data(
+        route_id="aave-live",
+        runtime_repository=runtime_repository,
+        market_data_repository=market_repository,
+        fill_service=fill_service,
+        raw_fill_services={"funding": fill_service},
+        adapter=FakeAdapter(),
+        as_of=datetime(2026, 6, 1, 0, 30, tzinfo=UTC),
+    )
+
+    assert result["status"] == "blocked"
+    requirement = result["requirements"][0]
+    assert requirement["status"] == "blocked"
+    assert requirement["reason"] == "raw_dependency_fill_failed"
+    assert requirement["source_dataset_id"] == "aave-binance-funding-raw-8h"
+    assert requirement["error"] == {"type": "RuntimeError", "message": "funding cli failed"}
+    assert runtime_repository.gate_updates == [{"data_warmed": False}]
+
+
 def test_warm_route_data_blocks_when_required_raw_ref_is_missing():
     runtime_repository = FakeRuntimeRepository()
 
@@ -268,6 +478,48 @@ def test_warm_route_data_blocks_when_required_feature_cannot_be_built():
     assert feature_requirement["data_type"] == "feature_bollinger"
     assert feature_requirement["reason"] == "feature_refresh_produced_no_matching_dataset"
     assert runtime_repository.gate_updates == []
+
+
+def test_warm_route_data_can_build_technical_indicator_atr_from_raw_5m_source():
+    runtime_repository = FakeRuntimeRepository()
+    runtime_repository.engines[0]["required_data"] = [
+        {"data_type": "technical_indicator_atr", "origin": "derived", "timeframe": "2h"}
+    ]
+    market_repository = FakeMarketDataRepository()
+    calls = []
+
+    def atr_service(**kwargs):
+        calls.append(kwargs)
+        return {
+            "status": "enriched",
+            "asset": kwargs["asset"],
+            "data_type": "technical_indicator_atr",
+            "dataset_count": 1,
+            "datasets": [
+                {
+                    "dataset_id": "AAVE-technical_indicator_atr-derived-2h-wilder-14",
+                    "data_type": "technical_indicator_atr",
+                    "timeframe": "2h",
+                    "row_count": 100,
+                }
+            ],
+        }
+
+    result = warm_route_data(
+        route_id="aave-live",
+        runtime_repository=runtime_repository,
+        market_data_repository=market_repository,
+        fill_service=lambda **kwargs: {"dataset_id": kwargs["registration"]["dataset_id"], "status": "current", "rows_added": 0},
+        adapter=FakeAdapter(),
+        atr_service=atr_service,
+    )
+
+    assert result["status"] == "warmed"
+    assert result["requirements"][0]["status"] == "atr_enriched"
+    assert result["requirements"][0]["dataset_id"] == "AAVE-technical_indicator_atr-derived-2h-wilder-14"
+    assert calls[0]["asset"] == "AAVE"
+    assert calls[0]["timeframes"] == ("2h",)
+    assert calls[0]["target_root"] == Path(".") / ".data" / "market-data"
 
 
 def test_warm_route_data_reports_fresh_5m_candle_status():

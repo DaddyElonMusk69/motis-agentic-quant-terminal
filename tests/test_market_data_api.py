@@ -1,6 +1,9 @@
 from datetime import UTC, datetime
+from pathlib import Path
 
 from fastapi.testclient import TestClient
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from quant_terminal_api import main as api_main
 from quant_terminal_api.main import create_app
@@ -137,6 +140,36 @@ def test_market_data_ema_refresh_endpoint_queues_worker_job():
     assert response.json()["job"]["payload"] == {"asset": "BTC"}
 
 
+def test_market_data_atr_refresh_endpoint_queues_worker_job():
+    class FakeRuntimeRepository:
+        def enqueue_job(self, *, job_type, scope_key, payload, current_step):
+            return {
+                "job_id": "job-atr-btc",
+                "job_type": job_type,
+                "scope_key": scope_key,
+                "status": "queued",
+                "payload": payload,
+                "result": {},
+                "error": {},
+                "current_step": current_step,
+            }
+
+    client = TestClient(
+        create_app(
+            market_data_repository=FakeMarketDataRepository(),
+            runtime_repository=FakeRuntimeRepository(),
+        )
+    )
+
+    response = client.post("/api/v1/market-data/assets/btc/atr/refresh")
+
+    assert response.status_code == 200
+    assert response.json()["accepted"] is True
+    assert response.json()["job"]["job_type"] == "market_data_atr_refresh"
+    assert response.json()["job"]["scope_key"] == "asset:BTC:atr"
+    assert response.json()["job"]["payload"] == {"asset": "BTC", "timeframes": ["1h", "2h", "4h"], "period": 14}
+
+
 def test_market_data_feature_refresh_endpoint_queues_worker_job():
     class FakeRuntimeRepository:
         def enqueue_job(self, *, job_type, scope_key, payload, current_step):
@@ -165,6 +198,69 @@ def test_market_data_feature_refresh_endpoint_queues_worker_job():
     assert response.json()["job"]["job_type"] == "market_data_feature_refresh"
     assert response.json()["job"]["scope_key"] == "asset:BTC:feature:bollinger"
     assert response.json()["job"]["payload"] == {"asset": "BTC", "family": "bollinger"}
+
+
+def test_market_data_rows_endpoint_reads_partitioned_atr_parquet(tmp_path: Path):
+    storage_uri = tmp_path / "origin=derived/source=okx/type=technical_indicator_atr/asset=BTC/timeframe=1h"
+    data_path = storage_uri / "year=2026/month=08/data.parquet"
+    data_path.parent.mkdir(parents=True)
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "timestamp": "2026-08-01T00:00:00Z",
+                    "interval_end": "2026-08-01T01:00:00Z",
+                    "available_at": "2026-08-01T01:00:00Z",
+                    "symbol": "BTCUSDT",
+                    "timeframe": "1h",
+                    "period": 14,
+                    "method": "wilder",
+                    "source_timeframe": "5m",
+                    "open": 1.0,
+                    "high": 2.0,
+                    "low": 0.5,
+                    "close": 1.5,
+                    "volume": 10.0,
+                    "true_range": 1.5,
+                    "atr": 1.5,
+                    "atr_pct": 100.0,
+                    "warmup_complete": True,
+                    "complete": True,
+                    "confirm": 1,
+                }
+            ]
+        ),
+        data_path,
+    )
+
+    class AtrMarketDataRepository(FakeMarketDataRepository):
+        def get_ref(self, dataset_id: str):
+            if dataset_id == "btc-atr-1h":
+                return {
+                    "dataset_id": "btc-atr-1h",
+                    "asset": "BTC",
+                    "instrument": "BTCUSDT",
+                    "data_type": "technical_indicator_atr",
+                    "timeframe": "1h",
+                    "data_origin": "derived",
+                    "start_ts": datetime(2026, 8, 1, tzinfo=UTC),
+                    "end_ts": datetime(2026, 8, 1, 1, tzinfo=UTC),
+                    "row_count": 1,
+                    "storage_backend": "parquet",
+                    "storage_uri": str(storage_uri),
+                    "schema_descriptor": {"columns": ["timestamp", "interval_end", "available_at", "timeframe", "period"]},
+                    "quality_status": "atr_enriched",
+                    "ingestion_version": "technical-indicator-atr.v1",
+                }
+            return super().get_ref(dataset_id)
+
+    client = TestClient(create_app(market_data_repository=AtrMarketDataRepository()))
+
+    response = client.get("/api/v1/market-data/btc-atr-1h/rows?limit=5")
+
+    assert response.status_code == 200
+    assert response.json()["rows"][0]["timeframe"] == "1h"
+    assert response.json()["rows"][0]["atr"] == 1.5
 
 
 def test_market_data_open_interest_feature_refresh_uses_specialized_fallback(monkeypatch):

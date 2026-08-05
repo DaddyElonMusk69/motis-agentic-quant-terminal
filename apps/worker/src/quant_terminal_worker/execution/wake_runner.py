@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
@@ -223,10 +223,19 @@ def run_route_wake(
                     client_order_id=client_order_id or None,
                 )
             )
+    owner_state_before_flat = repository.get_open_owner_state(route_id)
     if hasattr(repository, "close_open_owner_states"):
         repository.close_open_owner_states(route_id, instrument=route["instrument"], reason="exchange_position_flat")
     elif hasattr(repository, "close_open_owner_state"):
         repository.close_open_owner_state(route_id, reason="exchange_position_flat")
+    route = _update_pause_rule_states(
+        repository=repository,
+        route=route,
+        execution_setup=runtime["execution_setup"],
+        snapshot=snapshot,
+        owner_state=owner_state_before_flat,
+        now=started_at,
+    )
 
     if working_entry_orders:
         return _record_wake(
@@ -243,6 +252,27 @@ def run_route_wake(
                     "status": "no_position_after_cleanup",
                     "cancelled_order_count": len(adapter_results),
                 },
+                "strategy_decision": {},
+                "order_intents": [],
+                "adapter_results": adapter_results,
+                "error": {},
+                "completed_at": datetime.now(UTC),
+            },
+        )
+
+    active_pause = _active_pause_rule(route=route, execution_setup=runtime["execution_setup"], now=started_at)
+    if active_pause is not None:
+        return _record_wake(
+            repository,
+            {
+                "wake_id": wake_id,
+                "route_id": route_id,
+                "bundle_id": bundle["bundle_id"],
+                "status": "completed",
+                "branch": "idle",
+                "blockers": [],
+                "exchange_snapshot": snapshot,
+                "signal_scan_result": active_pause,
                 "strategy_decision": {},
                 "order_intents": [],
                 "adapter_results": adapter_results,
@@ -402,6 +432,578 @@ def _route_blockers(route: dict[str, Any]) -> list[str]:
     return blockers
 
 
+def _active_consecutive_win_pause(
+    *,
+    route: dict[str, Any],
+    execution_setup: dict[str, Any],
+    now: datetime,
+) -> dict[str, Any] | None:
+    rule = _consecutive_win_pause_rule(execution_setup)
+    if rule is None:
+        return None
+    state = _consecutive_win_pause_state(route)
+    pause_until = _parse_optional_timestamp(state.get("pause_until"))
+    if pause_until is None or now >= pause_until:
+        return None
+    return {
+        "status": "skipped_pause_rule",
+        "reason": "pause_rule_consecutive_wins",
+        "pause_rule": rule,
+        "pause_until": _iso_timestamp(pause_until),
+        "consecutive_wins": int(state.get("consecutive_wins") or 0),
+        "last_close_at": state.get("last_close_at"),
+        "last_close_event_id": state.get("last_processed_close_event_id"),
+    }
+
+
+def _active_consecutive_loss_pause(
+    *,
+    route: dict[str, Any],
+    execution_setup: dict[str, Any],
+    now: datetime,
+) -> dict[str, Any] | None:
+    rule = _consecutive_loss_pause_rule(execution_setup)
+    if rule is None:
+        return None
+    state = _consecutive_loss_pause_state(route)
+    pause_until = _parse_optional_timestamp(state.get("pause_until"))
+    if pause_until is None or now >= pause_until:
+        return None
+    return {
+        "status": "skipped_pause_rule",
+        "reason": "pause_rule_consecutive_losses",
+        "pause_rule": rule,
+        "pause_until": _iso_timestamp(pause_until),
+        "consecutive_losses": int(state.get("consecutive_losses") or 0),
+        "last_close_at": state.get("last_close_at"),
+        "last_close_event_id": state.get("last_processed_close_event_id"),
+    }
+
+
+def _active_profit_burst_pause(
+    *,
+    route: dict[str, Any],
+    execution_setup: dict[str, Any],
+    now: datetime,
+) -> dict[str, Any] | None:
+    rule = _profit_burst_pause_rule(execution_setup)
+    if rule is None:
+        return None
+    state = _profit_burst_pause_state(route)
+    pause_until = _parse_optional_timestamp(state.get("pause_until"))
+    if pause_until is None or now >= pause_until:
+        return None
+    return {
+        "status": "skipped_pause_rule",
+        "reason": "pause_rule_profit_burst",
+        "pause_rule": rule,
+        "pause_until": _iso_timestamp(pause_until),
+        "profit_growth_pct": float(state.get("profit_growth_pct") or 0.0),
+        "window_net_pnl_usdt": float(state.get("window_net_pnl_usdt") or 0.0),
+        "route_capital_usdt": float(state.get("route_capital_usdt") or rule["route_capital_usdt"]),
+        "latest_close_at": state.get("latest_close_at"),
+        "latest_close_event_id": state.get("latest_close_event_id"),
+    }
+
+
+def _active_pause_rule(
+    *,
+    route: dict[str, Any],
+    execution_setup: dict[str, Any],
+    now: datetime,
+) -> dict[str, Any] | None:
+    return (
+        _active_consecutive_loss_pause(route=route, execution_setup=execution_setup, now=now)
+        or _active_consecutive_win_pause(route=route, execution_setup=execution_setup, now=now)
+        or _active_profit_burst_pause(
+            route=route,
+            execution_setup=execution_setup,
+            now=now,
+        )
+    )
+
+
+def _update_pause_rule_states(
+    *,
+    repository: Any,
+    route: dict[str, Any],
+    execution_setup: dict[str, Any],
+    snapshot: dict[str, Any],
+    owner_state: dict[str, Any] | None,
+    now: datetime,
+) -> dict[str, Any]:
+    route = _update_consecutive_loss_pause_state(
+        repository=repository,
+        route=route,
+        execution_setup=execution_setup,
+        snapshot=snapshot,
+        now=now,
+    )
+    route = _update_consecutive_win_pause_state(
+        repository=repository,
+        route=route,
+        execution_setup=execution_setup,
+        snapshot=snapshot,
+        owner_state=owner_state,
+        now=now,
+    )
+    return _update_profit_burst_pause_state(
+        repository=repository,
+        route=route,
+        execution_setup=execution_setup,
+        snapshot=snapshot,
+        now=now,
+    )
+
+
+def _update_consecutive_loss_pause_state(
+    *,
+    repository: Any,
+    route: dict[str, Any],
+    execution_setup: dict[str, Any],
+    snapshot: dict[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    rule = _consecutive_loss_pause_rule(execution_setup)
+    if rule is None:
+        return route
+    close_events = _instrument_close_events(route=route, snapshot=snapshot, fallback_time=now)
+    if not close_events:
+        return route
+    latest_event = close_events[-1]
+    state = _consecutive_loss_pause_state(route)
+    last_processed = state.get("last_processed_close_event_id")
+    if latest_event["event_id"] and latest_event["event_id"] == last_processed:
+        return route
+
+    consecutive_losses = int(state.get("consecutive_losses") or 0)
+    event_ids = [event["event_id"] for event in close_events]
+    if last_processed in event_ids:
+        new_events = close_events[event_ids.index(last_processed) + 1 :]
+    elif last_processed:
+        new_events = [latest_event]
+    else:
+        new_events = close_events
+
+    pause_until = state.get("pause_until")
+    for event in new_events:
+        net_pnl = float(event["net_pnl_usdt"])
+        if net_pnl < 0:
+            consecutive_losses += 1
+        else:
+            consecutive_losses = 0
+            pause_until = None
+
+    latest_net_pnl = float(latest_event["net_pnl_usdt"])
+    if latest_net_pnl < 0 and consecutive_losses >= int(rule["consecutive_count"]):
+        pause_until = _iso_timestamp(latest_event["closed_at"] + timedelta(hours=int(rule["cooldown_hours"])))
+
+    next_state = {
+        **state,
+        "type": "consecutive_losses",
+        "consecutive_losses": consecutive_losses,
+        "last_processed_close_event_id": latest_event["event_id"],
+        "last_close_at": _iso_timestamp(latest_event["closed_at"]),
+        "last_close_net_pnl_usdt": latest_net_pnl,
+        "pause_until": pause_until,
+        "rule": rule,
+    }
+    return _persist_consecutive_loss_pause_state(repository=repository, route=route, state=next_state)
+
+
+def _update_consecutive_win_pause_state(
+    *,
+    repository: Any,
+    route: dict[str, Any],
+    execution_setup: dict[str, Any],
+    snapshot: dict[str, Any],
+    owner_state: dict[str, Any] | None,
+    now: datetime,
+) -> dict[str, Any]:
+    rule = _consecutive_win_pause_rule(execution_setup)
+    if rule is None or owner_state is None:
+        return route
+    close_event = _latest_exchange_close_event(route=route, snapshot=snapshot, owner_state=owner_state, fallback_time=now)
+    if close_event is None:
+        return route
+
+    state = _consecutive_win_pause_state(route)
+    if close_event["event_id"] and close_event["event_id"] == state.get("last_processed_close_event_id"):
+        return route
+
+    consecutive_wins = int(state.get("consecutive_wins") or 0)
+    net_pnl = float(close_event["net_pnl_usdt"])
+    pause_until = state.get("pause_until")
+    if net_pnl > 0:
+        consecutive_wins += 1
+    else:
+        consecutive_wins = 0
+        pause_until = None
+    if net_pnl > 0 and consecutive_wins >= int(rule["consecutive_count"]):
+        pause_until = _iso_timestamp(close_event["closed_at"] + timedelta(hours=int(rule["cooldown_hours"])))
+
+    next_state = {
+        **state,
+        "type": "consecutive_wins",
+        "consecutive_wins": consecutive_wins,
+        "last_processed_close_event_id": close_event["event_id"],
+        "last_close_at": _iso_timestamp(close_event["closed_at"]),
+        "last_close_net_pnl_usdt": net_pnl,
+        "pause_until": pause_until,
+        "rule": rule,
+    }
+    return _persist_consecutive_win_pause_state(repository=repository, route=route, state=next_state)
+
+
+def _update_profit_burst_pause_state(
+    *,
+    repository: Any,
+    route: dict[str, Any],
+    execution_setup: dict[str, Any],
+    snapshot: dict[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    rule = _profit_burst_pause_rule(execution_setup)
+    if rule is None:
+        return route
+    close_events = _instrument_close_events(route=route, snapshot=snapshot, fallback_time=now)
+    if not close_events:
+        return route
+    latest_event = max(close_events, key=lambda event: event["closed_at"])
+    state = _profit_burst_pause_state(route)
+    if latest_event["event_id"] and latest_event["event_id"] == state.get("last_trigger_close_event_id"):
+        return route
+
+    window_start = latest_event["closed_at"] - timedelta(hours=int(rule["lookback_hours"]))
+    window_events = [event for event in close_events if event["closed_at"] >= window_start]
+    window_net_pnl = sum(float(event["net_pnl_usdt"]) for event in window_events)
+    route_capital = float(rule["route_capital_usdt"])
+    if route_capital <= 0:
+        return route
+    profit_growth_pct = window_net_pnl / route_capital * 100.0
+    pause_until = state.get("pause_until")
+    last_trigger_close_event_id = state.get("last_trigger_close_event_id")
+    if profit_growth_pct >= float(rule["profit_threshold_pct"]):
+        pause_until = _iso_timestamp(latest_event["closed_at"] + timedelta(hours=int(rule["cooldown_hours"])))
+        last_trigger_close_event_id = latest_event["event_id"]
+
+    next_state = {
+        **state,
+        "type": "profit_burst",
+        "latest_close_event_id": latest_event["event_id"],
+        "latest_close_at": _iso_timestamp(latest_event["closed_at"]),
+        "last_trigger_close_event_id": last_trigger_close_event_id,
+        "lookback_start": _iso_timestamp(window_start),
+        "lookback_hours": int(rule["lookback_hours"]),
+        "window_close_event_count": len(window_events),
+        "window_net_pnl_usdt": window_net_pnl,
+        "route_capital_usdt": route_capital,
+        "profit_growth_pct": profit_growth_pct,
+        "pause_until": pause_until,
+        "rule": rule,
+    }
+    return _persist_profit_burst_pause_state(repository=repository, route=route, state=next_state)
+
+
+def _persist_consecutive_win_pause_state(
+    *,
+    repository: Any,
+    route: dict[str, Any],
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    risk_limits = route.get("risk_limits") if isinstance(route.get("risk_limits"), dict) else {}
+    pause_state = risk_limits.get("pause_rule_state") if isinstance(risk_limits.get("pause_rule_state"), dict) else {}
+    next_risk_limits = {
+        **risk_limits,
+        "pause_rule_state": {
+            **pause_state,
+            "consecutive_wins": state,
+        },
+    }
+    updater = getattr(repository, "update_deployment_route_gate", None)
+    if not callable(updater):
+        return {**route, "risk_limits": next_risk_limits}
+    updated = updater(route["route_id"], risk_limits=next_risk_limits)
+    return updated or {**route, "risk_limits": next_risk_limits}
+
+
+def _persist_consecutive_loss_pause_state(
+    *,
+    repository: Any,
+    route: dict[str, Any],
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    risk_limits = route.get("risk_limits") if isinstance(route.get("risk_limits"), dict) else {}
+    pause_state = risk_limits.get("pause_rule_state") if isinstance(risk_limits.get("pause_rule_state"), dict) else {}
+    next_risk_limits = {
+        **risk_limits,
+        "pause_rule_state": {
+            **pause_state,
+            "consecutive_losses": state,
+        },
+    }
+    updater = getattr(repository, "update_deployment_route_gate", None)
+    if not callable(updater):
+        return {**route, "risk_limits": next_risk_limits}
+    updated = updater(route["route_id"], risk_limits=next_risk_limits)
+    return updated or {**route, "risk_limits": next_risk_limits}
+
+
+def _persist_profit_burst_pause_state(
+    *,
+    repository: Any,
+    route: dict[str, Any],
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    risk_limits = route.get("risk_limits") if isinstance(route.get("risk_limits"), dict) else {}
+    pause_state = risk_limits.get("pause_rule_state") if isinstance(risk_limits.get("pause_rule_state"), dict) else {}
+    next_risk_limits = {
+        **risk_limits,
+        "pause_rule_state": {
+            **pause_state,
+            "profit_burst": state,
+        },
+    }
+    updater = getattr(repository, "update_deployment_route_gate", None)
+    if not callable(updater):
+        return {**route, "risk_limits": next_risk_limits}
+    updated = updater(route["route_id"], risk_limits=next_risk_limits)
+    return updated or {**route, "risk_limits": next_risk_limits}
+
+
+def _consecutive_loss_pause_rule(execution_setup: dict[str, Any]) -> dict[str, Any] | None:
+    for rule in _raw_pause_rules(execution_setup):
+        if not isinstance(rule, dict) or rule.get("type") != "consecutive_losses":
+            continue
+        consecutive_count = _positive_int(rule.get("consecutive_count"))
+        cooldown_hours = _positive_int(rule.get("cooldown_hours"))
+        if consecutive_count is None or cooldown_hours is None:
+            continue
+        return {
+            "type": "consecutive_losses",
+            "consecutive_count": consecutive_count,
+            "cooldown_hours": cooldown_hours,
+        }
+    return None
+
+
+def _consecutive_win_pause_rule(execution_setup: dict[str, Any]) -> dict[str, Any] | None:
+    rules: list[Any] = []
+    if isinstance(execution_setup.get("pause_rules"), list):
+        rules.extend(execution_setup["pause_rules"])
+    if isinstance(execution_setup.get("pause_rule"), dict):
+        rules.append(execution_setup["pause_rule"])
+    setup = execution_setup.get("setup") if isinstance(execution_setup.get("setup"), dict) else {}
+    if isinstance(setup.get("pause_rules"), list):
+        rules.extend(setup["pause_rules"])
+    if isinstance(setup.get("pause_rule"), dict):
+        rules.append(setup["pause_rule"])
+    for rule in rules:
+        if not isinstance(rule, dict) or rule.get("type") != "consecutive_wins":
+            continue
+        consecutive_count = _positive_int(rule.get("consecutive_count"))
+        cooldown_hours = _positive_int(rule.get("cooldown_hours"))
+        if consecutive_count is None or cooldown_hours is None:
+            continue
+        return {
+            "type": "consecutive_wins",
+            "consecutive_count": consecutive_count,
+            "cooldown_hours": cooldown_hours,
+        }
+    return None
+
+
+def _profit_burst_pause_rule(execution_setup: dict[str, Any]) -> dict[str, Any] | None:
+    rules = _raw_pause_rules(execution_setup)
+    route_capital = _route_capital_usdt(execution_setup)
+    for rule in rules:
+        if not isinstance(rule, dict) or rule.get("type") != "profit_burst":
+            continue
+        profit_threshold_pct = _positive_float(rule.get("profit_threshold_pct"))
+        lookback_hours = _positive_int(rule.get("lookback_hours"))
+        cooldown_hours = _positive_int(rule.get("cooldown_hours"))
+        rule_capital = _positive_float(rule.get("route_capital_usdt")) or route_capital
+        if profit_threshold_pct is None or lookback_hours is None or cooldown_hours is None or rule_capital is None:
+            continue
+        return {
+            "type": "profit_burst",
+            "profit_threshold_pct": profit_threshold_pct,
+            "lookback_hours": lookback_hours,
+            "cooldown_hours": cooldown_hours,
+            "route_capital_usdt": rule_capital,
+        }
+    return None
+
+
+def _raw_pause_rules(execution_setup: dict[str, Any]) -> list[Any]:
+    rules: list[Any] = []
+    if isinstance(execution_setup.get("pause_rules"), list):
+        rules.extend(execution_setup["pause_rules"])
+    if isinstance(execution_setup.get("pause_rule"), dict):
+        rules.append(execution_setup["pause_rule"])
+    setup = execution_setup.get("setup") if isinstance(execution_setup.get("setup"), dict) else {}
+    if isinstance(setup.get("pause_rules"), list):
+        rules.extend(setup["pause_rules"])
+    if isinstance(setup.get("pause_rule"), dict):
+        rules.append(setup["pause_rule"])
+    return rules
+
+
+def _route_capital_usdt(execution_setup: dict[str, Any]) -> float | None:
+    direct = _positive_float(execution_setup.get("route_capital_usdt"))
+    if direct is not None:
+        return direct
+    sizing = execution_setup.get("sizing") if isinstance(execution_setup.get("sizing"), dict) else {}
+    return _positive_float(sizing.get("route_capital_usdt")) or _positive_float(sizing.get("initial_capital_usdt"))
+
+
+def _consecutive_win_pause_state(route: dict[str, Any]) -> dict[str, Any]:
+    risk_limits = route.get("risk_limits") if isinstance(route.get("risk_limits"), dict) else {}
+    pause_state = risk_limits.get("pause_rule_state") if isinstance(risk_limits.get("pause_rule_state"), dict) else {}
+    state = pause_state.get("consecutive_wins") if isinstance(pause_state.get("consecutive_wins"), dict) else {}
+    return dict(state)
+
+
+def _profit_burst_pause_state(route: dict[str, Any]) -> dict[str, Any]:
+    risk_limits = route.get("risk_limits") if isinstance(route.get("risk_limits"), dict) else {}
+    pause_state = risk_limits.get("pause_rule_state") if isinstance(risk_limits.get("pause_rule_state"), dict) else {}
+    state = pause_state.get("profit_burst") if isinstance(pause_state.get("profit_burst"), dict) else {}
+    return dict(state)
+
+
+def _consecutive_loss_pause_state(route: dict[str, Any]) -> dict[str, Any]:
+    risk_limits = route.get("risk_limits") if isinstance(route.get("risk_limits"), dict) else {}
+    pause_state = risk_limits.get("pause_rule_state") if isinstance(risk_limits.get("pause_rule_state"), dict) else {}
+    state = pause_state.get("consecutive_losses") if isinstance(pause_state.get("consecutive_losses"), dict) else {}
+    return dict(state)
+
+
+def _latest_exchange_close_event(
+    *,
+    route: dict[str, Any],
+    snapshot: dict[str, Any],
+    owner_state: dict[str, Any],
+    fallback_time: datetime,
+) -> dict[str, Any] | None:
+    direction = _owner_state_direction(owner_state)
+    close_side = "sell" if direction == "LONG" else "buy" if direction == "SHORT" else None
+    candidates: list[dict[str, Any]] = []
+    for fill in snapshot.get("recent_fills") or []:
+        if not isinstance(fill, dict):
+            continue
+        instrument = fill.get("instId") or fill.get("instrument") or fill.get("symbol")
+        if instrument and str(instrument) != str(route.get("instrument")):
+            continue
+        fill_side = str(fill.get("side") or "").lower()
+        if close_side and fill_side and fill_side != close_side:
+            continue
+        net_pnl = _fill_net_pnl_usdt(fill)
+        if net_pnl is None:
+            continue
+        closed_at = _parse_exchange_timestamp(
+            fill.get("fillTime")
+            or fill.get("fill_time")
+            or fill.get("ts")
+            or fill.get("uTime")
+            or fill.get("updated_at")
+            or fill.get("created_at"),
+            fallback=fallback_time,
+        )
+        candidates.append(
+            {
+                "event_id": _exchange_fill_event_id(fill),
+                "closed_at": closed_at,
+                "net_pnl_usdt": net_pnl,
+            }
+        )
+    if not candidates:
+        return None
+    return max(candidates, key=lambda candidate: candidate["closed_at"])
+
+
+def _instrument_close_events(
+    *,
+    route: dict[str, Any],
+    snapshot: dict[str, Any],
+    fallback_time: datetime,
+) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for fill in snapshot.get("recent_fills") or []:
+        if not isinstance(fill, dict):
+            continue
+        instrument = fill.get("instId") or fill.get("instrument") or fill.get("symbol")
+        if instrument and str(instrument) != str(route.get("instrument")):
+            continue
+        net_pnl = _fill_net_pnl_usdt(fill)
+        if net_pnl is None:
+            continue
+        closed_at = _parse_exchange_timestamp(
+            fill.get("fillTime")
+            or fill.get("fill_time")
+            or fill.get("ts")
+            or fill.get("uTime")
+            or fill.get("updated_at")
+            or fill.get("created_at"),
+            fallback=fallback_time,
+        )
+        event_id = _exchange_fill_event_id(fill)
+        if event_id in seen:
+            continue
+        seen.add(event_id)
+        events.append(
+            {
+                "event_id": event_id,
+                "closed_at": closed_at,
+                "net_pnl_usdt": net_pnl,
+            }
+        )
+    return sorted(events, key=lambda event: event["closed_at"])
+
+
+def _owner_state_direction(owner_state: dict[str, Any]) -> str | None:
+    position_state = owner_state.get("position_state") if isinstance(owner_state.get("position_state"), dict) else {}
+    direction = (
+        position_state.get("direction")
+        or owner_state.get("direction")
+        or position_state.get("side")
+        or owner_state.get("side")
+    )
+    if direction is None:
+        return None
+    direction_text = str(direction).upper()
+    if direction_text in {"LONG", "BUY"}:
+        return "LONG"
+    if direction_text in {"SHORT", "SELL"}:
+        return "SHORT"
+    return None
+
+
+def _fill_net_pnl_usdt(fill: dict[str, Any]) -> float | None:
+    net_value = _first_numeric(fill, ("netPnl", "net_pnl", "netPnlUsd", "net_pnl_usd", "net_pnl_usdt"))
+    if net_value is not None:
+        return net_value
+    pnl_value = _first_numeric(fill, ("realizedPnl", "realized_pnl", "pnl", "fillPnl", "fill_pnl"))
+    if pnl_value is None:
+        return None
+    fee_value = _optional_numeric(fill.get("fee"))
+    if fee_value is not None:
+        return pnl_value + fee_value
+    commission_value = _optional_numeric(fill.get("commission"))
+    if commission_value is not None:
+        return pnl_value - abs(commission_value)
+    return pnl_value
+
+
+def _exchange_fill_event_id(fill: dict[str, Any]) -> str:
+    for key in ("billId", "bill_id", "tradeId", "trade_id", "ordId", "order_id", "clOrdId", "client_order_id"):
+        value = fill.get(key)
+        if value not in (None, ""):
+            return f"{key}:{value}"
+    timestamp = fill.get("fillTime") or fill.get("fill_time") or fill.get("ts") or fill.get("uTime") or ""
+    return f"fill:{timestamp}:{fill.get('side', '')}:{fill.get('pnl', fill.get('realizedPnl', ''))}"
+
+
 def _record_wake(repository: Any, wake: dict[str, Any]) -> dict[str, Any]:
     return repository.record_wake_run(wake)
 
@@ -544,6 +1146,30 @@ def _parse_timestamp(value: Any) -> datetime:
         return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _parse_optional_timestamp(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    try:
+        return _parse_exchange_timestamp(value, fallback=datetime.min.replace(tzinfo=UTC))
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_exchange_timestamp(value: Any, *, fallback: datetime) -> datetime:
+    if value in (None, ""):
+        return fallback
+    if isinstance(value, datetime):
+        return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+    text = str(value)
+    try:
+        numeric = float(text)
+    except ValueError:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    scale = 1000 if abs(numeric) >= 10_000_000_000 else 1
+    return datetime.fromtimestamp(numeric / scale, tz=UTC)
 
 
 def _run_entry_decision(
@@ -1858,6 +2484,39 @@ def _numeric(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _optional_numeric(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_numeric(row: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+    for key in keys:
+        value = _optional_numeric(row.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _positive_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
 
 
 def _format_decimal(value: Any) -> str:

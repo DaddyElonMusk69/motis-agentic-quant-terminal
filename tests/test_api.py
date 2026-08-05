@@ -52,6 +52,24 @@ def test_copy_strategy_sidecars_preserves_supervised_model_artifact(tmp_path):
     assert (bundle_root / "model_artifact.json").read_text() == artifact_path.read_text()
 
 
+def test_live_pause_rules_from_simulation_inputs_keeps_live_supported_pause_rules():
+    rules = api_main._live_pause_rules_from_simulation_inputs(
+        {
+            "pause_rules": [
+                {"type": "consecutive_losses", "consecutive_count": 2, "cooldown_hours": 4},
+                {"type": "consecutive_wins", "consecutive_count": "3", "cooldown_hours": "8"},
+                {"type": "profit_burst", "profit_threshold_pct": 2.5, "lookback_hours": 24, "cooldown_hours": 6},
+            ]
+        }
+    )
+
+    assert rules == [
+        {"type": "consecutive_losses", "consecutive_count": 2, "cooldown_hours": 4},
+        {"type": "consecutive_wins", "consecutive_count": 3, "cooldown_hours": 8},
+        {"type": "profit_burst", "profit_threshold_pct": 2.5, "lookback_hours": 24, "cooldown_hours": 6},
+    ]
+
+
 def test_stage4b_materialization_carries_supervised_model_artifact(tmp_path):
     promotion_root = tmp_path / "promotion"
     source_root = tmp_path / "stage1a"
@@ -6280,7 +6298,10 @@ def test_promote_execution_bundle_creates_route_and_blocked_wake(tmp_path, monke
     repository.create_stage1_research_session(session)
     client = TestClient(create_app(runtime_repository=repository))
 
-    promote_response = client.post(f"/api/v1/research/stage1-sessions/{session['session_id']}/promote-execution-bundle")
+    promote_response = client.post(
+        f"/api/v1/research/stage1-sessions/{session['session_id']}/promote-execution-bundle",
+        json={"source": "stage4_realized_expectancy", "candidate_id": "pyramid"},
+    )
     routes_response = client.get("/api/v1/trading/routes")
     settings_response = client.patch(
         "/api/v1/trading/routes/aave-live/settings",
@@ -6344,7 +6365,10 @@ def test_promote_execution_bundle_selects_stage4b_when_walk_forward_is_better(tm
     repository.create_stage1_research_session(session)
     client = TestClient(create_app(runtime_repository=repository))
 
-    response = client.post(f"/api/v1/research/stage1-sessions/{session['session_id']}/promote-execution-bundle")
+    response = client.post(
+        f"/api/v1/research/stage1-sessions/{session['session_id']}/promote-execution-bundle",
+        json={"source": "stage4b_timing", "candidate_id": "stage4b-best"},
+    )
 
     assert response.status_code == 200
     bundle = response.json()["bundle"]
@@ -6362,6 +6386,63 @@ def test_promote_execution_bundle_selects_stage4b_when_walk_forward_is_better(tm
     assert skipped["trade_action"] == "SKIP"
     assert skipped["direction"] == "FLAT"
     assert skipped["reason_code"] == "timing_filter_utc_window"
+
+
+def test_promote_execution_bundle_requires_manual_candidate_selection(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'execution-requires-manual.db'}")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    _register_vegas_engine(repository)
+    session = _queue_session(tmp_path, "candidate-aave", "AAVE", "stage1a_frozen")
+    promotion_root = tmp_path / session["artifact_root"] / "promotion"
+    _write_promotable_stage4_branches(
+        promotion_root,
+        stage4a_wf=8,
+        stage4a_total=500,
+        stage4b_wf=18,
+        stage4b_total=450,
+    )
+    repository.create_stage0_universe(_queue_universe_run(), [_queue_candidate("candidate-aave", "AAVE", "accepted", 91.2)])
+    repository.create_stage1_research_session(session)
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post(f"/api/v1/research/stage1-sessions/{session['session_id']}/promote-execution-bundle")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Execution bundle promotion requires selecting a Stage 4 candidate"
+
+
+def test_promote_execution_bundle_uses_manual_candidate_selection(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'execution-manual-candidate.db'}")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    _register_vegas_engine(repository)
+    session = _queue_session(tmp_path, "candidate-aave", "AAVE", "stage1a_frozen")
+    promotion_root = tmp_path / session["artifact_root"] / "promotion"
+    _write_promotable_stage4_branches(
+        promotion_root,
+        stage4a_wf=8,
+        stage4a_total=500,
+        stage4b_wf=18,
+        stage4b_total=450,
+    )
+    repository.create_stage0_universe(_queue_universe_run(), [_queue_candidate("candidate-aave", "AAVE", "accepted", 91.2)])
+    repository.create_stage1_research_session(session)
+    client = TestClient(create_app(runtime_repository=repository))
+
+    response = client.post(
+        f"/api/v1/research/stage1-sessions/{session['session_id']}/promote-execution-bundle",
+        json={"source": "stage4_realized_expectancy", "candidate_id": "stage4a-best"},
+    )
+
+    assert response.status_code == 200
+    bundle = response.json()["bundle"]
+    assert bundle["execution_setup"]["source"] == "stage4_realized_expectancy"
+    assert bundle["execution_setup"]["stage4_candidate_id"] == "stage4a-best"
+    assert bundle["execution_setup"]["promotion_selection"]["criterion"] == "manual_candidate_selection"
+    assert "stage4b_timing_replay" not in bundle["evidence_refs"]
 
 
 def test_promote_execution_bundle_prefers_highest_oos_protected_candidate(tmp_path, monkeypatch):
@@ -6401,14 +6482,17 @@ def test_promote_execution_bundle_prefers_highest_oos_protected_candidate(tmp_pa
     repository.create_stage1_research_session(session)
     client = TestClient(create_app(runtime_repository=repository))
 
-    response = client.post(f"/api/v1/research/stage1-sessions/{session['session_id']}/promote-execution-bundle")
+    response = client.post(
+        f"/api/v1/research/stage1-sessions/{session['session_id']}/promote-execution-bundle",
+        json={"source": "stage4_realized_expectancy", "candidate_id": "stage4a-protected"},
+    )
 
     assert response.status_code == 200
     bundle = response.json()["bundle"]
     assert bundle["execution_setup"]["source"] == "stage4_realized_expectancy"
     assert bundle["execution_setup"]["stage4_candidate_id"] == "stage4a-protected"
     assert bundle["execution_setup"]["setup"]["protection_enabled"] is True
-    assert bundle["execution_setup"]["promotion_selection"]["criterion"] == "protected_walk_forward_net_pnl_pct"
+    assert bundle["execution_setup"]["promotion_selection"]["criterion"] == "manual_candidate_selection"
 
 
 def test_stage1_gate_reports_resolved_promotion_candidate(tmp_path, monkeypatch):
@@ -6455,7 +6539,10 @@ def test_promote_execution_bundle_keeps_stage4a_when_stage4b_only_wins_total_pnl
     repository.create_stage1_research_session(session)
     client = TestClient(create_app(runtime_repository=repository))
 
-    response = client.post(f"/api/v1/research/stage1-sessions/{session['session_id']}/promote-execution-bundle")
+    response = client.post(
+        f"/api/v1/research/stage1-sessions/{session['session_id']}/promote-execution-bundle",
+        json={"source": "stage4_realized_expectancy", "candidate_id": "stage4a-best"},
+    )
 
     assert response.status_code == 200
     bundle = response.json()["bundle"]
@@ -6484,7 +6571,10 @@ def test_promote_execution_bundle_ignores_stale_stage4b_overlay(tmp_path, monkey
     repository.create_stage1_research_session(session)
     client = TestClient(create_app(runtime_repository=repository))
 
-    response = client.post(f"/api/v1/research/stage1-sessions/{session['session_id']}/promote-execution-bundle")
+    response = client.post(
+        f"/api/v1/research/stage1-sessions/{session['session_id']}/promote-execution-bundle",
+        json={"source": "stage4_realized_expectancy", "candidate_id": "stage4a-best"},
+    )
 
     assert response.status_code == 200
     bundle = response.json()["bundle"]
@@ -6515,7 +6605,10 @@ def test_promote_execution_bundle_rejects_missing_strategy_decide(tmp_path, monk
     repository.create_stage1_research_session(session)
     client = TestClient(create_app(runtime_repository=repository))
 
-    response = client.post(f"/api/v1/research/stage1-sessions/{session['session_id']}/promote-execution-bundle")
+    response = client.post(
+        f"/api/v1/research/stage1-sessions/{session['session_id']}/promote-execution-bundle",
+        json={"source": "stage4_realized_expectancy", "candidate_id": "fixed"},
+    )
 
     assert response.status_code == 400
     assert response.json()["detail"] == "strategy module must expose callable decide(context)"
@@ -6544,7 +6637,10 @@ def test_promote_execution_bundle_rejects_invalid_execution_setup(tmp_path, monk
     repository.create_stage1_research_session(session)
     client = TestClient(create_app(runtime_repository=repository))
 
-    response = client.post(f"/api/v1/research/stage1-sessions/{session['session_id']}/promote-execution-bundle")
+    response = client.post(
+        f"/api/v1/research/stage1-sessions/{session['session_id']}/promote-execution-bundle",
+        json={"source": "stage4_realized_expectancy", "candidate_id": "fixed"},
+    )
 
     assert response.status_code == 400
     assert response.json()["detail"] == "execution setup missing initial_sl_pct"
@@ -6889,6 +6985,70 @@ def test_trading_wake_auto_warms_required_market_data(tmp_path, monkeypatch):
     assert payload["wake"]["signal_scan_result"]["status"] == "no_fresh_signal"
     assert fill_calls == ["aave-raw-5m"]
     assert signal_extension_calls == [("vegas_ema", "AAVE", None)]
+
+
+def test_trading_wake_wires_derivatives_raw_fill_services(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'derivatives-warmup.db'}")
+    metadata.create_all(engine)
+    repository = RuntimeRepository(engine)
+    _register_vegas_engine(repository)
+    stored_bundle = repository.create_execution_bundle(_execution_bundle(tmp_path))
+    route = repository.upsert_deployment_route_for_bundle(
+        bundle=stored_bundle,
+        account_mode="demo",
+        execution_adapter="okx",
+    )
+
+    class FakeOKXAdapter:
+        def readiness_blockers(self):
+            return []
+
+    captured = {}
+
+    def fake_lifecycle_cycle(**kwargs):
+        captured.update(kwargs)
+        return {
+            "warmup": {"status": "warmed"},
+            "signal_update": {"status": "noop"},
+            "wake": {"status": "completed"},
+            "submission": {"status": "skipped"},
+            "route": repository.get_deployment_route(route["route_id"]),
+        }
+
+    monkeypatch.setattr(api_main, "build_exchange_adapter", lambda route: FakeOKXAdapter())
+    monkeypatch.setattr(api_main, "run_route_lifecycle_cycle", fake_lifecycle_cycle)
+
+    client = TestClient(
+        create_app(
+            runtime_repository=repository,
+            market_data_repository=object(),
+            live_signal_scan_service=lambda **kwargs: None,
+        )
+    )
+
+    response = client.post(f"/api/v1/trading/routes/{route['route_id']}/wake")
+
+    assert response.status_code == 200
+    assert set(captured["raw_fill_services"]) == {
+        "candles",
+        "open_interest",
+        "futures_metrics",
+        "premium_index",
+        "funding",
+    }
+    assert captured["raw_fill_services"]["futures_metrics"] is api_main.fill_raw_futures_metrics_dataset
+    assert captured["raw_fill_services"]["premium_index"] is api_main.fill_raw_premium_index_dataset
+    assert captured["raw_fill_services"]["funding"] is api_main.fill_raw_funding_dataset
+    assert set(captured["raw_adapters"]) == {
+        "candles",
+        "open_interest",
+        "futures_metrics",
+        "premium_index",
+        "funding",
+    }
+    assert captured["raw_adapters"]["futures_metrics"] is captured["raw_adapters"]["open_interest"]
+    assert captured["raw_adapters"]["premium_index"] is captured["raw_adapters"]["open_interest"]
+    assert captured["raw_adapters"]["funding"] is captured["raw_adapters"]["open_interest"]
 
 
 def test_submit_wake_orders_places_order_and_persists_owner_state(tmp_path, monkeypatch):

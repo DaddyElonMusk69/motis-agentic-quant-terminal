@@ -14,6 +14,7 @@ from quant_terminal_sdk.market_data_reader import (
 from quant_terminal_worker.adapters.okx import OKXAdapter
 from quant_terminal_worker.adapters.binance import BinanceCLIAdapter
 from quant_terminal_worker.ingestion.ema_enrichment import enrich_derived_ema_datasets
+from quant_terminal_worker.ingestion.atr_enrichment import enrich_atr_datasets
 from quant_terminal_worker.ingestion.feature_enrichment import enrich_feature_family_datasets
 from quant_terminal_worker.ingestion.open_interest_feature_enrichment import (
     FEATURE_FAMILY as OPEN_INTEREST_FEATURE_FAMILY,
@@ -76,6 +77,7 @@ def execute_job(
     handlers = {
         "market_data_refresh": _execute_market_data_refresh,
         "market_data_ema_refresh": _execute_market_data_ema_refresh,
+        "market_data_atr_refresh": _execute_market_data_atr_refresh,
         "market_data_feature_refresh": _execute_market_data_feature_refresh,
         "signal_pool_extend": _execute_signal_pool_extend,
         "stage0_candidate": _execute_stage0_candidate_job,
@@ -162,7 +164,7 @@ def _execute_market_data_refresh(
     workspace_root: Path,
     market_data_repository: Any | None = None,
 ) -> dict[str, Any]:
-    del repository, workspace_root
+    del workspace_root
     if market_data_repository is None:
         raise ValueError("market data repository is required for market_data_refresh jobs")
     payload = job.get("payload") or {}
@@ -170,6 +172,21 @@ def _execute_market_data_refresh(
     registration = market_data_repository.get_ref(dataset_id)
     if registration is None:
         raise ValueError(f"dataset not found: {dataset_id}")
+    heartbeat = getattr(repository, "heartbeat_job", None)
+    if callable(heartbeat):
+        heartbeat(
+            job["job_id"],
+            current_step=f"refreshing_{registration.get('data_type') or 'market_data'}",
+        )
+    if registration.get("data_type") == "technical_indicator_atr":
+        schema = registration.get("schema_descriptor") or {}
+        return enrich_atr_datasets(
+            repository=market_data_repository,
+            asset=registration["asset"],
+            timeframes=(registration.get("timeframe") or "2h",),
+            period=int(schema.get("period") or 14),
+            target_root=Path(".data/market-data"),
+        )
     if registration.get("data_type") == "open_interest":
         return fill_raw_open_interest_dataset(
             registration=registration,
@@ -240,6 +257,29 @@ def _execute_market_data_ema_refresh(
     payload = job.get("payload") or {}
     asset = str(payload["asset"]).upper() if payload.get("asset") else None
     return enrich_derived_ema_datasets(repository=market_data_repository, asset=asset)
+
+
+def _execute_market_data_atr_refresh(
+    *,
+    repository: Any,
+    job: dict[str, Any],
+    workspace_root: Path,
+    market_data_repository: Any | None = None,
+) -> dict[str, Any]:
+    del repository
+    if market_data_repository is None:
+        raise ValueError("market data repository is required for market_data_atr_refresh jobs")
+    payload = job.get("payload") or {}
+    asset = str(payload["asset"]).upper() if payload.get("asset") else None
+    timeframes = tuple(payload.get("timeframes") or ("1h", "2h", "4h"))
+    period = int(payload.get("period") or 14)
+    return enrich_atr_datasets(
+        repository=market_data_repository,
+        asset=asset,
+        timeframes=timeframes,
+        period=period,
+        target_root=workspace_root / ".data" / "market-data",
+    )
 
 
 def _execute_market_data_feature_refresh(
