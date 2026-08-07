@@ -35,11 +35,14 @@ def extend_signal_pool_from_local_candles(
         raise ValueError(f"Canonical signal pool not found for {signal_engine_id}/{asset}")
 
     reader = MarketDataReader(repository=repository, workspace_root=root)
-    raw_5m = reader.get_candles(asset=asset, timeframe="5m", origin="raw")
-    if not raw_5m:
-        raise ValueError(f"Raw candle data is empty for {asset}. Update local candle data first.")
+    raw_ref = repository.get_candle_ref(asset=asset, timeframe="5m", origin="raw", data_type="candles")
+    if raw_ref is None:
+        raise ValueError(f"Raw candle data is missing for {asset}. Update local candle data first.")
+    if not raw_ref.get("end_ts"):
+        raise ValueError(f"Raw candle coverage end is missing for {asset}. Update local candle data first.")
 
-    raw_candle_end = raw_5m[-1].timestamp
+    raw_candle_end = _parse_timestamp(raw_ref["end_ts"])
+    raw_candle_start = _parse_timestamp(raw_ref.get("start_ts") or signal_set.get("start_ts") or raw_candle_end)
     requested_target = _parse_timestamp(target_end) if target_end else raw_candle_end
     if requested_target > raw_candle_end:
         raise ValueError(
@@ -47,10 +50,7 @@ def extend_signal_pool_from_local_candles(
             "Update local candle data first."
         )
 
-    existing_signals = repository.list_signals(signal_set_key=signal_set_key, limit=1_000_000)
-    existing_timestamps = {_parse_timestamp(signal["timestamp"]) for signal in existing_signals}
-    admitted_timestamps = sorted(existing_timestamps)
-    previous_signal_end = max(existing_timestamps) if existing_timestamps else None
+    previous_signal_end = _parse_timestamp(signal_set["end_ts"]) if signal_set.get("end_ts") else None
     previous_scan_coverage = _scan_coverage(signal_set)
     previous_scan_end = previous_scan_coverage.get("end_ts")
 
@@ -68,9 +68,19 @@ def extend_signal_pool_from_local_candles(
     scan_start = _scan_start(
         previous_signal_end=previous_signal_end,
         previous_scan_coverage=previous_scan_coverage,
-        fallback_start=raw_5m[0].timestamp,
+        fallback_start=raw_candle_start,
         overlap=overlap,
     )
+    dedupe_window = timedelta(minutes=int(parameters.get("dedupe_window_minutes", 120)))
+    existing_signals = _recent_signal_rows(
+        repository=repository,
+        signal_set_key=signal_set_key,
+        scan_start=scan_start,
+        target_end=requested_target,
+        dedupe_window=dedupe_window,
+    )
+    existing_timestamps = {_parse_timestamp(signal["timestamp"]) for signal in existing_signals}
+    admitted_timestamps = sorted(existing_timestamps)
 
     if previous_scan_end is not None and requested_target <= previous_scan_end and (
         overlap <= timedelta(0) or scan_start > requested_target
@@ -84,10 +94,10 @@ def extend_signal_pool_from_local_candles(
             previous_signal_end=previous_signal_end,
             scan_coverage_end=previous_scan_end,
             final_signal_end=previous_signal_end,
-            existing_packet_count=len(existing_signals),
+            existing_packet_count=int(signal_set.get("packet_count") or 0),
             generated_packet_count=0,
             appended_packet_count=0,
-            final_packet_count=len(existing_signals),
+            final_packet_count=int(signal_set.get("packet_count") or 0),
             generated_artifact_root=None,
             import_result={"status": "skipped", "reason": "already_scanned_to_target"},
         )
@@ -96,7 +106,6 @@ def extend_signal_pool_from_local_candles(
     dedupe_seed = _latest_admitted_before(admitted_timestamps, scan_start)
     if dedupe_seed is not None:
         generation_parameters["_dedupe_seed_timestamp"] = _iso_z(dedupe_seed)
-    dedupe_window = timedelta(minutes=int(parameters.get("dedupe_window_minutes", 120)))
     stream_state = {
         "generated_packet_count": 0,
         "appended_packet_count": 0,
@@ -162,6 +171,7 @@ def extend_signal_pool_from_local_candles(
 
     if generated_packets:
         packet_sink(generated_packets)
+    existing_packet_count = int(signal_set.get("packet_count") or 0)
     import_result = {
         "status": "imported",
         "signal_engine_id": signal_engine_id,
@@ -172,7 +182,7 @@ def extend_signal_pool_from_local_candles(
         "source": "parquet_market_data",
         "mode": "chunked",
     }
-    final_packet_count = len(existing_signals) + stream_state["appended_packet_count"]
+    final_packet_count = existing_packet_count + stream_state["appended_packet_count"]
     final_signal_end = stream_state["final_signal_end"]
     updated_manifest = _updated_manifest(
         signal_set=signal_set,
@@ -208,7 +218,7 @@ def extend_signal_pool_from_local_candles(
         previous_signal_end=previous_signal_end,
         scan_coverage_end=scan_coverage_end,
         final_signal_end=final_signal_end,
-        existing_packet_count=len(existing_signals),
+        existing_packet_count=existing_packet_count,
         generated_packet_count=stream_state["generated_packet_count"] or len(generated_packets),
         appended_packet_count=stream_state["appended_packet_count"],
         final_packet_count=(refreshed or {}).get("packet_count", final_packet_count),
@@ -350,6 +360,33 @@ def _scan_start(
             return max(fallback_start, previous_scan_end - overlap + timedelta(minutes=5))
         return previous_scan_end + timedelta(minutes=5)
     return previous_signal_end or fallback_start
+
+
+def _recent_signal_rows(
+    *,
+    repository: Any,
+    signal_set_key: str,
+    scan_start: datetime,
+    target_end: datetime,
+    dedupe_window: timedelta,
+) -> list[dict[str, Any]]:
+    getter = getattr(repository, "list_signals_for_signal_set_window", None)
+    if callable(getter):
+        window_start = scan_start - dedupe_window if dedupe_window > timedelta(0) else scan_start
+        return getter(
+            signal_set_key=signal_set_key,
+            window_start=_iso_z(window_start),
+            window_end=_iso_z(target_end),
+        )
+    fallback = getattr(repository, "list_signals", None)
+    if not callable(fallback):
+        return []
+    rows = fallback(signal_set_key=signal_set_key, limit=10_000, descending=True)
+    return [
+        row
+        for row in rows
+        if scan_start - dedupe_window <= _parse_timestamp(row["timestamp"]) <= target_end
+    ]
 
 
 def _latest_admitted_before(timestamps: list[datetime], timestamp: datetime) -> datetime | None:

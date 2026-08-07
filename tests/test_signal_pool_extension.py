@@ -638,6 +638,93 @@ def test_extend_signal_pool_rescans_configured_overlap_when_target_already_cover
     ]
 
 
+def test_extend_signal_pool_does_not_read_full_history_in_live_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = _make_workspace(tmp_path)
+    repository = _repository_with_signal_pool(
+        root,
+        scan_coverage={
+            "start_ts": "2026-05-10T00:00:00Z",
+            "end_ts": "2026-05-20T00:00:00Z",
+            "source": "parquet_market_data",
+        },
+    )
+    _register_default_refs(
+        repository,
+        root=root,
+        asset="AAVE",
+        timestamps=[
+            "2026-05-10T00:00:00Z",
+            "2026-05-20T00:00:00Z",
+            "2026-05-20T00:05:00Z",
+        ],
+    )
+
+    def fail_full_history_read(*args, **kwargs):
+        raise AssertionError("live extension must not read full raw candle history")
+
+    monkeypatch.setattr(
+        "quant_terminal_sdk.market_data_reader.MarketDataReader.get_candles",
+        fail_full_history_read,
+    )
+
+    def fake_resolve_signal_engine(*args, **kwargs):
+        class FakeSpec:
+            configuration_schema = {"default_parameters": {"dedupe_window_minutes": 120}}
+            required_data = [{"data_type": "candles", "origin": "raw", "timeframe": "5m"}]
+
+        class FakeResolved:
+            spec = FakeSpec()
+
+            @staticmethod
+            def generate_training_signals(context):
+                context.packet_sink(
+                    [
+                        {
+                            "schema_version": "signal_packet.v2",
+                            "asset": "AAVE",
+                            "timestamp": "2026-05-20T00:05:00Z",
+                        }
+                    ]
+                )
+
+                class FakeOutput:
+                    packets = []
+                    result = TrainingSignalGenerationResult(
+                        status="appended",
+                        generated_packet_count=1,
+                        appended_packet_count=0,
+                        raw_candle_end_ts="2026-05-20T00:05:00Z",
+                        scan_coverage_end_ts="2026-05-20T00:05:00Z",
+                    )
+
+                return FakeOutput()
+
+        return FakeResolved()
+
+    monkeypatch.setattr(
+        "quant_terminal_worker.ingestion.signal_pool_extension.resolve_signal_engine",
+        fake_resolve_signal_engine,
+    )
+
+    result = extend_signal_pool_from_local_candles(
+        workspace_root=root,
+        repository=repository,
+        signal_engine_id="vegas_ema",
+        asset="AAVE",
+        target_end="2026-05-20T00:05:00Z",
+    )
+
+    assert result["status"] == "extended"
+    assert result["appended_packet_count"] == 1
+    assert [_iso_z(signal["timestamp"]) for signal in repository.list_signals(signal_set_key=result["signal_set_key"])] == [
+        "2026-05-10T00:00:00+00:00",
+        "2026-05-20T00:05:00+00:00",
+    ]
+
+
 def test_extend_signal_pool_resumes_after_existing_parquet_scan_coverage(
     tmp_path: Path,
     monkeypatch,
