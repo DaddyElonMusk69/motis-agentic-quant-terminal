@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 import quant_terminal_worker.stage3.grid_search as stage3_grid
+from quant_terminal_worker.execution import atr_source
 from quant_terminal_worker.stage3.grid_search import (
     _build_trade_candle_windows,
     run_stage3_exact_protection,
@@ -11,6 +12,26 @@ from quant_terminal_worker.stage3.grid_search import (
     run_stage3_grid_search,
     run_stage3_local_variants,
 )
+
+
+class FakeAtrRepository:
+    def get_ref(self, dataset_id: str):
+        if dataset_id == "aave-atr-1h":
+            return {
+                "dataset_id": "aave-atr-1h",
+                "data_type": "technical_indicator_atr",
+                "data_origin": "derived",
+                "timeframe": "1h",
+                "storage_backend": "parquet",
+                "storage_uri": ".data/aave-atr-1h.parquet",
+                "schema_descriptor": {"period": 14},
+            }
+        return None
+
+    def get_data_ref(self, *, asset: str, timeframe: str, origin: str, data_type: str):
+        if (asset, timeframe, origin, data_type) == ("AAVE", "1h", "derived", "technical_indicator_atr"):
+            return self.get_ref("aave-atr-1h")
+        return None
 
 
 def test_stage3_substeps_write_artifacts_incrementally(tmp_path: Path):
@@ -92,6 +113,68 @@ def test_stage3_local_variants_requires_exact_protection_substep(tmp_path: Path)
 
     with pytest.raises(ValueError, match="Stage 3B exact protection"):
         run_stage3_local_variants(workspace_root=tmp_path, session=_session(artifact_root, stage0_root), candles=[])
+
+
+def test_stage3_local_variants_include_atr_dynamic_sweep_when_atr_dataset_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    artifact_root, stage0_root = _stage3_workspace(tmp_path)
+    promotion_root = artifact_root / "promotion"
+    _write_stage0_summary(stage0_root, significance_threshold_pct=1.0, forward_hours=2)
+    _write_stage2_capture(promotion_root, tp_levels=[0.5, 1.0, 1.5])
+    _write_stage2_policy(promotion_root, lock_profit_pct=1.5, initial_sl_pct=0.8, protect_trigger_pct=1.0, trail_sl_pct=0.5)
+    _write_trade_inputs(
+        promotion_root,
+        [
+            {
+                "signal_id": "sig-atr",
+                "sample_role": "training",
+                "decision_direction": "LONG",
+                "direction": "LONG",
+                "agreement": "MATCH",
+                "signal_ts": "2026-05-01T00:00:00Z",
+                "reference_price": 100,
+            }
+        ],
+    )
+    candles = [
+        {"timestamp": "2026-05-01T00:05:00Z", "open": 100, "high": 103.5, "low": 99.8, "close": 102.0},
+        {"timestamp": "2026-05-01T00:10:00Z", "open": 102, "high": 103.8, "low": 101.0, "close": 103.0},
+    ]
+    atr_source._cached_atr_series.cache_clear()
+    monkeypatch.setattr(
+        atr_source,
+        "read_rows_from_ref",
+        lambda *args, **kwargs: [
+            {
+                "timestamp": "2026-05-01T00:00:00Z",
+                "available_at": "2026-05-01T00:00:00Z",
+                "atr_pct": 1.0,
+                "warmup_complete": True,
+            }
+        ],
+    )
+
+    run_stage3_fixed_sl_baseline(workspace_root=tmp_path, session=_session(artifact_root, stage0_root), candles=candles)
+    run_stage3_exact_protection(workspace_root=tmp_path, session=_session(artifact_root, stage0_root), candles=candles)
+    result = run_stage3_local_variants(
+        workspace_root=tmp_path,
+        session=_session(artifact_root, stage0_root),
+        candles=candles,
+        market_data_repository=FakeAtrRepository(),
+        shortlist_size=100,
+    )
+
+    atr_rows = result["atr_variant_results"]
+    assert result["stage3c_atr_combinations_tested"] == 16
+    assert len(atr_rows) == 16
+    assert result["stage3c_value_ranges"]["atr_timeframes"] == ["1h"]
+    assert {row["exit_policy_type"] for row in atr_rows} == {"atr_dynamic"}
+    assert {row["atr_source"]["tp_multiplier"] for row in atr_rows} == {1.5, 2.0, 2.5, 3.0}
+    assert {row["atr_source"]["sl_multiplier"] for row in atr_rows} == {0.75, 1.0, 1.25, 1.5}
+    candidate = next(row for row in result["stage4_candidates"]["candidates"] if row["setup"].get("exit_policy_type") == "atr_dynamic")
+    assert candidate["setup"]["atr_source"]["dataset_id"] == "aave-atr-1h"
 
 
 def test_stage3_fixed_target_preserves_tp_sl_across_protection_variants(

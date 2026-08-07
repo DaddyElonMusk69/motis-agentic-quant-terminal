@@ -166,8 +166,8 @@ def _resolve_storage_uri(*, workspace_root: Path, value: str | Path) -> Path:
 
 def _read_parquet_rows(file: Path, *, dataset_id: str) -> list[dict[str, Any]]:
     try:
-        return pq.read_table(file).to_pylist()
-    except (pa.ArrowInvalid, pa.ArrowIOError, OSError) as exc:
+        return pq.ParquetFile(file).read().to_pylist()
+    except (pa.ArrowException, OSError) as exc:
         raise ValueError(f"Corrupt parquet shard for {dataset_id}: {file}") from exc
 
 

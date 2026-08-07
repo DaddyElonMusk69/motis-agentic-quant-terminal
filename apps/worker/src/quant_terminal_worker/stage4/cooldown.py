@@ -26,6 +26,7 @@ def run_stage4_loss_cooldown_experiment(
     session: dict[str, Any],
     signal_rows: list[dict[str, Any]],
     candles: list[Any],
+    market_data_repository: Any | None = None,
     consecutive_loss_options: Iterable[int] = (2, 3),
     cooldown_hour_options: Iterable[int] = range(4, 13),
 ) -> dict[str, Any]:
@@ -55,6 +56,9 @@ def run_stage4_loss_cooldown_experiment(
         "records": records,
         "signals_by_id": signals_by_id,
         "candles": candle_rows,
+        "asset": str(session.get("asset") or "").upper() or None,
+        "market_data_repository": market_data_repository,
+        "workspace_root": workspace_root,
         "initial_capital_usdt": float(inputs.get("initial_capital_usdt", 10_000.0)),
         "margin_allocation_pct": float(inputs.get("margin_allocation_pct", 30.0)),
         "leverage": float(inputs.get("leverage", candidate.get("leverage", 5.0))),

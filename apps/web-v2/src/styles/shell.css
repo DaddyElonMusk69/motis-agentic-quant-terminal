@@ -4729,6 +4729,78 @@
   overflow: auto;
 }
 
+.signal-visualization-modal {
+  max-height: min(900px, calc(100vh - 32px));
+  max-width: 1540px;
+  min-width: min(1440px, calc(100vw - 32px));
+}
+
+.signal-visualization-summary {
+  align-items: center;
+  background: var(--surface-muted);
+  border-bottom: 1px solid var(--line-subtle);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  min-height: 44px;
+  padding: var(--space-2) var(--space-4);
+}
+
+.signal-visualization-summary span {
+  color: var(--ink-muted);
+  font-size: 11px;
+}
+
+.signal-visualization-summary strong {
+  color: var(--ink-primary);
+  margin-right: 4px;
+}
+
+.signal-visualization-modal__body {
+  display: grid;
+  flex: 1 1 auto;
+  gap: var(--space-4);
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 0.32fr);
+  min-height: min(700px, calc(100vh - 176px));
+  overflow: hidden;
+}
+
+.signal-visualization-modal__body > .terminal-panel {
+  min-height: 0;
+  overflow: auto;
+}
+
+.signal-visualization-chart {
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-sm);
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.signal-visualization-chart__host {
+  height: 100%;
+  min-height: min(660px, calc(100vh - 214px));
+  width: 100%;
+}
+
+.signal-visualization-state {
+  align-items: center;
+  border: 1px dashed var(--line-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--ink-muted);
+  display: flex;
+  gap: var(--space-3);
+  grid-column: 1 / -1;
+  justify-content: center;
+  min-height: min(640px, calc(100vh - 214px));
+}
+
+.signal-visualization-state.is-error {
+  border-color: color-mix(in oklch, var(--status-risk) 44%, var(--line-subtle));
+  color: var(--status-risk);
+}
+
 .observation-detail {
   display: flex;
   flex-direction: column;

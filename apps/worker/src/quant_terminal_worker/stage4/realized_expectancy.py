@@ -11,6 +11,7 @@ from typing import Any
 
 from quant_terminal_worker.stage2.capture_curve import get_reference_price
 from quant_terminal_worker.stage3.grid_search import DEFAULT_FORWARD_HOURS, DEFAULT_LEVERAGE
+from quant_terminal_worker.execution.atr_source import ATRSourceError, resolve_atr_policy
 
 
 DEFAULT_FEES_BPS_PER_SIDE = 5.0
@@ -23,6 +24,7 @@ def run_stage4_realized_expectancy(
     session: dict[str, Any],
     signal_rows: list[dict[str, Any]],
     candles: list[Any],
+    market_data_repository: Any | None = None,
     initial_capital_usdt: float = 10_000.0,
     margin_allocation_pct: float = 30.0,
     leverage: float = DEFAULT_LEVERAGE,
@@ -64,6 +66,9 @@ def run_stage4_realized_expectancy(
             records=records,
             signals_by_id=signals_by_id,
             candles=candle_rows,
+            asset=str(session.get("asset") or "").upper() or None,
+            market_data_repository=market_data_repository,
+            workspace_root=workspace_root,
             initial_capital_usdt=initial_capital_usdt,
             margin_allocation_pct=margin_allocation_pct,
             leverage=leverage,
@@ -231,6 +236,9 @@ def _score_candidate(
     records: list[dict[str, Any]],
     signals_by_id: dict[str, dict[str, Any]],
     candles: list[dict[str, Any]],
+    asset: str | None = None,
+    market_data_repository: Any | None = None,
+    workspace_root: Path | None = None,
     initial_capital_usdt: float,
     margin_allocation_pct: float,
     leverage: float,
@@ -295,6 +303,9 @@ def _score_candidate(
             item=item,
             candidate=candidate,
             candles=candles,
+            asset=asset,
+            market_data_repository=market_data_repository,
+            workspace_root=workspace_root,
             equity_before=equity,
             margin_allocation_pct=margin_allocation_pct,
             leverage=leverage,
@@ -604,6 +615,9 @@ def _simulate_account_position(
     item: dict[str, Any],
     candidate: dict[str, Any],
     candles: list[dict[str, Any]],
+    asset: str | None = None,
+    market_data_repository: Any | None = None,
+    workspace_root: Path | None = None,
     equity_before: float,
     margin_allocation_pct: float,
     leverage: float,
@@ -612,8 +626,15 @@ def _simulate_account_position(
     candle_start_index: int = 0,
 ) -> dict[str, Any]:
     direction = item["direction"]
-    policy = _candidate_policy_for_direction(candidate, direction)
     signal_ts = item["signal_ts"]
+    policy = _candidate_policy_for_direction(
+        candidate,
+        direction,
+        signal_ts=signal_ts,
+        market_data_repository=market_data_repository,
+        workspace_root=workspace_root,
+        asset=asset,
+    )
     entry_price = float(item["reference_price"])
     max_legs = int((policy.get("pyramid") or {}).get("max_legs", 1))
     max_legs = max(1, max_legs)
@@ -950,13 +971,22 @@ def _simulate_candidate_trade(
     signal_ts: datetime,
     reference_price: float,
     candles: list[dict[str, Any]],
+    market_data_repository: Any | None,
+    workspace_root: Path,
     fees_bps_per_side: float,
     slippage_bps_per_side: float,
     slice_name: str | None,
 ) -> dict[str, Any]:
     direction = str(record.get("decision_direction") or record.get("agent_direction") or "").upper()
+    policy = _candidate_policy_for_direction(
+        candidate,
+        direction,
+        signal_ts=signal_ts,
+        market_data_repository=market_data_repository,
+        workspace_root=workspace_root,
+    )
     base = {
-        "candidate_id": candidate["candidate_id"],
+        "candidate_id": policy["candidate_id"],
         "signal_id": record["signal_id"],
         "signal_ts": signal_ts.isoformat().replace("+00:00", "Z"),
         "slice_name": slice_name,
@@ -980,9 +1010,9 @@ def _simulate_candidate_trade(
         }
 
     outcome = (
-        _pyramid_outcome(direction=direction, signal_ts=signal_ts, entry_price=reference_price, candidate=candidate, candles=candles)
-        if candidate.get("pyramid")
-        else _single_leg_outcome(direction=direction, signal_ts=signal_ts, entry_price=reference_price, candidate=candidate, candles=candles)
+        _pyramid_outcome(direction=direction, signal_ts=signal_ts, entry_price=reference_price, candidate=policy, candles=candles)
+        if policy.get("pyramid")
+        else _single_leg_outcome(direction=direction, signal_ts=signal_ts, entry_price=reference_price, candidate=policy, candles=candles)
     )
     gross_pnl_pct = outcome["gross_pnl_pct_unlevered"] * candidate["leverage"]
     cost_pct = _trade_cost_pct(
@@ -1170,6 +1200,11 @@ def _normalize_candidates(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "max_hold_hours": float(setup.get("max_hold_hours", DEFAULT_FORWARD_HOURS)),
             "leverage": float(setup.get("leverage", DEFAULT_LEVERAGE)),
         }
+        if isinstance(setup.get("atr_source"), dict):
+            candidate["atr_source"] = setup["atr_source"]
+            candidate["exit_policy_type"] = setup.get("exit_policy_type", "atr_dynamic")
+        if isinstance(setup.get("atr_variant"), dict):
+            candidate["atr_variant"] = setup["atr_variant"]
         if setup.get("policy_mode") == "side_specific":
             candidate["policy_mode"] = "side_specific"
             candidate["side_policies"] = _normalize_side_policies(setup, fallback=candidate)
@@ -1222,20 +1257,45 @@ def _normalize_side_policies(setup: dict[str, Any], *, fallback: dict[str, Any])
     return policies
 
 
-def _candidate_policy_for_direction(candidate: dict[str, Any], direction: str) -> dict[str, Any]:
+def _candidate_policy_for_direction(
+    candidate: dict[str, Any],
+    direction: str,
+    *,
+    signal_ts: datetime | None = None,
+    market_data_repository: Any | None = None,
+    workspace_root: Path | None = None,
+    asset: str | None = None,
+) -> dict[str, Any]:
     if candidate.get("policy_mode") != "side_specific":
-        return candidate
-    side_policy = candidate["side_policies"][str(direction).upper()]
-    policy = {
-        **candidate,
-        **side_policy,
-        "candidate_id": candidate["candidate_id"],
-        "entry_model": candidate["entry_model"],
-        "policy_mode": "side_specific",
-        "side_policies": candidate["side_policies"],
-    }
-    if candidate.get("pyramid"):
-        policy["pyramid"] = candidate["pyramid"]
+        resolved = dict(candidate)
+    else:
+        side_policy = candidate["side_policies"][str(direction).upper()]
+        resolved = {
+            **candidate,
+            **side_policy,
+            "candidate_id": candidate["candidate_id"],
+            "entry_model": candidate["entry_model"],
+            "policy_mode": "side_specific",
+            "side_policies": candidate["side_policies"],
+        }
+        if candidate.get("pyramid"):
+            resolved["pyramid"] = candidate["pyramid"]
+    if not signal_ts or not resolved.get("atr_source"):
+        return resolved
+    if workspace_root is None:
+        raise ValueError("ATR source resolution requires workspace_root")
+    try:
+        resolved_atr = resolve_atr_policy(
+            resolved,
+            signal_timestamp=signal_ts,
+            market_data_repository=market_data_repository,
+            workspace_root=workspace_root,
+            asset=asset,
+        )
+    except ATRSourceError as exc:
+        raise ValueError(str(exc)) from exc
+    policy = resolved_atr.policy
+    policy["atr_source_diagnostics"] = resolved_atr.diagnostics
     return policy
 
 

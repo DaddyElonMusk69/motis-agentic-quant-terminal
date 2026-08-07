@@ -1,6 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Eye, FileJson, MoreVertical, Plus, RefreshCw, SlidersHorizontal, Trash2, X } from "lucide-react";
+import {
+  CandlestickSeries,
+  ColorType,
+  createChart,
+  createSeriesMarkers,
+  type IChartApi,
+  type SeriesMarker,
+  type UTCTimestamp
+} from "lightweight-charts";
+import { ArrowLeft, ChartCandlestick, Eye, FileJson, MoreVertical, Plus, RefreshCw, SlidersHorizontal, Trash2, X } from "lucide-react";
 import {
   createSignalSet,
   deleteSignalEngineData,
@@ -11,6 +20,7 @@ import {
   fetchLiveSignalObservations,
   fetchMarketDataCatalog,
   fetchSignalEngines,
+  fetchSignalSetVisualization,
   fetchSignals,
   fetchSignalSets,
   isJobResponse,
@@ -18,6 +28,8 @@ import {
   type CatalogAsset,
   type LiveSignalObservation,
   type SignalEngine,
+  type SignalSetVisualization,
+  type SignalVisualizationMarker,
   type SignalPoolExtendResult,
   type SignalRecord,
   type SignalSet
@@ -302,6 +314,7 @@ export function EnginesPage() {
   const [addTickerOpen, setAddTickerOpen] = useState(false);
   const [selectedTickerAssets, setSelectedTickerAssets] = useState<string[]>([]);
   const [observationsOpen, setObservationsOpen] = useState(false);
+  const [visualizationOpen, setVisualizationOpen] = useState(false);
   const [selectedObservationId, setSelectedObservationId] = useState<string | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const enginesQuery = useQuery({ queryKey: ["signal-engines"], queryFn: fetchSignalEngines });
@@ -327,6 +340,11 @@ export function EnginesPage() {
     enabled: observationsOpen && Boolean(selectedSignalSet),
     queryKey: ["live-signal-observations", selectedSignalSet?.signal_engine_id, selectedSignalSet?.asset],
     queryFn: () => fetchLiveSignalObservations(selectedSignalSet!.signal_engine_id, selectedSignalSet!.asset, 100)
+  });
+  const visualizationQuery = useQuery({
+    enabled: visualizationOpen && Boolean(selectedSignalSet),
+    queryKey: ["signal-set-visualization", selectedSignalSet?.signal_engine_id, selectedSignalSet?.asset],
+    queryFn: () => fetchSignalSetVisualization(selectedSignalSet!.signal_engine_id, selectedSignalSet!.asset, 80_000)
   });
   const activeScopeKey = engineId && selectedSignalSet?.asset ? `signal_set:${engineId}:${selectedSignalSet.asset.toUpperCase()}` : null;
   const latestScopeJobsQuery = useQuery({
@@ -473,6 +491,10 @@ export function EnginesPage() {
   function openObservationsModal() {
     setSelectedObservationId(null);
     setObservationsOpen(true);
+  }
+
+  function openVisualizationModal() {
+    setVisualizationOpen(true);
   }
 
   function toggleTickerAsset(asset: string) {
@@ -699,6 +721,10 @@ export function EnginesPage() {
                   <Eye aria-hidden="true" />
                   Live Observations
                 </button>
+                <button className="button button--primary" disabled={!selectedSignalSet || !selectedSignalSet.packet_count} onClick={openVisualizationModal} type="button">
+                  <ChartCandlestick aria-hidden="true" />
+                  Visualize Signals
+                </button>
                 <button
                   className="button button--secondary"
                   disabled={!selectedSignalSet || isUpdatingSelected}
@@ -881,6 +907,16 @@ export function EnginesPage() {
           onSelectObservation={setSelectedObservationId}
         />
       ) : null}
+      {visualizationOpen && selectedSignalSet ? (
+        <SignalVisualizationModal
+          error={visualizationQuery.error}
+          loading={visualizationQuery.isLoading}
+          onClose={() => setVisualizationOpen(false)}
+          onRetry={() => void visualizationQuery.refetch()}
+          selectedSignalSet={selectedSignalSet}
+          visualization={visualizationQuery.data}
+        />
+      ) : null}
     </div>
   );
 }
@@ -969,4 +1005,174 @@ function LiveObservationsModal({
       </section>
     </div>
   );
+}
+
+function SignalVisualizationModal({
+  error,
+  loading,
+  onClose,
+  onRetry,
+  selectedSignalSet,
+  visualization
+}: {
+  error: Error | null;
+  loading: boolean;
+  onClose: () => void;
+  onRetry: () => void;
+  selectedSignalSet: SignalSet;
+  visualization: SignalSetVisualization | undefined;
+}) {
+  return (
+    <div className="terminal-modal-backdrop">
+      <section className="terminal-modal signal-visualization-modal" role="dialog" aria-modal="true" aria-labelledby="signal-visualization-title">
+        <header className="terminal-modal__header">
+          <div>
+            <span className="eyebrow">{selectedSignalSet.signal_engine_id} · {selectedSignalSet.asset}</span>
+            <h2 id="signal-visualization-title">Signal Visualization</h2>
+          </div>
+          <button className="icon-button" onClick={onClose} type="button" aria-label="Close signal visualization">
+            <X aria-hidden="true" />
+          </button>
+        </header>
+        <div className="signal-visualization-summary">
+          <span><strong>{formatNumber(visualization?.summary.signal_count ?? 0)}</strong> visible signals</span>
+          <span><strong>{formatNumber(visualization?.summary.total_signal_count ?? selectedSignalSet.packet_count)}</strong> total pool signals</span>
+          <span><strong>{formatNumber(visualization?.summary.candle_count ?? 0)}</strong> {visualization?.candle_timeframe ?? "15m"} candles</span>
+          <span><strong>{formatTimestamp(visualization?.window.start ?? selectedSignalSet.start_ts)}</strong> to <strong>{formatTimestamp(visualization?.window.end ?? selectedSignalSet.end_ts)}</strong></span>
+          {visualization?.window.truncated_to_latest ? <span>Showing latest {formatNumber(visualization.window.max_candles)} candles</span> : null}
+        </div>
+        <div className="terminal-modal__body signal-visualization-modal__body">
+          {loading ? (
+            <div className="signal-visualization-state">Loading candles and signal markers…</div>
+          ) : error ? (
+            <div className="signal-visualization-state is-error">
+              <span>{error.message}</span>
+              <button className="button button--secondary button--compact" onClick={onRetry} type="button">Retry</button>
+            </div>
+          ) : !visualization || visualization.candles.length === 0 ? (
+            <div className="signal-visualization-state">No candles found for this signal pool window.</div>
+          ) : (
+            <>
+              <SignalVisualizationChart visualization={visualization} />
+              <TerminalPanel title="Marked Signals">
+                {visualization.signals.length === 0 ? <div className="state-line">No signal markers inside the visible candle window.</div> : null}
+                {visualization.signals.length ? (
+                  <DataTable
+                    columns={[
+                      { key: "time", header: "Signal Time", render: (row) => formatTimestamp(row.timestamp) },
+                      { key: "price", header: "Reference", align: "right", render: (row) => row.reference_price?.toLocaleString(undefined, { maximumFractionDigits: 4 }) ?? "n/a" },
+                      { key: "leaves", header: "Leaves", render: (row) => row.leaves.length ? row.leaves.join(", ") : row.leaf_count ? `${row.leaf_count} leaves` : "engine trigger" }
+                    ]}
+                    getRowKey={(row) => row.signal_id}
+                    rows={visualization.signals.slice(-100).reverse()}
+                    emptyLabel="No signals in the visible window."
+                  />
+                ) : null}
+              </TerminalPanel>
+            </>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function SignalVisualizationChart({ visualization }: { visualization: SignalSetVisualization }) {
+  const chartHostRef = useRef<HTMLDivElement>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+
+  useEffect(() => {
+    const host = chartHostRef.current;
+    if (!host) {
+      return;
+    }
+    const chart = createChart(host, {
+      autoSize: false,
+      width: Math.max(420, host.clientWidth),
+      height: Math.max(420, host.clientHeight),
+      layout: {
+        background: { type: ColorType.Solid, color: "#0c1118" },
+        textColor: "#9ca8b8"
+      },
+      grid: {
+        vertLines: { color: "rgba(148, 163, 184, 0.12)" },
+        horzLines: { color: "rgba(148, 163, 184, 0.12)" }
+      },
+      rightPriceScale: {
+        borderColor: "rgba(148, 163, 184, 0.22)",
+        minimumWidth: 72
+      },
+      timeScale: {
+        borderColor: "rgba(148, 163, 184, 0.22)",
+        rightOffset: 8,
+        timeVisible: true,
+        secondsVisible: false
+      },
+      crosshair: {
+        vertLine: { color: "rgba(148, 163, 184, 0.55)", labelVisible: true },
+        horzLine: { color: "rgba(148, 163, 184, 0.55)", labelVisible: true }
+      }
+    });
+    chartRef.current = chart;
+    const series = chart.addSeries(CandlestickSeries, {
+      upColor: "#2dd4bf",
+      downColor: "#fb7185",
+      borderUpColor: "#2dd4bf",
+      borderDownColor: "#fb7185",
+      wickUpColor: "#2dd4bf",
+      wickDownColor: "#fb7185"
+    });
+    const candleTimes = visualization.candles.map((candle) => epochSeconds(candle.timestamp));
+    series.setData(
+      visualization.candles.map((candle) => ({
+        time: epochSeconds(candle.timestamp) as UTCTimestamp,
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close
+      }))
+    );
+    createSeriesMarkers(series, signalMarkers(visualization.signals, candleTimes));
+    chart.timeScale().fitContent();
+    const resizeObserver = new ResizeObserver(() => {
+      chart.applyOptions({
+        width: Math.max(420, host.clientWidth),
+        height: Math.max(420, host.clientHeight)
+      });
+    });
+    resizeObserver.observe(host);
+    return () => {
+      resizeObserver.disconnect();
+      chart.remove();
+      chartRef.current = null;
+    };
+  }, [visualization]);
+
+  return (
+    <div className="signal-visualization-chart">
+      <div className="signal-visualization-chart__host" ref={chartHostRef} />
+    </div>
+  );
+}
+
+function signalMarkers(signals: SignalVisualizationMarker[], candleTimes: number[]): SeriesMarker<UTCTimestamp>[] {
+  const timeSet = new Set(candleTimes);
+  return signals.reduce<SeriesMarker<UTCTimestamp>[]>((markers, signal) => {
+      const markerTime = epochSeconds(signal.chart_timestamp);
+      if (!timeSet.has(markerTime)) {
+        return markers;
+      }
+      markers.push({
+        time: markerTime as UTCTimestamp,
+        position: "aboveBar" as const,
+        color: "#facc15",
+        shape: "circle" as const,
+        text: signal.leaves[0] ?? "signal"
+      });
+      return markers;
+    }, []);
+}
+
+function epochSeconds(value: string): number {
+  return Math.floor(Date.parse(value) / 1000);
 }

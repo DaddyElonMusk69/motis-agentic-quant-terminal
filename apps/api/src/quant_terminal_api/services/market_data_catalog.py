@@ -99,6 +99,37 @@ def read_parquet_candles(storage_uri: Path, *, limit: int = 200) -> list[dict[st
     ]
 
 
+def read_parquet_candles_window(
+    storage_uri: Path,
+    *,
+    start_ts: datetime | str | None = None,
+    end_ts: datetime | str | None = None,
+    max_rows: int = 20_000,
+) -> list[dict[str, Any]]:
+    start = _coerce_datetime(start_ts) if start_ts is not None else None
+    end = _coerce_datetime(end_ts) if end_ts is not None else None
+    rows: list[dict[str, Any]] = []
+    for file in _window_partition_files(storage_uri, start=start, end=end):
+        for row in pq.ParquetFile(file).read().to_pylist():
+            timestamp = _row_timestamp(row)
+            if timestamp is None:
+                continue
+            if start is not None and timestamp < start:
+                continue
+            if end is not None and timestamp > end:
+                continue
+            rows.append(row)
+
+    partition_columns = {"source", "type", "asset", "year", "month", "origin"}
+    rows = sorted(rows, key=lambda row: _row_timestamp(row) or datetime.min.replace(tzinfo=UTC))
+    if len(rows) > max_rows:
+        rows = rows[-max_rows:]
+    return [
+        {key: value for key, value in row.items() if key not in partition_columns}
+        for row in rows
+    ]
+
+
 def _serialize_dataset(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "dataset_id": row["dataset_id"],
@@ -122,6 +153,47 @@ def _coerce_datetime(value: datetime | str) -> datetime:
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=UTC)
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _row_timestamp(row: dict[str, Any]) -> datetime | None:
+    value = row.get("timestamp") or row.get("open_time") or row.get("start_ts")
+    if value is None:
+        return None
+    try:
+        return _coerce_datetime(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _window_partition_files(storage_uri: Path, *, start: datetime | None, end: datetime | None) -> list[Path]:
+    files = sorted(storage_uri.glob("year=*/month=*/data.parquet"))
+    if start is None and end is None:
+        return files
+    selected: list[Path] = []
+    for file in files:
+        year = _partition_int(file, "year")
+        month = _partition_int(file, "month")
+        if year is None or month is None:
+            selected.append(file)
+            continue
+        month_start = datetime(year, month, 1, tzinfo=UTC)
+        month_end = datetime(year + (1 if month == 12 else 0), 1 if month == 12 else month + 1, 1, tzinfo=UTC) - timedelta(microseconds=1)
+        if start is not None and month_end < start:
+            continue
+        if end is not None and month_start > end:
+            continue
+        selected.append(file)
+    return selected
+
+
+def _partition_int(file: Path, prefix: str) -> int | None:
+    for part in file.parts:
+        if part.startswith(f"{prefix}="):
+            try:
+                return int(part.split("=", 1)[1])
+            except ValueError:
+                return None
+    return None
 
 
 def _to_iso(value: datetime) -> str:

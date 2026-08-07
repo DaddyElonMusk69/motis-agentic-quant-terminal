@@ -65,6 +65,96 @@ class FakePremiumIndexMarketDataRepository:
         }
 
 
+class FakeRuntimeRepository:
+    def __init__(self, session: dict | None = None) -> None:
+        self.session = session or {
+            "session_id": "stage1-btc-test",
+            "asset": "BTC",
+            "signal_set_key": "engine:BTC:set",
+            "train_start": "2025-01-01",
+            "train_end": "2025-01-31",
+            "walk_forward_start": "2025-02-01",
+            "walk_forward_end": "2025-02-28",
+        }
+        self.heartbeats: list[tuple[str, str | None]] = []
+
+    def get_stage1_research_session(self, session_id: str):
+        return self.session if session_id == self.session["session_id"] else None
+
+    def heartbeat_job(self, job_id: str, current_step: str | None = None):
+        self.heartbeats.append((job_id, current_step))
+
+    def list_signals_for_signal_set_window(self, **kwargs):
+        return []
+
+
+def test_stage3_policy_job_passes_market_data_repository_to_atr_enabled_runner(monkeypatch):
+    calls = []
+
+    def fake_stage2_raw_candles(*args, **kwargs):
+        return [{"timestamp": "2025-01-01T00:00:00Z"}]
+
+    def fake_run_stage3_local_variants(**kwargs):
+        calls.append(kwargs)
+        return {"stage3c_atr_combinations_tested": 16}
+
+    monkeypatch.setattr(jobs, "_stage2_raw_candles", fake_stage2_raw_candles)
+    monkeypatch.setattr(jobs, "run_stage3_local_variants", fake_run_stage3_local_variants)
+
+    runtime_repository = FakeRuntimeRepository()
+    market_repository = object()
+    result = jobs.execute_job(
+        repository=runtime_repository,
+        market_data_repository=market_repository,
+        workspace_root=Path("/workspace"),
+        job={
+            "job_id": "job-stage3c",
+            "job_type": "stage3_policy_step",
+            "payload": {"session_id": "stage1-btc-test", "step": "local_variants"},
+        },
+    )
+
+    assert result["stage3_grid"] == {"stage3c_atr_combinations_tested": 16}
+    assert calls[0]["market_data_repository"] is market_repository
+    assert runtime_repository.heartbeats == [("job-stage3c", "stage3_local_variants")]
+
+
+def test_stage4_realized_expectancy_job_passes_market_data_repository_to_atr_enabled_runner(monkeypatch):
+    calls = []
+
+    def fake_stage2_raw_candles(*args, **kwargs):
+        return [{"timestamp": "2025-01-01T00:00:00Z"}]
+
+    def fake_run_stage4_realized_expectancy(**kwargs):
+        calls.append(kwargs)
+        return {"status": "complete"}
+
+    monkeypatch.setattr(jobs, "_stage2_raw_candles", fake_stage2_raw_candles)
+    monkeypatch.setattr(jobs, "run_stage4_realized_expectancy", fake_run_stage4_realized_expectancy)
+
+    runtime_repository = FakeRuntimeRepository()
+    market_repository = object()
+    result = jobs.execute_job(
+        repository=runtime_repository,
+        market_data_repository=market_repository,
+        workspace_root=Path("/workspace"),
+        job={
+            "job_id": "job-stage4",
+            "job_type": "stage4_realized_expectancy",
+            "payload": {
+                "session_id": "stage1-btc-test",
+                "initial_capital_usdt": 10000,
+                "margin_allocation_pct": 10,
+                "leverage": 5,
+            },
+        },
+    )
+
+    assert result["stage4_realized_expectancy"] == {"status": "complete"}
+    assert calls[0]["market_data_repository"] is market_repository
+    assert runtime_repository.heartbeats == [("job-stage4", "stage4_realized_expectancy")]
+
+
 def test_market_data_refresh_job_routes_open_interest_to_binance_fill(monkeypatch):
     calls = []
 

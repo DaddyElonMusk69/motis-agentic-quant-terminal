@@ -9,11 +9,16 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from quant_terminal_worker.execution.atr_source import ATR_DATA_TYPE, ATRSourceError, DEFAULT_LOOKUP, DEFAULT_VALUE_FIELD, resolve_atr_policy
+
 
 DEFAULT_FORWARD_HOURS = 36
 DEFAULT_FEES_BPS_PER_SIDE = 5.0
 DEFAULT_LEVERAGE = 5
 DEFAULT_SL_MULTIPLIERS = [0.75, 1.0, 1.25]
+DEFAULT_ATR_TIMEFRAMES = ("1h", "2h", "4h")
+DEFAULT_ATR_TP_MULTIPLIERS = (1.5, 2.0, 2.5, 3.0)
+DEFAULT_ATR_SL_MULTIPLIERS = (0.75, 1.0, 1.25, 1.5)
 DEFAULT_STAGE3_MIN_FULL_CYCLE_NET_PNL_PCT = 0.0
 DEFAULT_STAGE3_MIN_FULL_CYCLE_PROFIT_FACTOR = 1.0
 
@@ -29,6 +34,7 @@ def run_stage3_grid_search(
     leverage: int = DEFAULT_LEVERAGE,
     shortlist_size: int = 5,
     fees_bps_per_side: float = DEFAULT_FEES_BPS_PER_SIDE,
+    market_data_repository: Any | None = None,
 ) -> dict[str, Any]:
     run_stage3_fixed_sl_baseline(
         workspace_root=workspace_root,
@@ -57,6 +63,7 @@ def run_stage3_grid_search(
         leverage=leverage,
         shortlist_size=shortlist_size,
         fees_bps_per_side=fees_bps_per_side,
+        market_data_repository=market_data_repository,
     )
 
 
@@ -158,6 +165,7 @@ def run_stage3_local_variants(
     leverage: int = DEFAULT_LEVERAGE,
     shortlist_size: int = 5,
     fees_bps_per_side: float = DEFAULT_FEES_BPS_PER_SIDE,
+    market_data_repository: Any | None = None,
 ) -> dict[str, Any]:
     context = _prepare_stage3_context(
         workspace_root=workspace_root,
@@ -185,12 +193,21 @@ def run_stage3_local_variants(
             tp_levels=context["tp_levels"],
             hard_exit_hours=context["hard_exit_hours"],
         )
+    atr_configs = _atr_variant_configs(
+        asset=str(session.get("asset") or "").upper(),
+        hard_exit_hours=context["hard_exit_hours"],
+        market_data_repository=market_data_repository,
+    )
+    local_configs = [*local_configs, *atr_configs]
     local_results = [
         _score_policy_config(
             config=config,
             trades=context["trade_inputs"],
             candles=context["candle_rows"],
             trade_candle_windows=context["trade_candle_windows"],
+            workspace_root=workspace_root,
+            market_data_repository=market_data_repository,
+            asset=str(session.get("asset") or "").upper(),
             leverage=leverage,
             fees_bps_per_side=fees_bps_per_side,
         )
@@ -216,6 +233,8 @@ def run_stage3_local_variants(
             "exact_protection_result": exact_result,
             "exact_policy_result": exact_result,
             "local_variant_results": local_results,
+            "atr_variant_results": [row for row in local_results if row.get("exit_policy_type") == "atr_dynamic"],
+            "stage3c_atr_combinations_tested": len(atr_configs),
             "stage3c_total_combinations_tested": len(local_results),
             "stage3c_value_ranges": _stage3c_value_ranges(local_results),
             "stage3c_shortlist": top,
@@ -435,6 +454,9 @@ def _score_policy_config(
     trades: list[dict[str, Any]],
     candles: list[dict[str, Any]],
     trade_candle_windows: list[list[dict[str, Any]]] | None = None,
+    workspace_root: Path | None = None,
+    market_data_repository: Any | None = None,
+    asset: str | None = None,
     leverage: int,
     fees_bps_per_side: float,
 ) -> dict[str, Any]:
@@ -442,7 +464,13 @@ def _score_policy_config(
         raise ValueError("Stage 3 trade candle windows must align with trade inputs.")
     outcomes = []
     for index, trade in enumerate(trades):
-        trade_policy = _policy_for_trade(config, trade)
+        trade_policy = _resolve_trade_policy(
+            _policy_for_trade(config, trade),
+            trade=trade,
+            workspace_root=workspace_root,
+            market_data_repository=market_data_repository,
+            asset=asset,
+        )
         trade_candles = trade_candle_windows[index] if trade_candle_windows is not None else candles
         outcomes.append(
             _simulate_policy_trade(
@@ -458,17 +486,23 @@ def _score_policy_config(
             )
         )
     metrics = _aggregate_outcomes(outcomes)
+    atr_source = config.get("atr_source") if isinstance(config.get("atr_source"), dict) else None
     return {
         **config,
         **metrics,
         "stage3_mode": "numerical_exit_policy",
+        "exit_policy_type": config.get("exit_policy_type", "numerical_stage2_policy"),
         "policy_mode": config.get("policy_mode", "shared"),
         "side_policies": config.get("side_policies", {}),
         "protection_enabled": bool(config["protection_enabled"]),
         "tp": config["final_tp_pct"],
         "sl": config["initial_sl_pct"],
         "entry_model": "market",
-        "rr_ratio": round(config["final_tp_pct"] / config["initial_sl_pct"], 4) if config["initial_sl_pct"] else 0.0,
+        "rr_ratio": (
+            round(float(atr_source["tp_multiplier"]) / float(atr_source["sl_multiplier"]), 4)
+            if atr_source
+            else round(config["final_tp_pct"] / config["initial_sl_pct"], 4) if config["initial_sl_pct"] else 0.0
+        ),
         "leverage": leverage,
         "fees_bps_per_side": fees_bps_per_side,
         "outcomes": outcomes,
@@ -506,6 +540,31 @@ def _policy_for_trade(config: dict[str, Any], trade: dict[str, Any]) -> dict[str
         direction = str(trade["direction"]).upper()
         return config["side_policies"][direction]
     return config
+
+
+def _resolve_trade_policy(
+    policy: dict[str, Any],
+    *,
+    trade: dict[str, Any],
+    workspace_root: Path | None,
+    market_data_repository: Any | None,
+    asset: str | None,
+) -> dict[str, Any]:
+    if not isinstance(policy.get("atr_source"), dict):
+        return policy
+    if workspace_root is None or market_data_repository is None:
+        raise ValueError("ATR Stage 3 variants require workspace_root and market_data_repository")
+    try:
+        resolved = resolve_atr_policy(
+            policy,
+            signal_timestamp=trade["signal_ts"],
+            market_data_repository=market_data_repository,
+            workspace_root=workspace_root,
+            asset=asset,
+        )
+    except ATRSourceError as exc:
+        raise ValueError(f"Stage 3 ATR policy resolution failed for {trade['signal_id']}: {exc}") from exc
+    return resolved.policy
 
 
 def _simulate_policy_trade(
@@ -780,6 +839,67 @@ def _fixed_target_protection_configs(
             )
         )
     return configs
+
+
+def _atr_variant_configs(
+    *,
+    asset: str,
+    hard_exit_hours: int,
+    market_data_repository: Any | None,
+) -> list[dict[str, Any]]:
+    if market_data_repository is None or not asset:
+        return []
+    refs = _available_atr_refs(asset=asset, market_data_repository=market_data_repository)
+    configs: list[dict[str, Any]] = []
+    for timeframe, ref in refs.items():
+        descriptor = ref.get("schema_descriptor") if isinstance(ref.get("schema_descriptor"), dict) else {}
+        period = descriptor.get("period", 14)
+        for tp_multiplier, sl_multiplier in itertools.product(DEFAULT_ATR_TP_MULTIPLIERS, DEFAULT_ATR_SL_MULTIPLIERS):
+            config = _policy_config(
+                config_id=f"atr_{timeframe}_tp_{_id_pct(tp_multiplier)}x_sl_{_id_pct(sl_multiplier)}x",
+                stage3_step="atr_dynamic_variant",
+                protection_enabled=False,
+                final_tp_pct=float(tp_multiplier),
+                protect_trigger_pct=None,
+                trail_sl_pct=None,
+                initial_sl_pct=float(sl_multiplier),
+                initial_sl_multiplier=1.0,
+                hard_exit_hours=hard_exit_hours,
+            )
+            config["exit_policy_type"] = "atr_dynamic"
+            config["atr_source"] = {
+                "enabled": True,
+                "dataset_id": ref.get("dataset_id"),
+                "data_type": ATR_DATA_TYPE,
+                "origin": ref.get("data_origin") or "derived",
+                "timeframe": timeframe,
+                "period": period,
+                "value_field": DEFAULT_VALUE_FIELD,
+                "lookup": DEFAULT_LOOKUP,
+                "tp_multiplier": float(tp_multiplier),
+                "sl_multiplier": float(sl_multiplier),
+            }
+            config["atr_variant"] = {
+                "timeframe": timeframe,
+                "period": period,
+                "tp_multiplier": float(tp_multiplier),
+                "sl_multiplier": float(sl_multiplier),
+                "dataset_id": ref.get("dataset_id"),
+            }
+            configs.append(config)
+    return configs
+
+
+def _available_atr_refs(*, asset: str, market_data_repository: Any) -> dict[str, dict[str, Any]]:
+    getter = getattr(market_data_repository, "get_data_ref", None)
+    if not callable(getter):
+        return {}
+    refs: dict[str, dict[str, Any]] = {}
+    for timeframe in DEFAULT_ATR_TIMEFRAMES:
+        ref = getter(asset=asset, timeframe=timeframe, origin="derived", data_type=ATR_DATA_TYPE)
+        if isinstance(ref, dict):
+            refs[timeframe] = ref
+    return refs
 
 
 def _paired_side_specific_variant_configs(
@@ -1187,12 +1307,16 @@ def _adjacent_values(levels: list[float], selected: float) -> list[float]:
 
 
 def _stage3c_value_ranges(local_results: list[dict[str, Any]]) -> dict[str, Any]:
+    atr_rows = [row for row in local_results if isinstance(row.get("atr_source"), dict)]
     return {
         "final_tp_pct": sorted({row["final_tp_pct"] for row in local_results}),
         "protect_trigger_pct": sorted({row["protect_trigger_pct"] for row in local_results if row.get("protect_trigger_pct") is not None}),
         "trail_sl_pct": sorted({row["trail_sl_pct"] for row in local_results if row.get("trail_sl_pct") is not None}),
         "initial_sl_pct": sorted({row["initial_sl_pct"] for row in local_results}),
         "initial_sl_multipliers": sorted({row["initial_sl_multiplier"] for row in local_results}),
+        "atr_timeframes": sorted({str(row["atr_source"].get("timeframe")) for row in atr_rows}),
+        "atr_tp_multipliers": sorted({float(row["atr_source"].get("tp_multiplier")) for row in atr_rows}),
+        "atr_sl_multipliers": sorted({float(row["atr_source"].get("sl_multiplier")) for row in atr_rows}),
     }
 
 
@@ -1220,6 +1344,11 @@ def _build_stage4_candidates(
             "timeout_policy": "close_at_cutoff",
             "exit_policy_type": "numerical_stage2_policy",
         }
+        if isinstance(row.get("atr_source"), dict):
+            setup["atr_source"] = row["atr_source"]
+            setup["exit_policy_type"] = "atr_dynamic"
+            if isinstance(row.get("atr_variant"), dict):
+                setup["atr_variant"] = row["atr_variant"]
         if row["protection_enabled"]:
             setup["protect_trigger_pct"] = row["protect_trigger_pct"]
             setup["trail_sl_pct"] = row["trail_sl_pct"]
@@ -1326,17 +1455,22 @@ def _render_summary(artifact: dict[str, Any]) -> str:
         "## 3C Local Variants",
         "",
         f"Combinations tested: {artifact['stage3c_total_combinations_tested']}",
+        f"ATR dynamic combinations tested: {artifact.get('stage3c_atr_combinations_tested', 0)}",
         f"Best config: `{best.get('config_id')}`",
         f"Best net PnL: {best.get('net_pnl_pct', 0):.4f}%",
         "",
-        "| Config | TP | Initial SL | Protect | Trail SL | Net PnL | WR | PF |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Config | Mode | TP | Initial SL | Protect | Trail SL | Net PnL | WR | PF |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in artifact["optimal"]["top_5"]:
+        atr = row.get("atr_source") if isinstance(row.get("atr_source"), dict) else None
+        mode = f"ATR {atr.get('timeframe')}" if atr else ("protected" if row.get("protection_enabled") else "fixed")
+        tp = f"{float(atr['tp_multiplier']):.2f}x ATR" if atr else f"{row['final_tp_pct']:.2f}%"
+        initial_sl = f"{float(atr['sl_multiplier']):.2f}x ATR" if atr else f"{row['initial_sl_pct']:.2f}%"
         protect = f"{row['protect_trigger_pct']:.2f}%" if row.get("protect_trigger_pct") is not None else "off"
         trail = f"{row['trail_sl_pct']:.2f}%" if row.get("trail_sl_pct") is not None else "off"
         lines.append(
-            f"| `{row['config_id']}` | {row['final_tp_pct']:.2f}% | {row['initial_sl_pct']:.2f}% | "
+            f"| `{row['config_id']}` | {mode} | {tp} | {initial_sl} | "
             f"{protect} | {trail} | {row['net_pnl_pct']:.4f}% | "
             f"{row['wr']:.2f}% | {row['profit_factor']:.2f} |"
         )

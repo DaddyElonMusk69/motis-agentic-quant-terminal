@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from datetime import UTC, datetime, timedelta
 
+from quant_terminal_worker.execution import atr_source
 from quant_terminal_worker.execution.wake_runner import run_route_wake
 
 
@@ -137,6 +138,46 @@ class FakeRepository:
             and any(intent.get("action") in {"ENTER", "ENTER_LONG", "ENTER_SHORT"} for intent in wake.get("order_intents", []))
             for wake in self.wakes
         )
+
+
+class FakeAtrMarketDataRepository:
+    def get_ref(self, dataset_id):
+        if dataset_id == "aave-atr-2h":
+            return self._ref()
+        return None
+
+    def get_data_ref(self, *, asset, timeframe, origin, data_type):
+        if (asset, timeframe, origin, data_type) == ("AAVE", "2h", "derived", "technical_indicator_atr"):
+            return self._ref()
+        return None
+
+    def _ref(self):
+        return {
+            "dataset_id": "aave-atr-2h",
+            "asset": "AAVE",
+            "data_type": "technical_indicator_atr",
+            "data_origin": "derived",
+            "timeframe": "2h",
+            "storage_backend": "parquet",
+            "storage_uri": ".data/aave-atr-2h",
+        }
+
+
+def _patch_atr_rows(monkeypatch, *, atr_pct: float = 1.5):
+    atr_source._cached_atr_series.cache_clear()
+    monkeypatch.setattr(
+        atr_source,
+        "read_rows_from_ref",
+        lambda *args, **kwargs: [
+            {
+                "timestamp": "2026-06-04T22:00:00Z",
+                "available_at": "2026-06-05T00:00:00Z",
+                "atr_pct": atr_pct,
+                "warmup_complete": True,
+                "confirm": 1,
+            }
+        ],
+    )
 
 
 def test_wake_blocks_before_exchange_when_route_gates_fail(tmp_path):
@@ -531,6 +572,67 @@ def test_wake_position_management_uses_short_side_split_policy_for_bundle_protec
     assert protection["initial_sl_pct"] == 1.25
     assert wake["order_intents"][0]["tp_pct"] == 3.0
     assert wake["order_intents"][0]["sl_pct"] == 1.25
+
+
+def test_wake_position_management_resolves_atr_policy_for_live_protection_refresh(tmp_path, monkeypatch):
+    _patch_atr_rows(monkeypatch, atr_pct=2.0)
+    bundle = _bundle(
+        tmp_path,
+        setup={
+            "setup": {
+                "entry_model": "market",
+                "leverage": 5,
+                "protection_enabled": True,
+                "atr_source": {
+                    "timeframe": "2h",
+                    "tp_multiplier": 1.5,
+                    "sl_multiplier": 0.5,
+                    "protect_trigger_multiplier": 1.0,
+                    "trail_sl_multiplier": 0.4,
+                },
+            }
+        },
+    )
+    repository = FakeRepository(route=_route(bundle), bundle=bundle)
+    adapter = FakeAdapter(
+        positions=[
+            {
+                "instId": "AAVE-USDT-SWAP",
+                "pos": "2",
+                "posSide": "long",
+                "avgPx": "100",
+                "markPx": "103",
+                "opened_at": "2026-06-05T00:00:00Z",
+            }
+        ],
+        protection_orders=[],
+    )
+
+    wake = run_route_wake(
+        route_id="aave-live",
+        repository=repository,
+        adapter=adapter,
+        market_data_repository=FakeAtrMarketDataRepository(),
+        workspace_root=tmp_path,
+    )
+
+    protection = wake["strategy_decision"]["diagnostics"]["protection"]
+    intent = wake["order_intents"][0]
+    assert wake["strategy_decision"]["action"] == "UPDATE_PROTECTION"
+    assert wake["strategy_decision"]["tp"] == "103"
+    assert wake["strategy_decision"]["sl"] == "100.8"
+    assert protection["phase"] == "protected"
+    assert protection["atr_source"]["dataset_id"] == "aave-atr-2h"
+    assert protection["atr_source"]["base_atr_pct"] == 2.0
+    assert protection["final_tp_pct"] == 3.0
+    assert protection["initial_sl_pct"] == 1.0
+    assert protection["protect_trigger_pct"] == 2.0
+    assert protection["trail_sl_pct"] == 0.8
+    assert intent["tp_pct"] == 3.0
+    assert intent["sl_pct"] == 0.8
+    assert intent["initial_sl_pct"] == 1
+    assert intent["trail_sl_pct"] == 0.8
+    assert intent["protect_trigger_pct"] == 2
 
 
 def test_wake_position_management_uses_short_side_split_policy_for_protected_sl(tmp_path):
@@ -1657,6 +1759,45 @@ def test_wake_trades_canonical_signal_at_latest_confirmed_candle(tmp_path):
     assert scan["freshness_seconds"] == 0
     assert scan["freshness_class"] == "fresh"
     assert wake["order_intents"]
+
+
+def test_wake_entry_intent_resolves_atr_policy_from_signal_timestamp(tmp_path, monkeypatch):
+    _patch_atr_rows(monkeypatch, atr_pct=1.5)
+    bundle = _bundle(
+        tmp_path,
+        setup={
+            "setup": {
+                "entry_model": "market",
+                "leverage": 5,
+                "atr_source": {
+                    "timeframe": "2h",
+                    "tp_multiplier": 2.0,
+                    "sl_multiplier": 0.5,
+                },
+            }
+        },
+    )
+    signal = _signal("canon-atr-sig-1")
+    repository = FakeRepository(route=_route(bundle), bundle=bundle, signals=[signal])
+    adapter = FakeAdapter(
+        balance={"data": [{"ccy": "USDT", "totalEq": "1000", "availBal": "950"}]},
+    )
+
+    wake = run_route_wake(
+        route_id="aave-live",
+        repository=repository,
+        adapter=adapter,
+        market_data_repository=FakeAtrMarketDataRepository(),
+        workspace_root=tmp_path,
+    )
+
+    intent = wake["order_intents"][0]
+    assert wake["branch"] == "entry_scan"
+    assert wake["signal_scan_result"]["status"] == "fresh_signal"
+    assert intent["action"] == "ENTER"
+    assert intent["signal_id"] == "canon-atr-sig-1"
+    assert intent["tp_pct"] == 3.0
+    assert intent["sl_pct"] == 0.75
 
 
 def test_wake_trades_canonical_signal_up_to_ten_minutes_old_as_late(tmp_path):

@@ -21,6 +21,7 @@ from quant_terminal_api.services.market_data_catalog import (
     build_catalog,
     build_refresh_plan,
     read_parquet_candles,
+    read_parquet_candles_window,
 )
 from quant_terminal_sdk.agent_tasks import AgentTaskBundle
 from quant_terminal_sdk.engine_contracts import (
@@ -778,6 +779,71 @@ def create_app(
     @app.get("/api/v1/signal-engines/{signal_engine_id}/signal-sets")
     def list_signal_sets(signal_engine_id: str) -> dict[str, Any]:
         return {"signal_sets": get_runtime_repository().list_signal_sets(signal_engine_id)}
+
+    @app.get("/api/v1/signal-engines/{signal_engine_id}/signal-sets/{asset}/visualization")
+    def signal_set_visualization(
+        signal_engine_id: str,
+        asset: str,
+        start: str | None = None,
+        end: str | None = None,
+        max_candles: int = 80_000,
+    ) -> dict[str, Any]:
+        repository = get_runtime_repository()
+        normalized_asset = asset.upper()
+        signal_sets = [
+            item
+            for item in repository.list_signal_sets(signal_engine_id)
+            if str(item.get("asset", "")).upper() == normalized_asset
+        ]
+        if not signal_sets:
+            raise HTTPException(status_code=404, detail="signal set not found")
+        signal_set = sorted(signal_sets, key=lambda item: str(item.get("end_ts") or ""), reverse=True)[0]
+        candle_ref = get_market_data_repository().get_raw_candle_ref(normalized_asset, "5m")
+        if candle_ref is None:
+            raise HTTPException(status_code=404, detail="raw 5m candle dataset not found for asset")
+        window_start, window_end = _signal_visualization_window(signal_set, start=start, end=end)
+        candle_limit = max(500, min(int(max_candles), 100_000))
+        raw_candles = read_parquet_candles_window(
+            Path(candle_ref["storage_uri"]),
+            start_ts=window_start,
+            end_ts=window_end,
+            max_rows=candle_limit * 3,
+        )
+        candles = _aggregate_chart_candles(raw_candles, timeframe_minutes=15, max_rows=candle_limit)
+        if candles:
+            candle_start = _iso_datetime(candles[0].get("timestamp") or candles[0].get("open_time"))
+            candle_end = _iso_datetime(candles[-1].get("timestamp") or candles[-1].get("open_time"))
+        else:
+            candle_start = _iso_datetime(window_start)
+            candle_end = _iso_datetime(window_end)
+        signals = repository.list_signals_for_signal_set_window(
+            signal_set_key=signal_set["signal_set_key"],
+            window_start=candle_start,
+            window_end=_iso_datetime(_parse_optional_utc(candle_end) + timedelta(minutes=15) - timedelta(microseconds=1)),
+        )
+        return _relative_nested_paths(
+            Path.cwd(),
+            {
+                "signal_set": signal_set,
+                "candle_dataset_id": candle_ref["dataset_id"],
+                "candle_timeframe": "15m",
+                "window": {
+                    "start": candle_start,
+                    "end": candle_end,
+                    "requested_start": _iso_datetime(window_start),
+                    "requested_end": _iso_datetime(window_end),
+                    "truncated_to_latest": len(raw_candles) >= candle_limit * 3,
+                    "max_candles": candle_limit,
+                },
+                "candles": [_chart_candle(row) for row in candles],
+                "signals": [_chart_signal(row, timeframe_minutes=15) for row in signals],
+                "summary": {
+                    "candle_count": len(candles),
+                    "signal_count": len(signals),
+                    "total_signal_count": int(signal_set.get("packet_count") or 0),
+                },
+            },
+        )
 
     @app.get("/api/v1/signal-engines/{signal_engine_id}/assets/{asset}/live-observations")
     def list_live_signal_observations(signal_engine_id: str, asset: str, limit: int = 100, offset: int = 0) -> dict[str, Any]:
@@ -2019,6 +2085,7 @@ def create_app(
                 workspace_root=Path.cwd(),
                 session=session,
                 candles=_stage2_raw_candles(session, repository=repository),
+                **({"market_data_repository": get_market_data_repository()} if step in {"grid_search", "local_variants"} else {}),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2098,6 +2165,7 @@ def create_app(
                 session=session,
                 signal_rows=_flatten_signal_roles(_stage1_full_cycle_signals(session)),
                 candles=_stage2_raw_candles(session, repository=repository),
+                market_data_repository=get_market_data_repository(),
                 initial_capital_usdt=request.initial_capital_usdt,
                 margin_allocation_pct=request.margin_allocation_pct,
                 leverage=request.leverage,
@@ -2176,6 +2244,7 @@ def create_app(
                 session=session,
                 signal_rows=_flatten_signal_roles(_stage1_full_cycle_signals(session)),
                 candles=_stage2_raw_candles(session, repository=repository),
+                market_data_repository=get_market_data_repository(),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -3318,6 +3387,96 @@ def _iso_datetime(value: Any) -> str:
     if hasattr(value, "isoformat"):
         return value.isoformat().replace("+00:00", "Z")
     return str(value)
+
+
+def _signal_visualization_window(signal_set: Mapping[str, Any], *, start: str | None, end: str | None) -> tuple[datetime, datetime]:
+    signal_start = _parse_optional_utc(start) or _parse_optional_utc(signal_set.get("coverage_start_ts")) or _parse_optional_utc(signal_set.get("start_ts"))
+    signal_end = _parse_optional_utc(end) or _parse_optional_utc(signal_set.get("coverage_end_ts")) or _parse_optional_utc(signal_set.get("end_ts"))
+    if signal_end is None:
+        signal_end = datetime.now(UTC)
+    if signal_start is None:
+        signal_start = signal_end - timedelta(days=30)
+    if signal_start > signal_end:
+        raise HTTPException(status_code=400, detail="visualization start must be before end")
+    return signal_start, signal_end
+
+
+def _parse_optional_utc(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return _as_utc(value)
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        return _as_utc(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid datetime: {value}") from exc
+
+
+def _chart_candle(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "timestamp": _iso_datetime(row.get("timestamp") or row.get("open_time")),
+        "open": float(row["open"]),
+        "high": float(row["high"]),
+        "low": float(row["low"]),
+        "close": float(row["close"]),
+        "volume": float(row.get("volume") or 0.0),
+    }
+
+
+def _chart_signal(row: Mapping[str, Any], *, timeframe_minutes: int) -> dict[str, Any]:
+    payload = row.get("payload") if isinstance(row.get("payload"), Mapping) else {}
+    evidence = payload.get("evidence") if isinstance(payload.get("evidence"), Mapping) else {}
+    leaves = evidence.get("selected_leaves") or evidence.get("triggered_leaves") or payload.get("selected_leaves") or []
+    if not isinstance(leaves, list):
+        leaves = [str(leaves)] if leaves else []
+    reference_price = evidence.get("reference_price") or evidence.get("trigger_candle_close")
+    timestamp = _parse_optional_utc(row.get("timestamp"))
+    return {
+        "signal_id": row.get("signal_id"),
+        "timestamp": _iso_datetime(timestamp),
+        "chart_timestamp": _iso_datetime(_floor_to_timeframe(timestamp, timeframe_minutes)),
+        "signal_engine_id": row.get("signal_engine_id"),
+        "signal_engine_version": row.get("signal_engine_version"),
+        "asset": row.get("asset"),
+        "instrument": row.get("instrument"),
+        "reference_price": float(reference_price) if reference_price is not None else None,
+        "leaf_count": len(leaves),
+        "leaves": [str(item) for item in leaves[:6]],
+    }
+
+
+def _aggregate_chart_candles(rows: list[Mapping[str, Any]], *, timeframe_minutes: int, max_rows: int) -> list[dict[str, Any]]:
+    buckets: dict[datetime, dict[str, Any]] = {}
+    for row in rows:
+        timestamp = _parse_optional_utc(row.get("timestamp") or row.get("open_time"))
+        bucket_ts = _floor_to_timeframe(timestamp, timeframe_minutes)
+        bucket = buckets.get(bucket_ts)
+        if bucket is None:
+            buckets[bucket_ts] = {
+                "timestamp": bucket_ts,
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row.get("volume") or 0.0),
+            }
+            continue
+        bucket["high"] = max(float(bucket["high"]), float(row["high"]))
+        bucket["low"] = min(float(bucket["low"]), float(row["low"]))
+        bucket["close"] = float(row["close"])
+        bucket["volume"] = float(bucket["volume"]) + float(row.get("volume") or 0.0)
+    candles = [buckets[key] for key in sorted(buckets)]
+    return candles[-max_rows:]
+
+
+def _floor_to_timeframe(timestamp: datetime | None, timeframe_minutes: int) -> datetime:
+    if timestamp is None:
+        raise HTTPException(status_code=400, detail="missing timestamp for chart visualization")
+    timestamp = _as_utc(timestamp).replace(second=0, microsecond=0)
+    minute = (timestamp.minute // timeframe_minutes) * timeframe_minutes
+    return timestamp.replace(minute=minute)
 
 
 def _stage1_session_id(

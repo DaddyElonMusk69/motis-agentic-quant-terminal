@@ -422,6 +422,11 @@ class FakeDiscoveryMarketDataRepository:
     def get_ref(self, dataset_id: str):
         return self.ref if dataset_id == self.ref["dataset_id"] else None
 
+    def get_raw_candle_ref(self, asset: str, timeframe: str = "5m"):
+        if asset.upper() == self.ref["asset"] and timeframe == self.ref["timeframe"]:
+            return self.ref
+        return None
+
     def list_refs(self):
         return [self.ref]
 
@@ -1291,6 +1296,91 @@ def test_signal_engine_catalog_endpoints_expose_sets_and_packets():
         "active_timeframes": ["2h"],
         "interactions": [],
     }
+
+
+def test_signal_set_visualization_returns_candles_and_signal_markers(tmp_path):
+    candle_root = tmp_path / "market-data" / "BTC" / "year=2026" / "month=03"
+    candle_root.mkdir(parents=True)
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {"timestamp": datetime(2026, 3, 1, 0, 0, tzinfo=UTC), "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 10.0},
+                {"timestamp": datetime(2026, 3, 1, 0, 5, tzinfo=UTC), "open": 100.5, "high": 102.0, "low": 100.0, "close": 101.0, "volume": 12.0},
+            ]
+        ),
+        candle_root / "data.parquet",
+    )
+    repository = StubRuntimeRepository()
+    repository.signal_sets = [
+        {
+            "signal_set_key": "vegas_ema:BTC:test",
+            "signal_set_id": "test",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "BTC",
+            "instrument": "BTC-USDT-SWAP",
+            "start_ts": "2026-03-01T00:00:00Z",
+            "end_ts": "2026-03-01T00:05:00Z",
+            "packet_count": 1,
+            "payload_schema": "signal_packet.v2",
+            "source_path": "test",
+            "manifest": {},
+        }
+    ]
+    repository.window_signals = [
+        {
+            "signal_id": "sig-1",
+            "signal_set_key": "vegas_ema:BTC:test",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "BTC",
+            "instrument": "BTC-USDT-SWAP",
+            "timestamp": "2026-03-01T00:05:00Z",
+            "data_refs": [],
+            "payload_schema": "signal_packet.v2",
+            "payload": {"evidence": {"reference_price": 101.0, "selected_leaves": ["test_leaf"]}},
+        }
+    ]
+
+    class MarketRepository:
+        def get_raw_candle_ref(self, asset, timeframe="5m"):
+            assert asset == "BTC"
+            assert timeframe == "5m"
+            return {
+                "dataset_id": "btc-raw-5m",
+                "asset": "BTC",
+                "instrument": "BTC-USDT-SWAP",
+                "data_type": "candles",
+                "timeframe": "5m",
+                "data_origin": "raw",
+                "storage_uri": str(tmp_path / "market-data" / "BTC"),
+            }
+
+    client = TestClient(create_app(runtime_repository=repository, market_data_repository=MarketRepository()))
+
+    response = client.get("/api/v1/signal-engines/vegas_ema/signal-sets/BTC/visualization")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["candle_dataset_id"] == "btc-raw-5m"
+    assert payload["candle_timeframe"] == "15m"
+    assert payload["candles"] == [
+        {"timestamp": "2026-03-01T00:00:00Z", "open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0, "volume": 22.0}
+    ]
+    assert payload["signals"] == [
+        {
+            "signal_id": "sig-1",
+            "timestamp": "2026-03-01T00:05:00Z",
+            "chart_timestamp": "2026-03-01T00:00:00Z",
+            "signal_engine_id": "vegas_ema",
+            "signal_engine_version": "0.1",
+            "asset": "BTC",
+            "instrument": "BTC-USDT-SWAP",
+            "reference_price": 101.0,
+            "leaf_count": 1,
+            "leaves": ["test_leaf"],
+        }
+    ]
 
 
 def test_list_signals_accepts_descending_order_request():

@@ -157,6 +157,7 @@ type DisplaySidePolicy = Stage2PolicyValues & {
 
 type DisplayExecutionSetup = {
   policy_mode?: "shared" | "side_specific" | string | null;
+  exit_policy_type?: string;
   protection_enabled?: boolean;
   tp?: number;
   sl?: number;
@@ -167,6 +168,8 @@ type DisplayExecutionSetup = {
   initial_sl_pct?: number;
   protect_trigger_pct?: number;
   trail_sl_pct?: number;
+  atr_source?: Stage3GridSetup["atr_source"];
+  atr_variant?: Stage3GridSetup["atr_variant"];
   pyramid?: {
     step_pct?: number;
     max_legs?: number;
@@ -877,6 +880,13 @@ function formatSelectionSource(value: string | undefined | null): string {
 }
 
 function formatStage3Policy(item: DisplayExecutionSetup | undefined): string {
+  if (item?.atr_source) {
+    const source = item.atr_source;
+    const tp = typeof source.tp_multiplier === "number" ? source.tp_multiplier : item.final_tp_pct ?? item.tp_pct ?? item.tp;
+    const sl = typeof source.sl_multiplier === "number" ? source.sl_multiplier : item.initial_sl_pct ?? item.sl_pct ?? item.sl;
+    const tf = source.timeframe ? ` · ${source.timeframe}` : "";
+    return `${formatNumber(tp)}x ATR TP / ${formatNumber(sl)}x ATR SL${tf}`;
+  }
   if (item?.policy_mode === "side_specific" && item.side_policies) {
     const long = item.side_policies.LONG;
     const short = item.side_policies.SHORT;
@@ -886,6 +896,9 @@ function formatStage3Policy(item: DisplayExecutionSetup | undefined): string {
 }
 
 function formatStage3Protection(item: DisplayExecutionSetup | undefined): string {
+  if (item?.atr_source && !item.protection_enabled) {
+    return "ATR dynamic fixed SL";
+  }
   if (item?.policy_mode === "side_specific" && item.side_policies) {
     const long = item.side_policies.LONG;
     const short = item.side_policies.SHORT;
@@ -914,6 +927,9 @@ function formatStage3SidePolicy(
   item: DisplayExecutionSetup | undefined,
   side: ExitSide
 ): string {
+  if (item?.atr_source && !item.side_policies) {
+    return formatStage3Policy(item);
+  }
   const sidePolicy = item?.side_policies?.[side];
   if (sidePolicy) {
     const finalTp = sidePolicy.final_tp_pct ?? sidePolicy.lock_profit_pct;
@@ -940,6 +956,9 @@ function formatStage3SideProtection(
 }
 
 function formatStage4ExitMode(setup: DisplayExecutionSetup | undefined): string {
+  if (setup?.atr_source) {
+    return "ATR Dynamic";
+  }
   if (setup?.policy_mode === "side_specific" && setup.side_policies) {
     const sides = [setup.side_policies.LONG, setup.side_policies.SHORT];
     const protectedCount = sides.filter((policy) => Boolean(policy.protection_enabled)).length;
@@ -952,6 +971,24 @@ function formatStage4ExitMode(setup: DisplayExecutionSetup | undefined): string 
     return "Split Protection";
   }
   return setup?.protection_enabled ? "Protected SL" : "Fixed SL";
+}
+
+function formatAtrSource(item: DisplayExecutionSetup | undefined): string {
+  const source = item?.atr_source;
+  if (!source) {
+    return "off";
+  }
+  const tf = source.timeframe ?? "ATR";
+  const period = source.period != null ? `Wilder ${source.period}` : "Wilder ATR";
+  const dataset = source.dataset_id ? ` · ${shortId(source.dataset_id)}` : "";
+  return `${tf} · ${period}${dataset}`;
+}
+
+function formatStage3Mode(item: DisplayExecutionSetup | undefined): string {
+  if (item?.atr_source) {
+    return `ATR ${item.atr_source.timeframe ?? ""}`.trim();
+  }
+  return item?.protection_enabled ? "Protected" : "Fixed SL";
 }
 
 function formatUsd(value: number | undefined | null): string {
@@ -3096,17 +3133,21 @@ function Stage3Panel({
         >
           {localVariantsRunning ? (
             <StageRunProgress
-              detail="Testing all valid adjacent TP/protect/trail/SL permutations"
-              steps={["Build adjacent grid", "Walk candles", "Rank every setup", "Write Stage 4 candidates"]}
+              detail="Testing adjacent fixed/protected policies plus bounded ATR dynamic variants"
+              steps={["Build fixed + ATR grids", "Resolve per-signal ATR", "Rank every setup", "Write Stage 4 candidates"]}
               title="Running local variant test"
             />
           ) : null}
           <div className="field-grid">
             <FieldRow label="Input" value="3A + 3B results" />
             <FieldRow label="Combinations" value={formatNumber(grid?.stage3c_total_combinations_tested)} />
+            <FieldRow label="ATR combinations" value={formatNumber(grid?.stage3c_atr_combinations_tested)} />
             <FieldRow label="TP values" value={formatRangeList(ranges?.final_tp_pct)} />
             <FieldRow label="Protect values" value={formatRangeList(ranges?.protect_trigger_pct)} />
             <FieldRow label="Trail SL values" value={formatRangeList(ranges?.trail_sl_pct)} />
+            <FieldRow label="ATR TFs" value={ranges?.atr_timeframes?.length ? ranges.atr_timeframes.join(", ") : "off"} />
+            <FieldRow label="ATR TP x" value={formatRangeList(ranges?.atr_tp_multipliers)} />
+            <FieldRow label="ATR SL x" value={formatRangeList(ranges?.atr_sl_multipliers)} />
             <FieldRow label="Ranking" value={formatSelectionSource(grid?.optimal?.criterion)} />
             <FieldRow
               label="Best WF / Full"
@@ -3118,7 +3159,7 @@ function Stage3Panel({
           {localComplete ? (
             <DataTable
               columns={[
-                { key: "mode", header: "Mode", render: (item) => item.protection_enabled ? "Protected" : "Fixed SL" },
+                { key: "mode", header: "Mode", render: (item) => formatStage3Mode(item) },
                 { key: "setup", header: "L/S TP / SL", render: (item) => formatStage3Policy(item) },
                 { key: "protect", header: "L/S Protect / Trail", render: (item) => formatStage3Protection(item) },
                 { key: "wr", header: "WR", align: "right", render: (item) => formatPct(item.wr) },
@@ -3353,6 +3394,7 @@ function Stage4Panel({
           <FieldRow label="Exit mode" value={exitMode} />
           <FieldRow label="TP / Initial SL" value={formatStage3Policy(bestSetup)} />
           <FieldRow label="Protect / Trail" value={formatStage3Protection(bestSetup)} />
+          <FieldRow label="ATR source" value={formatAtrSource(bestSetup)} />
           <FieldRow label="Hard exit" value={bestSetup.max_hold_hours ? `${formatNumber(bestSetup.max_hold_hours)}h` : "n/a"} />
           <FieldRow label="Pyramid" value={pyramid ? `${formatNumber(pyramid.max_legs)} legs @ ${formatPct(pyramid.step_pct)}` : "off"} />
           <FieldRow label="Fees" value="OKX USDT swap taker default, 5 bps per fill" />
@@ -3370,6 +3412,7 @@ function Stage4Panel({
               { key: "id", header: "Candidate", render: (item) => item.candidate_id },
               { key: "policy", header: "Policy", render: (item) => formatStage3Policy(item.setup) },
               { key: "protect", header: "Protection", render: (item) => formatStage3Protection(item.setup) },
+              { key: "atr", header: "ATR", render: (item) => formatAtrSource(item.setup) },
               { key: "pyramid", header: "Pyramid", render: (item) => formatPyramidPolicy(item.setup) },
               { key: "net", header: "Net Exp", align: "right", render: (item) => formatPct(item.net_expectancy_pct) },
               { key: "wf_net", header: "WF Net", align: "right", render: (item) => formatPct(stage4WfNetPnlPct(item)) },
@@ -3503,6 +3546,7 @@ function Stage4Panel({
           <FieldRow label="Exit mode" value={stage4bExitMode} />
           <FieldRow label="TP / Initial SL" value={formatStage3Policy(stage4bBestSetup)} />
           <FieldRow label="Protect / Trail" value={formatStage3Protection(stage4bBestSetup)} />
+          <FieldRow label="ATR source" value={formatAtrSource(stage4bBestSetup)} />
           <FieldRow label="Hard exit" value={stage4bBestSetup.max_hold_hours ? `${formatNumber(stage4bBestSetup.max_hold_hours)}h` : "n/a"} />
           <FieldRow label="Pyramid" value={stage4bPyramid ? `${formatNumber(stage4bPyramid.max_legs)} legs @ ${formatPct(stage4bPyramid.step_pct)}` : "off"} />
           <FieldRow label="Fees" value="OKX USDT swap taker default, 5 bps per fill" />
@@ -3514,6 +3558,7 @@ function Stage4Panel({
               { key: "id", header: "Candidate", render: (item) => item.candidate_id },
               { key: "policy", header: "Policy", render: (item) => formatStage3Policy(item.setup) },
               { key: "protect", header: "Protection", render: (item) => formatStage3Protection(item.setup) },
+              { key: "atr", header: "ATR", render: (item) => formatAtrSource(item.setup) },
               { key: "pyramid", header: "Pyramid", render: (item) => formatPyramidPolicy(item.setup) },
               { key: "net", header: "Net Exp", align: "right", render: (item) => formatPct(item.net_expectancy_pct) },
               { key: "wf_net", header: "WF Net", align: "right", render: (item) => formatPct(stage4WfNetPnlPct(item)) },
@@ -4443,8 +4488,10 @@ function Stage4CandidateDetailPanel({ detail }: { detail: Stage4CandidateDetail 
   const oosTrainTone = oosTrainRatio == null ? "" : oosTrainRatio >= 0.6 ? "tone-pass" : oosTrainRatio >= 0.3 ? "tone-warn" : "tone-risk";
   const headlineTone = (account.net_pnl_usdt ?? 0) >= 0 ? "tone-pass" : "tone-risk";
   const detailMetrics = [
+    { label: "Exit Mode", value: formatStage4ExitMode(setup) },
     { label: "Policy", value: formatStage3Policy(setup) },
     { label: "Protection", value: formatStage3Protection(setup) },
+    { label: "ATR Source", value: formatAtrSource(setup) },
     { label: "Pyramid", value: formatPyramidPolicy(setup) },
     { label: "Trades", value: formatNumber(filledTrades.length) },
     { label: "Win Rate", value: formatPct(candidate.win_rate_pct) },
@@ -4776,7 +4823,7 @@ function Stage4ExitPolicyPanel({ setup }: { setup: Stage4CandidateResult["setup"
     <div className="stage4-policy-split">
       <div className="stage4-policy-split__header">
         <strong>Selected Exit Policy</strong>
-        <span>{setup?.policy_mode === "side_specific" ? "Side-specific Stage 4 setup" : "Shared Stage 4 setup"}</span>
+        <span>{setup?.atr_source ? "ATR dynamic Stage 4 setup" : setup?.policy_mode === "side_specific" ? "Side-specific Stage 4 setup" : "Shared Stage 4 setup"}</span>
       </div>
       {sides.map((side) => (
         <div className="stage4-policy-split__row" key={side}>

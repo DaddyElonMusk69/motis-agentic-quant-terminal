@@ -228,6 +228,8 @@ def _load_asset_contexts(
             "overall_net_pnl_usdt": _overall_net_pnl_usdt(selected_best),
             "timing_skips": selected_best.get("skipped_timing_filter"),
             "candidate": best_candidate,
+            "repository": repository,
+            "workspace_root": workspace_root,
             "leverage": leverage,
             "margin_allocation_pct": margin_pct,
             "raw_signal_count": raw_signal_count,
@@ -735,7 +737,14 @@ def _manage_position(
     ctx = position["ctx"]
     candidate = ctx["candidate"]
     direction = position["direction"]
-    policy = _candidate_policy_for_direction(candidate, direction)
+    policy = _candidate_policy_for_direction(
+        candidate,
+        direction,
+        signal_ts=position["signal_ts"],
+        market_data_repository=ctx.get("repository"),
+        workspace_root=ctx.get("workspace_root"),
+        asset=ctx.get("asset"),
+    )
     fee_rate = ctx["fees_bps_per_side"] / 10_000
     slippage_rate = ctx["slippage_bps_per_side"] / 10_000
     result: dict[str, Any] = {"closed": None, "margin_consumed": 0.0, "cash_released": 0.0, "pyramid_skips": []}
@@ -931,7 +940,14 @@ def _open_position(
 ) -> dict[str, Any]:
     candidate = ctx["candidate"]
     direction = signal["direction"]
-    policy = _candidate_policy_for_direction(candidate, direction)
+    policy = _candidate_policy_for_direction(
+        candidate,
+        direction,
+        signal_ts=signal["signal_ts"],
+        market_data_repository=ctx.get("repository"),
+        workspace_root=ctx.get("workspace_root"),
+        asset=ctx.get("asset"),
+    )
     reference_price = float(signal["reference_price"])
     entry_price = _entry_fill_price(
         direction=direction,
@@ -1234,7 +1250,14 @@ def _position_margin(position: dict[str, Any]) -> float:
 
 
 def _initial_leg_margin(*, ctx: dict[str, Any], signal: dict[str, Any], margin_budget: float) -> float:
-    policy = _candidate_policy_for_direction(ctx["candidate"], signal["direction"])
+    policy = _candidate_policy_for_direction(
+        ctx["candidate"],
+        signal["direction"],
+        signal_ts=signal["signal_ts"],
+        market_data_repository=ctx.get("repository"),
+        workspace_root=ctx.get("workspace_root"),
+        asset=ctx.get("asset"),
+    )
     max_legs = int((policy.get("pyramid") or {}).get("max_legs", 1))
     max_legs = max(1, max_legs)
     return margin_budget / max_legs

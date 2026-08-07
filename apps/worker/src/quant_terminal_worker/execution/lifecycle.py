@@ -70,6 +70,7 @@ def run_route_lifecycle_cycle(
         route_id=route_id,
         repository=runtime_repository,
         adapter=adapter,
+        market_data_repository=market_data_repository,
         workspace_root=workspace_root,
         allow_entry_scan=signal_update.get("status") != "blocked",
         live_signal_scanner=live_signal_scanner,

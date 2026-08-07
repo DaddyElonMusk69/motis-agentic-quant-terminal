@@ -316,7 +316,6 @@ def _execute_signal_pool_extend(
     workspace_root: Path,
     market_data_repository: Any | None = None,
 ) -> dict[str, Any]:
-    del market_data_repository
     payload = job.get("payload") or {}
     repository.heartbeat_job(job["job_id"], current_step="signal_pool_extend")
 
@@ -730,7 +729,6 @@ def _execute_signal_discovery_engine_evaluation(
     workspace_root: Path,
     market_data_repository: Any | None = None,
 ) -> dict[str, Any]:
-    del market_data_repository
     payload = job.get("payload") or {}
     session = _signal_discovery_session(repository, str(payload["session_id"]))
     if not session.get("candidate_engine_id") or not session.get("candidate_signal_set_key"):
@@ -1002,7 +1000,6 @@ def _execute_stage3_policy_step(
     workspace_root: Path,
     market_data_repository: Any | None = None,
 ) -> dict[str, Any]:
-    del market_data_repository
     payload = job.get("payload") or {}
     session = _stage1_session(repository, str(payload["session_id"]))
     step = str(payload["step"])
@@ -1017,6 +1014,7 @@ def _execute_stage3_policy_step(
         workspace_root=workspace_root,
         session=session,
         candles=_stage2_raw_candles(repository, session, workspace_root=workspace_root),
+        **({"market_data_repository": market_data_repository} if step in {"grid_search", "local_variants"} else {}),
     )
     return {"stage3_grid": result, "session_id": session["session_id"], "step": step}
 
@@ -1047,7 +1045,6 @@ def _execute_stage4_realized_expectancy(
     workspace_root: Path,
     market_data_repository: Any | None = None,
 ) -> dict[str, Any]:
-    del market_data_repository
     payload = job.get("payload") or {}
     session = _stage1_session(repository, str(payload["session_id"]))
     repository.heartbeat_job(job["job_id"], current_step="stage4_realized_expectancy")
@@ -1056,6 +1053,7 @@ def _execute_stage4_realized_expectancy(
         session=session,
         signal_rows=_flatten_signal_roles(_stage1_full_cycle_signals(repository, session)),
         candles=_stage2_raw_candles(repository, session, workspace_root=workspace_root),
+        market_data_repository=market_data_repository,
         initial_capital_usdt=float(payload["initial_capital_usdt"]),
         margin_allocation_pct=float(payload["margin_allocation_pct"]),
         leverage=float(payload["leverage"]),
@@ -1073,7 +1071,6 @@ def _execute_stage4b_timing_replay(
     workspace_root: Path,
     market_data_repository: Any | None = None,
 ) -> dict[str, Any]:
-    del market_data_repository
     payload = job.get("payload") or {}
     session = _stage1_session(repository, str(payload["session_id"]))
     repository.heartbeat_job(job["job_id"], current_step="stage4b_timing_replay")
@@ -1082,6 +1079,7 @@ def _execute_stage4b_timing_replay(
         session=session,
         signal_rows=_flatten_signal_roles(_stage1_full_cycle_signals(repository, session)),
         candles=_stage2_raw_candles(repository, session, workspace_root=workspace_root),
+        market_data_repository=market_data_repository,
     )
     return {"stage4b_timing": result, "session_id": session["session_id"]}
 

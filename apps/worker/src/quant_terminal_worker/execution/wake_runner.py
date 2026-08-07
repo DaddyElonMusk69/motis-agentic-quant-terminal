@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
+from quant_terminal_worker.execution.atr_source import ATRSourceError, resolve_atr_policy
 from quant_terminal_worker.execution.bundle_loader import load_execution_bundle
 from quant_terminal_worker.execution.canonical_signal_admission import load_latest_canonical_entry_signal
 from quant_terminal_worker.execution.live_signal_scan import scan_latest_live_signal
@@ -19,6 +20,7 @@ def run_route_wake(
     route_id: str,
     repository: Any,
     adapter: Any,
+    market_data_repository: Any | None = None,
     workspace_root: Path | None = None,
     entry_order_ttl_minutes: int = DEFAULT_ENTRY_ORDER_TTL_MINUTES,
     allow_entry_scan: bool = True,
@@ -156,6 +158,8 @@ def run_route_wake(
             position=positions[0],
             working_entry_orders=fresh_working_entry_orders,
             now=started_at,
+            workspace_root=workspace,
+            market_data_repository=market_data_repository,
         )
         position_intents = _normalize_strategy_order_intents(
             wake_id=wake_id,
@@ -164,6 +168,8 @@ def run_route_wake(
             decision=decision,
             execution_setup=runtime["execution_setup"],
             snapshot=snapshot,
+            workspace_root=workspace,
+            market_data_repository=market_data_repository,
         )
         return _record_wake(
             repository,
@@ -396,6 +402,8 @@ def run_route_wake(
         decision=decision,
         execution_setup=runtime["execution_setup"],
         snapshot=snapshot,
+        workspace_root=workspace,
+        market_data_repository=market_data_repository,
     )
     wake = {
         "wake_id": wake_id,
@@ -1219,6 +1227,8 @@ def _run_position_management(
     position: dict[str, Any],
     working_entry_orders: list[dict[str, Any]],
     now: datetime,
+    workspace_root: Path,
+    market_data_repository: Any | None,
 ) -> dict[str, Any]:
     module = runtime["strategy_module"]
     position_context = _position_context(
@@ -1239,6 +1249,8 @@ def _run_position_management(
             position_context=position_context,
             snapshot=snapshot,
             execution_setup=runtime["execution_setup"],
+            workspace_root=workspace_root,
+            market_data_repository=market_data_repository,
         ) or {
             "decision_id": f"{route['route_id']}:position-management",
             "action": "HOLD",
@@ -1290,6 +1302,8 @@ def _run_position_management(
         position_context=position_context,
         snapshot=snapshot,
         execution_setup=runtime["execution_setup"],
+        workspace_root=workspace_root,
+        market_data_repository=market_data_repository,
     ) or {**decision, "action": "HOLD"}
     return _apply_pyramid_management(
         route=route,
@@ -1307,12 +1321,16 @@ def _default_protection_decision(
     position_context: dict[str, Any],
     snapshot: dict[str, Any],
     execution_setup: dict[str, Any],
+    workspace_root: Path,
+    market_data_repository: Any | None,
 ) -> dict[str, Any] | None:
     resolved = _resolve_bundle_protection(
         route=route,
         position_context=position_context,
         snapshot=snapshot,
         execution_setup=execution_setup,
+        workspace_root=workspace_root,
+        market_data_repository=market_data_repository,
     )
     if resolved is None:
         return None
@@ -1349,6 +1367,10 @@ def _execution_setup_policy(
     *,
     execution_setup: dict[str, Any],
     direction: str,
+    signal_timestamp: str | datetime | None = None,
+    market_data_repository: Any | None = None,
+    workspace_root: Path | None = None,
+    asset: str | None = None,
 ) -> dict[str, Any]:
     setup = execution_setup.get("setup") if isinstance(execution_setup.get("setup"), dict) else execution_setup
     direction = str(direction or "LONG").upper()
@@ -1369,13 +1391,14 @@ def _execution_setup_policy(
     protection_enabled = _truthy(protection_enabled_source.get("protection_enabled"))
     protect_trigger_pct = _numeric(selected.get("protect_trigger_pct"))
     trail_sl_pct = _numeric(selected.get("trail_sl_pct"))
-    if final_tp_pct <= 0:
+    atr_enabled = _atr_source_present(selected) or _atr_source_present(setup)
+    if final_tp_pct <= 0 and not atr_enabled:
         return {"blocker": "execution_setup_missing_final_tp_pct", "policy_mode": policy_mode, "selected_side": direction}
-    if initial_sl_pct <= 0:
+    if initial_sl_pct <= 0 and not atr_enabled:
         return {"blocker": "execution_setup_missing_initial_sl_pct", "policy_mode": policy_mode, "selected_side": direction}
-    if protection_enabled and (protect_trigger_pct <= 0 or trail_sl_pct <= 0):
+    if protection_enabled and (protect_trigger_pct <= 0 or trail_sl_pct <= 0) and not atr_enabled:
         return {"blocker": "protected_execution_setup_missing_protection_values", "policy_mode": policy_mode, "selected_side": direction}
-    return {
+    resolved = {
         "policy_mode": policy_mode,
         "selected_side": direction if policy_mode == "side_specific" else "shared",
         "protection_enabled": protection_enabled,
@@ -1385,6 +1408,28 @@ def _execution_setup_policy(
         "trail_sl_pct": trail_sl_pct,
         "max_hold_hours": _numeric(_first_present(selected, "max_hold_hours", "hard_exit_hours")),
     }
+    if _atr_source_present(selected) or _atr_source_present(setup):
+        if workspace_root is None:
+            return {"blocker": "atr_source_requires_workspace_root", "atr_source_error": True, "policy_mode": policy_mode, "selected_side": direction}
+        resolved_source_owner = selected if _atr_source_present(selected) else setup
+        try:
+            resolved_atr = resolve_atr_policy(
+                resolved_source_owner,
+                fallback=setup if resolved_source_owner is selected else None,
+                signal_timestamp=signal_timestamp,
+                market_data_repository=market_data_repository,
+                workspace_root=workspace_root,
+                asset=asset,
+            )
+        except ATRSourceError as exc:
+            return {"blocker": str(exc), "atr_source_error": True, "policy_mode": policy_mode, "selected_side": direction}
+        resolved.update(resolved_atr.policy)
+        resolved["atr_source_diagnostics"] = resolved_atr.diagnostics
+        if _truthy(resolved.get("protection_enabled")) and (
+            _numeric(resolved.get("protect_trigger_pct")) <= 0 or _numeric(resolved.get("trail_sl_pct")) <= 0
+        ):
+            return {"blocker": "atr_source_missing_protection_values", "atr_source_error": True, "policy_mode": policy_mode, "selected_side": direction}
+    return resolved
 
 
 def _resolve_bundle_protection(
@@ -1393,9 +1438,18 @@ def _resolve_bundle_protection(
     position_context: dict[str, Any],
     snapshot: dict[str, Any],
     execution_setup: dict[str, Any],
+    workspace_root: Path,
+    market_data_repository: Any | None,
 ) -> dict[str, Any] | None:
     direction = str(position_context.get("direction") or "LONG").upper()
-    policy = _execution_setup_policy(execution_setup=execution_setup, direction=direction)
+    policy = _execution_setup_policy(
+        execution_setup=execution_setup,
+        direction=direction,
+        signal_timestamp=position_context.get("opened_at"),
+        market_data_repository=market_data_repository,
+        workspace_root=workspace_root,
+        asset=str(route.get("asset") or "").upper() or None,
+    )
     if policy.get("blocker"):
         return None
     tp_pct = float(policy["final_tp_pct"])
@@ -1477,6 +1531,7 @@ def _resolve_bundle_protection(
             "trail_sl_pct": _rounded_number(trail_sl_pct) if trail_sl_pct > 0 else None,
             "initial_sl_pct": _rounded_number(initial_sl_pct),
             "final_tp_pct": _rounded_number(tp_pct),
+            "atr_source": (policy.get("atr_source_diagnostics") or {}).get("atr_source"),
             "derived_tp": tp,
             "derived_sl": sl,
             "live_tp": _format_decimal(live_tp) if live_tp > 0 else None,
@@ -2059,6 +2114,11 @@ def _first_present(mapping: dict[str, Any], *keys: str) -> Any:
     return None
 
 
+def _atr_source_present(mapping: dict[str, Any]) -> bool:
+    source = mapping.get("atr_source")
+    return isinstance(source, dict) and bool(source.get("enabled", True))
+
+
 def _normalize_strategy_order_intents(
     *,
     wake_id: str,
@@ -2067,7 +2127,9 @@ def _normalize_strategy_order_intents(
     decision: dict[str, Any],
     execution_setup: dict[str, Any],
     snapshot: dict[str, Any],
- ) -> list[dict[str, Any]]:
+    workspace_root: Path,
+    market_data_repository: Any | None,
+) -> list[dict[str, Any]]:
     explicit_intents = decision.get("order_intents")
     if isinstance(explicit_intents, list) and explicit_intents:
         return [
@@ -2078,6 +2140,8 @@ def _normalize_strategy_order_intents(
                 decision=decision,
                 execution_setup=execution_setup,
                 snapshot=snapshot,
+                workspace_root=workspace_root,
+                market_data_repository=market_data_repository,
                 intent=intent,
                 index=index,
             )
@@ -2094,6 +2158,8 @@ def _normalize_strategy_order_intents(
             decision=decision,
             execution_setup=execution_setup,
             snapshot=snapshot,
+            workspace_root=workspace_root,
+            market_data_repository=market_data_repository,
             intent={},
             index=0,
         )
@@ -2108,15 +2174,28 @@ def _coerce_order_intent(
     decision: dict[str, Any],
     execution_setup: dict[str, Any],
     snapshot: dict[str, Any],
+    workspace_root: Path,
+    market_data_repository: Any | None,
     intent: dict[str, Any],
     index: int,
 ) -> dict[str, Any]:
     setup = execution_setup.get("setup") if isinstance(execution_setup.get("setup"), dict) else execution_setup
     action = _canonical_action(intent.get("action") or decision.get("action") or decision.get("trade_action") or "SKIP")
     direction = str(intent.get("direction") or decision.get("direction") or _direction_from_action(action) or "LONG").upper()
-    execution_policy = _execution_setup_policy(execution_setup=execution_setup, direction=direction)
-    if execution_policy.get("blocker") and execution_policy.get("policy_mode") == "side_specific":
-        raise ValueError(str(execution_policy["blocker"]))
+    execution_policy = _pre_resolved_position_execution_policy(decision) if signal is None else None
+    if execution_policy is None:
+        execution_policy = _execution_setup_policy(
+            execution_setup=execution_setup,
+            direction=direction,
+            signal_timestamp=signal.get("timestamp") if signal else None,
+            market_data_repository=market_data_repository,
+            workspace_root=workspace_root,
+            asset=str(route.get("asset") or "").upper() or None,
+        )
+        if execution_policy.get("atr_source_error"):
+            raise ValueError(str(execution_policy["blocker"]))
+        if execution_policy.get("blocker") and execution_policy.get("policy_mode") == "side_specific":
+            raise ValueError(str(execution_policy["blocker"]))
     side = str(intent.get("side") or decision.get("side") or _side_for_action(action=action, direction=direction)).lower()
     client_order_id = f"motis-{route['route_id']}-{wake_id}-{index}"
     quantity = (
@@ -2227,6 +2306,20 @@ def _coerce_order_intent(
             }
         )
     return order_intent
+
+
+def _pre_resolved_position_execution_policy(decision: dict[str, Any]) -> dict[str, Any] | None:
+    action = _canonical_action(decision.get("action") or decision.get("trade_action") or "SKIP")
+    if action != "UPDATE_PROTECTION":
+        return None
+    tp_pct = _numeric(decision.get("tp_pct"))
+    sl_pct = _numeric(decision.get("sl_pct"))
+    if tp_pct <= 0 or sl_pct <= 0:
+        return None
+    return {
+        "final_tp_pct": tp_pct,
+        "initial_sl_pct": sl_pct,
+    }
 
 
 def _route_margin_sizing(

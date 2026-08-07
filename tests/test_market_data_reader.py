@@ -7,7 +7,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from quant_terminal_sdk.market_data_reader import MarketDataReader
+from quant_terminal_sdk.market_data_reader import MarketDataReader, read_rows_from_ref
 
 
 class FakeRepository:
@@ -94,6 +94,49 @@ def test_market_data_reader_preserves_extra_parquet_columns_for_engine_rows(tmp_
     assert len(rows) == 1
     assert rows[0]["timestamp"].tzinfo is UTC
     assert rows[0]["ema_676"] == "99.5"
+
+
+def test_read_rows_from_ref_ignores_hive_partition_columns_that_collide_with_file_columns(tmp_path: Path):
+    storage_uri = (
+        tmp_path
+        / ".data"
+        / "market-data"
+        / "origin=derived"
+        / "source=okx"
+        / "type=technical_indicator_atr"
+        / "asset=BTC"
+        / "timeframe=1h"
+    )
+    month_path = storage_uri / "year=2026" / "month=06" / "data.parquet"
+    month_path.parent.mkdir(parents=True)
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "timestamp": "2026-06-01T00:00:00Z",
+                    "available_at": "2026-06-01T01:00:00Z",
+                    "timeframe": "1h",
+                    "period": 14,
+                    "atr_pct": 1.25,
+                    "warmup_complete": True,
+                }
+            ]
+        ),
+        month_path,
+    )
+
+    rows = read_rows_from_ref(
+        {
+            "dataset_id": "btc-okx-technical_indicator_atr-derived-1h-wilder-14",
+            "storage_backend": "parquet",
+            "storage_uri": str(storage_uri),
+        },
+        workspace_root=tmp_path,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["timeframe"] == "1h"
+    assert rows[0]["atr_pct"] == 1.25
 
 
 def test_market_data_reader_reports_corrupt_parquet_shard(tmp_path: Path):

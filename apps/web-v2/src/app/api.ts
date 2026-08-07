@@ -452,6 +452,49 @@ export type SignalRecord = {
   payload: Record<string, unknown>;
 };
 
+export type SignalVisualizationCandle = {
+  timestamp: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+};
+
+export type SignalVisualizationMarker = {
+  signal_id: string;
+  timestamp: string;
+  chart_timestamp: string;
+  signal_engine_id: string;
+  signal_engine_version: string;
+  asset: string;
+  instrument: string;
+  reference_price: number | null;
+  leaf_count: number;
+  leaves: string[];
+};
+
+export type SignalSetVisualization = {
+  signal_set: SignalSet;
+  candle_dataset_id: string;
+  candle_timeframe: string;
+  window: {
+    start: string;
+    end: string;
+    requested_start: string;
+    requested_end: string;
+    truncated_to_latest: boolean;
+    max_candles: number;
+  };
+  candles: SignalVisualizationCandle[];
+  signals: SignalVisualizationMarker[];
+  summary: {
+    candle_count: number;
+    signal_count: number;
+    total_signal_count: number;
+  };
+};
+
 export type Stage0UniverseRun = {
   universe_run_id: string;
   name?: string | null;
@@ -794,6 +837,26 @@ export type Stage3GridSetup = {
   protection_enabled?: boolean;
   stage3_step?: string;
   stage3_mode?: string;
+  exit_policy_type?: string;
+  atr_source?: {
+    enabled?: boolean;
+    dataset_id?: string | null;
+    data_type?: string;
+    origin?: string;
+    timeframe?: string;
+    period?: number | string | null;
+    value_field?: string;
+    lookup?: string;
+    tp_multiplier?: number;
+    sl_multiplier?: number;
+  };
+  atr_variant?: {
+    timeframe?: string;
+    period?: number | string | null;
+    tp_multiplier?: number;
+    sl_multiplier?: number;
+    dataset_id?: string | null;
+  };
   entry_model?: string;
   tp_count: number;
   initial_sl_count?: number;
@@ -865,12 +928,17 @@ export type Stage3GridState = {
   exact_protection_result?: Partial<Stage3GridSetup>;
   exact_policy_result?: Partial<Stage3GridSetup>;
   stage3c_total_combinations_tested?: number;
+  stage3c_atr_combinations_tested?: number;
+  atr_variant_results?: Stage3GridSetup[];
   stage3c_value_ranges?: {
     final_tp_pct?: number[];
     protect_trigger_pct?: number[];
     trail_sl_pct?: number[];
     initial_sl_pct?: number[];
     initial_sl_multipliers?: number[];
+    atr_timeframes?: string[];
+    atr_tp_multipliers?: number[];
+    atr_sl_multipliers?: number[];
   };
   stage3c_shortlist?: Stage3GridSetup[];
   optimal?: Stage3OptimalSummary;
@@ -957,6 +1025,7 @@ export type Stage4CandidateResult = {
   }>;
   setup?: {
     policy_mode?: "shared" | "side_specific" | string | null;
+    exit_policy_type?: string;
     protection_enabled?: boolean;
     tp_pct?: number;
     sl_pct?: number;
@@ -965,6 +1034,8 @@ export type Stage4CandidateResult = {
     initial_sl_pct?: number;
     protect_trigger_pct?: number;
     trail_sl_pct?: number;
+    atr_source?: Stage3GridSetup["atr_source"];
+    atr_variant?: Stage3GridSetup["atr_variant"];
     max_hold_hours?: number;
     hard_exit_hours?: number;
     side_policies?: Record<"LONG" | "SHORT", Stage2PolicyValues & {
@@ -1855,6 +1926,17 @@ export function fetchSignals(signalSetKey: string, limit = 5, descending = false
     params.set("descending", "true");
   }
   return requestJson<{ signals: SignalRecord[] }>(`/api/v1/signals?${params.toString()}`);
+}
+
+export function fetchSignalSetVisualization(
+  signalEngineId: string,
+  asset: string,
+  maxCandles = 80_000
+): Promise<SignalSetVisualization> {
+  const params = new URLSearchParams({ max_candles: String(maxCandles) });
+  return requestJson<SignalSetVisualization>(
+    `/api/v1/signal-engines/${signalEngineId}/signal-sets/${asset}/visualization?${params.toString()}`
+  );
 }
 
 export function fetchLiveSignalObservations(
