@@ -1,4 +1,92 @@
 {
+  "derivatives_basis_participation_regime_v1": {
+    "code_ref": {
+      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/derivatives_basis_participation_regime_v1_base.py",
+      "path": "apps/worker/src/quant_terminal_worker/signal_engines/derivatives_basis_participation_regime_v1.py"
+    },
+    "configuration_schema": {
+      "default_parameters": {
+        "context_bars": 72,
+        "context_timeframes": [
+          "1h",
+          "4h",
+          "12h"
+        ],
+        "crowded_global_long_ratio": "1.15",
+        "crowded_global_short_ratio": "0.87",
+        "dedupe_window_minutes": 120,
+        "extreme_funding_zscore": "1.85",
+        "extreme_premium_zscore": "1.85",
+        "healthy_global_ratio_high": "1.28",
+        "healthy_global_ratio_low": "0.78",
+        "max_fade_oi_change_4h_pct": "0.08",
+        "max_healthy_funding_zscore": "1.75",
+        "max_healthy_premium_zscore": "1.75",
+        "min_fade_reversal_1h_pct": "0.04",
+        "min_oi_change_4h_pct": "0.02",
+        "min_short_return_1h_pct": "0.03",
+        "min_stats_bars": 160,
+        "min_stress_oi_change_4h_pct": "0.08",
+        "min_stress_price_return_4h_pct": "0.45",
+        "min_taker_imbalance_z": "0.03",
+        "min_trend_return_4h_pct": "0.20",
+        "min_volume_ratio": "0.90",
+        "oi_change_window_bars": 48,
+        "range_lookback_bars": 96,
+        "range_window_bars": 96,
+        "stats_lookback_bars": 576,
+        "taker_buy_ratio_threshold": "1.005",
+        "taker_sell_ratio_threshold": "0.995"
+      },
+      "fixed_parameters": {
+        "dedupe_window_minutes": 120
+      }
+    },
+    "description": "Broader crypto-perp derivatives regime engine using price-volume momentum, open-interest participation, funding/premium basis state, taker flow, and positioning. Emits neutral continuation, crowded-fade, and leverage-stress regime packets for 36-48h strategy development.",
+    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.derivatives_basis_participation_regime_v1:scan_live_signal",
+    "name": "Derivatives Basis Participation Regime v1",
+    "output_envelope_version": "signal_packet.v2",
+    "required_data": [
+      {
+        "data_type": "candles",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "open_interest",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "futures_metrics",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "premium_index",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "funding_features",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "derived",
+        "timeframe": "5m"
+      }
+    ],
+    "runtime_entrypoint": "quant_terminal_worker.signal_engines.derivatives_basis_participation_regime_v1:generate_training_signals",
+    "signal_engine_id": "derivatives_basis_participation_regime_v1",
+    "version": "0.1"
+  },
   "leverage_reset_reacceleration_v1": {
     "code_ref": {
       "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/leverage_reset_reacceleration_v1_base.py",
