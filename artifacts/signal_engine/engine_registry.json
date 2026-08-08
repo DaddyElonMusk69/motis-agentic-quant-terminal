@@ -1,4 +1,90 @@
 {
+  "leverage_reset_reacceleration_v1": {
+    "code_ref": {
+      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/leverage_reset_reacceleration_v1_base.py",
+      "path": "apps/worker/src/quant_terminal_worker/signal_engines/leverage_reset_reacceleration_v1.py"
+    },
+    "configuration_schema": {
+      "default_parameters": {
+        "context_bars": 72,
+        "context_timeframes": [
+          "1h",
+          "4h",
+          "12h"
+        ],
+        "dedupe_window_minutes": 180,
+        "max_abs_funding_zscore": "2.10",
+        "max_abs_premium_zscore": "2.10",
+        "max_reset_age_bars": 48,
+        "min_flush_candle_range_pct": "0.45",
+        "min_flush_extension_pct": "0.12",
+        "min_oi_rebuild_1h_pct": "0.02",
+        "min_reclaim_from_extreme_pct": "0.18",
+        "min_reset_age_bars": 2,
+        "min_reset_oi_drop_1h_pct": "0.06",
+        "min_reset_volume_ratio": "1.15",
+        "min_stats_bars": 200,
+        "min_taker_imbalance_z": "0.20",
+        "min_volume_ratio": "1.00",
+        "oi_change_window_bars": 48,
+        "post_reset_global_ratio_high": "1.18",
+        "post_reset_global_ratio_low": "0.85",
+        "range_lookback_bars": 96,
+        "range_window_bars": 96,
+        "reset_lookback_bars": 48,
+        "stats_lookback_bars": 576,
+        "taker_buy_ratio_threshold": "1.02",
+        "taker_sell_ratio_threshold": "0.98"
+      },
+      "fixed_parameters": {
+        "dedupe_window_minutes": 180
+      }
+    },
+    "description": "General leverage reset reacceleration engine: detects post-flush leverage clearing followed by clean OI rebuild, volume/taker reacceleration, and normalized premium/funding context. Designed for ETH/SOL style post-liquidation continuation or reversal windows with bounded 5m plus 1h/4h/12h context.",
+    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.leverage_reset_reacceleration_v1:scan_live_signal",
+    "name": "Leverage Reset Reacceleration v1",
+    "output_envelope_version": "signal_packet.v2",
+    "required_data": [
+      {
+        "data_type": "candles",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "open_interest",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "futures_metrics",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "premium_index",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
+      },
+      {
+        "data_type": "funding_features",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "derived",
+        "timeframe": "5m"
+      }
+    ],
+    "runtime_entrypoint": "quant_terminal_worker.signal_engines.leverage_reset_reacceleration_v1:generate_training_signals",
+    "signal_engine_id": "leverage_reset_reacceleration_v1",
+    "version": "0.1"
+  },
   "derivatives_participation_impulse_v1": {
     "code_ref": {
       "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/derivatives_participation_impulse_v1_base.py",
