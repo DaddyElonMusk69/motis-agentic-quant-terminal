@@ -54,6 +54,7 @@ from quant_terminal_worker.ingestion.raw_candle_fill import fill_raw_candle_data
 from quant_terminal_worker.ingestion.legacy_signals import import_legacy_signal_sets
 from quant_terminal_worker.ingestion.signal_pool_extension import extend_signal_pool_from_local_candles
 from quant_terminal_worker.execution.lifecycle import next_wake_at, run_route_lifecycle_cycle
+from quant_terminal_worker.execution.decision_cadence import build_decision_cadence_contract
 from quant_terminal_worker.execution.order_submission import submit_wake_order_intents
 from quant_terminal_worker.execution.scheduler import RouteLifecycleScheduler
 from quant_terminal_worker.stage0.information import apply_information_q_values_to_candidates
@@ -3781,6 +3782,20 @@ def _materialize_execution_bundle(
     if source_universe_run is None:
         raise ValueError("Source Stage 0 universe run is missing")
     forward_hours = int(source_universe_run["forward_hours"])
+    decision_cadence = selected_result.get("decision_cadence")
+    if not isinstance(decision_cadence, dict):
+        decision_cadence = simulation_inputs.get("decision_cadence")
+    if not isinstance(decision_cadence, dict):
+        decision_cadence = build_decision_cadence_contract(
+            cursor_seed_timestamp=f"{_date_string(session['walk_forward_end'])}T23:59:59Z",
+            source_stage4_run_id=selected_result.get("run_id"),
+            source_stage4_candidate_id=best.get("candidate_id") or selected_result.get("best_candidate_id"),
+        )
+    decision_cadence = {
+        **decision_cadence,
+        "source_stage4_run_id": selected_result.get("run_id") or decision_cadence.get("source_stage4_run_id"),
+        "source_stage4_candidate_id": best.get("candidate_id") or selected_result.get("best_candidate_id"),
+    }
     evidence_refs = {
         "stage1_session_id": session["session_id"],
         "stage1_canonical_scores": str(promotion_root / "stage1a_canonical_full_cycle_scores.json"),
@@ -3807,6 +3822,7 @@ def _materialize_execution_bundle(
         "execution_adapter": execution_adapter,
         "forward_hours": forward_hours,
         "hard_exit_after_hours": forward_hours,
+        "decision_cadence": decision_cadence,
         "stage4_candidate_id": best.get("candidate_id") or selected_result.get("best_candidate_id"),
         "setup": best.get("setup") or best,
         "sizing": {

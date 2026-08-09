@@ -12,11 +12,16 @@ def test_load_execution_bundle_backfills_stage4_sizing_for_legacy_setup(tmp_path
     stage4_path.write_text(
         json.dumps(
             {
+                "run_id": "stage4-legacy",
+                "best_candidate_id": "candidate-legacy",
                 "simulation_inputs": {
                     "initial_capital_usdt": 10000,
                     "margin_allocation_pct": 30,
                     "leverage": 10,
-                }
+                },
+                "slice_windows": [
+                    {"name": "walk_forward", "start": "2026-05-01T00:00:00Z", "end": "2026-06-30T23:59:59Z"},
+                ],
             }
         )
     )
@@ -51,3 +56,7 @@ def test_load_execution_bundle_backfills_stage4_sizing_for_legacy_setup(tmp_path
         "margin_allocation_pct": 30.0,
         "leverage": 10.0,
     }
+    cadence = runtime["execution_setup"]["decision_cadence"]
+    assert cadence["cursor_seed_timestamp"] == "2026-06-30T23:59:59Z"
+    assert cadence["source_stage4_run_id"] == "stage4-legacy"
+    assert cadence["source_stage4_candidate_id"] == "candidate-legacy"

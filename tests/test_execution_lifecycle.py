@@ -138,6 +138,25 @@ def test_next_wake_at_keeps_non_live_routes_on_relative_interval():
     )
 
 
+def test_next_wake_at_uses_pinned_bundle_cadence_over_route_setting():
+    route = {
+        "account_mode": "live",
+        "cron_interval_minutes": 30,
+        "active_bundle": {
+            "execution_setup": {
+                "decision_cadence": {
+                    "decision_interval_minutes": 5,
+                    "wake_grace_seconds": 45,
+                    "cursor_seed_timestamp": "2026-06-30T23:59:59Z",
+                }
+            }
+        },
+    }
+    assert next_wake_at(route, from_time=datetime(2026, 7, 7, 7, 4, 0, tzinfo=UTC)) == datetime(
+        2026, 7, 7, 7, 5, 45, tzinfo=UTC
+    )
+
+
 def test_lifecycle_does_not_block_live_wake_when_research_signal_extension_fails(tmp_path):
     bundle_root = tmp_path / "bundle"
     bundle_root.mkdir()

@@ -6413,6 +6413,10 @@ def test_promote_execution_bundle_creates_route_and_blocked_wake(tmp_path, monke
     assert promoted["bundle"]["execution_setup"]["hard_exit_after_hours"] == 36
     assert promoted["bundle"]["execution_setup"]["sizing"]["margin_allocation_pct"] == 30
     assert promoted["bundle"]["execution_setup"]["sizing"]["leverage"] == 5
+    cadence = promoted["bundle"]["execution_setup"]["decision_cadence"]
+    assert cadence["schema_version"] == "execution_decision_cadence.v1"
+    assert cadence["timestamp_match"] == "exact_utc"
+    assert cadence["late_arrival_grace_seconds"] == 600
     manifest = json.loads((tmp_path / promoted["bundle"]["bundle_uri"] / "manifest.json").read_text())
     assert manifest["contract_version"] == "engine_strategy_contract.v1"
     assert manifest["signal_engine_spec"]["signal_engine_id"] == "vegas_ema"

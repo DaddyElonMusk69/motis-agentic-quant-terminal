@@ -1117,6 +1117,8 @@ class RuntimeRepository:
         signal_set_key: str | None = None,
         signal_engine_id: str | None = None,
         asset: str | None = None,
+        after_timestamp: datetime | str | None = None,
+        through_timestamp: datetime | str | None = None,
         limit: int = 25,
         descending: bool = False,
     ) -> list[dict[str, Any]]:
@@ -1128,6 +1130,10 @@ class RuntimeRepository:
             statement = statement.where(signals.c.signal_engine_id == signal_engine_id)
         if asset:
             statement = statement.where(signals.c.asset == asset)
+        if after_timestamp is not None:
+            statement = statement.where(signals.c.timestamp > _coerce_datetime(after_timestamp))
+        if through_timestamp is not None:
+            statement = statement.where(signals.c.timestamp <= _coerce_datetime(through_timestamp))
         with self.engine.connect() as connection:
             return [dict(row._mapping) for row in connection.execute(statement)]
 

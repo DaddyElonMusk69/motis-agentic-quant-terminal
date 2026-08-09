@@ -8,6 +8,50 @@ from quant_terminal_sdk.market_data_reader import MarketDataReader
 
 
 DEFAULT_CANONICAL_SIGNAL_FRESHNESS_MINUTES = 10
+DEFAULT_PENDING_CANONICAL_SIGNAL_LIMIT = 1000
+
+
+def load_pending_canonical_entry_signals(
+    *,
+    route: dict[str, Any],
+    bundle: dict[str, Any],
+    repository: Any,
+    workspace_root: Path,
+    after_timestamp: datetime,
+    limit: int = DEFAULT_PENDING_CANONICAL_SIGNAL_LIMIT,
+) -> dict[str, Any]:
+    context = resolve_route_canonical_signal_context(route=route, bundle=bundle, repository=repository)
+    signal_set_key = context["signal_set_key"]
+    latest_confirmed_candle_ts = _latest_confirmed_candle_ts(
+        repository=repository,
+        workspace_root=workspace_root,
+        asset=route["asset"],
+    )
+    signals = repository.list_signals(
+        signal_set_key=signal_set_key,
+        after_timestamp=after_timestamp,
+        through_timestamp=latest_confirmed_candle_ts,
+        limit=limit,
+        descending=False,
+    )
+    pending = [
+        dict(signal)
+        for signal in signals
+        if after_timestamp < _parse_timestamp(signal["timestamp"]) <= latest_confirmed_candle_ts
+    ]
+    pending.sort(key=lambda signal: (_parse_timestamp(signal["timestamp"]), str(signal.get("signal_id") or "")))
+    return {
+        "signals": pending,
+        "scan_result": {
+            "status": "pending_canonical_signals" if pending else "no_fresh_canonical_signal",
+            "source": "canonical_signal_pool",
+            "signal_set_key": signal_set_key,
+            "cursor_timestamp": _iso_z(after_timestamp),
+            "latest_confirmed_candle_ts": _iso_z(latest_confirmed_candle_ts),
+            "pending_count": len(pending),
+            "truncated": len(pending) >= limit,
+        },
+    }
 
 
 def load_latest_canonical_entry_signal(

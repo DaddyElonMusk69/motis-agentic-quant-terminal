@@ -6,6 +6,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from quant_terminal_worker.execution.decision_cadence import build_decision_cadence_contract
+
 
 def load_execution_bundle(bundle: dict[str, Any], *, workspace_root: Path) -> dict[str, Any]:
     bundle_root = Path(bundle["bundle_uri"])
@@ -22,6 +24,10 @@ def load_execution_bundle(bundle: dict[str, Any], *, workspace_root: Path) -> di
         sizing = _stage4_sizing_from_bundle(bundle=bundle, workspace_root=workspace_root)
         if sizing:
             execution_setup = {**execution_setup, "sizing": sizing}
+    if isinstance(execution_setup, dict) and not isinstance(execution_setup.get("decision_cadence"), dict):
+        cadence = _stage4_decision_cadence_from_bundle(bundle=bundle, workspace_root=workspace_root)
+        if cadence:
+            execution_setup = {**execution_setup, "decision_cadence": cadence}
     return {
         "bundle": bundle,
         "bundle_root": bundle_root,
@@ -44,6 +50,41 @@ def load_strategy_module(strategy_path: Path) -> ModuleType:
 
 
 def _stage4_sizing_from_bundle(*, bundle: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    payload = _stage4_payload_from_bundle(bundle=bundle, workspace_root=workspace_root)
+    if not payload:
+        return {}
+    inputs = payload.get("simulation_inputs") if isinstance(payload.get("simulation_inputs"), dict) else {}
+    margin = _positive_number(inputs.get("margin_allocation_pct"))
+    leverage = _positive_number(inputs.get("leverage"))
+    if margin is None or leverage is None:
+        return {}
+    return {
+        "source": "stage4_realized_expectancy",
+        "initial_capital_usdt": inputs.get("initial_capital_usdt"),
+        "margin_allocation_pct": margin,
+        "leverage": leverage,
+    }
+
+
+def _stage4_decision_cadence_from_bundle(*, bundle: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    payload = _stage4_payload_from_bundle(bundle=bundle, workspace_root=workspace_root)
+    if not payload:
+        return {}
+    cadence = payload.get("decision_cadence")
+    if isinstance(cadence, dict):
+        return dict(cadence)
+    windows = payload.get("slice_windows") if isinstance(payload.get("slice_windows"), list) else []
+    ends = [window.get("end") for window in windows if isinstance(window, dict) and window.get("end")]
+    if not ends:
+        return {}
+    return build_decision_cadence_contract(
+        cursor_seed_timestamp=max(ends),
+        source_stage4_run_id=payload.get("run_id"),
+        source_stage4_candidate_id=payload.get("best_candidate_id"),
+    )
+
+
+def _stage4_payload_from_bundle(*, bundle: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
     path_value = bundle.get("source_stage4_result_path")
     if not isinstance(path_value, str) or not path_value:
         evidence_refs = bundle.get("evidence_refs") if isinstance(bundle.get("evidence_refs"), dict) else {}
@@ -56,17 +97,7 @@ def _stage4_sizing_from_bundle(*, bundle: dict[str, Any], workspace_root: Path) 
     if not stage4_path.is_file():
         return {}
     payload = json.loads(stage4_path.read_text())
-    inputs = payload.get("simulation_inputs") if isinstance(payload.get("simulation_inputs"), dict) else {}
-    margin = _positive_number(inputs.get("margin_allocation_pct"))
-    leverage = _positive_number(inputs.get("leverage"))
-    if margin is None or leverage is None:
-        return {}
-    return {
-        "source": "stage4_realized_expectancy",
-        "initial_capital_usdt": inputs.get("initial_capital_usdt"),
-        "margin_allocation_pct": margin,
-        "leverage": leverage,
-    }
+    return payload if isinstance(payload, dict) else {}
 
 
 def _positive_number(value: Any) -> float | None:

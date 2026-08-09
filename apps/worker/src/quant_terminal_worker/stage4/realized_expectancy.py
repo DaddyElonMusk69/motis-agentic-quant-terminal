@@ -12,6 +12,7 @@ from typing import Any
 from quant_terminal_worker.stage2.capture_curve import get_reference_price
 from quant_terminal_worker.stage3.grid_search import DEFAULT_FORWARD_HOURS, DEFAULT_LEVERAGE
 from quant_terminal_worker.execution.atr_source import ATRSourceError, resolve_atr_policy
+from quant_terminal_worker.execution.decision_cadence import build_decision_cadence_contract
 
 
 DEFAULT_FEES_BPS_PER_SIDE = 5.0
@@ -117,6 +118,13 @@ def run_stage4_realized_expectancy(
             "fees_bps_per_side": fees_bps_per_side,
             "slippage_bps_per_side": slippage_bps_per_side,
         },
+        "decision_cadence": build_decision_cadence_contract(
+            cursor_seed_timestamp=(
+                f"{session.get('walk_forward_end') or session.get('train_end') or session.get('research_end') or '1970-01-01'}T23:59:59Z"
+            ),
+            source_stage4_run_id=run_id,
+            source_stage4_candidate_id=best["candidate_id"],
+        ),
         "simulation_inputs": {
             "initial_capital_usdt": initial_capital_usdt,
             "margin_allocation_pct": margin_allocation_pct,

@@ -103,6 +103,9 @@ def test_run_stage4_realized_expectancy_scores_full_decision_set(tmp_path: Path)
     assert best["tp_hits"] == 1
     assert best["net_expectancy_pct"] == 0.75
     assert result["ledger"]["candidates"][0]["trades"][1]["entry_status"] == "SKIPPED"
+    assert result["decision_cadence"]["schema_version"] == "execution_decision_cadence.v1"
+    assert result["decision_cadence"]["timestamp_match"] == "exact_utc"
+    assert result["decision_cadence"]["late_arrival_grace_seconds"] == 600
     assert (promotion_root / "stage4_realized_expectancy.json").exists()
     assert (promotion_root / "stage4_trade_ledger.json").exists()
     assert (promotion_root / "stage4_optimal.json").exists()

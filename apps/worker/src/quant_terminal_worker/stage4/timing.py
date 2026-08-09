@@ -165,6 +165,7 @@ def run_stage4b_timing_replay(
         "overlay": overlay,
         "simulation_inputs": inputs,
         "cost_assumptions": costs,
+        "decision_cadence": realized.get("decision_cadence"),
         "slice_windows": realized.get("slice_windows", []),
         "best_candidate_id": best["candidate_id"],
         "best_candidate": best,

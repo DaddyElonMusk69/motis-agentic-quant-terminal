@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from quant_terminal_worker.execution.data_warmup import warm_route_data
+from quant_terminal_worker.execution.decision_cadence import resolve_decision_cadence_contract
 from quant_terminal_worker.execution.order_submission import submit_wake_order_intents
 from quant_terminal_worker.execution.wake_runner import run_route_wake
 from quant_terminal_worker.ingestion.signal_pool_extension import extend_signal_pool_from_local_candles
@@ -113,7 +114,12 @@ def run_route_lifecycle_cycle(
 def next_wake_at(route: dict[str, Any], *, from_time: datetime | None = None) -> datetime:
     base = _utc(from_time or datetime.now(UTC))
     try:
-        minutes = int(route.get("cron_interval_minutes") or 5)
+        contract = resolve_decision_cadence_contract(route=route)
+        minutes = int(
+            contract["decision_interval_minutes"]
+            if _route_has_pinned_decision_cadence(route)
+            else route.get("cron_interval_minutes") or 5
+        )
     except (TypeError, ValueError):
         minutes = 5
     minutes = max(1, minutes)
@@ -144,6 +150,8 @@ def _next_aligned_candle_close_wake(
 
 
 def _live_candle_close_grace_seconds(route: dict[str, Any]) -> int:
+    if _route_has_pinned_decision_cadence(route):
+        return int(resolve_decision_cadence_contract(route=route)["wake_grace_seconds"])
     value = route.get("candle_close_grace_seconds")
     if value is None:
         value = route.get("live_candle_close_grace_seconds")
@@ -151,6 +159,17 @@ def _live_candle_close_grace_seconds(route: dict[str, Any]) -> int:
         return max(0, int(value if value is not None else DEFAULT_LIVE_CANDLE_CLOSE_GRACE_SECONDS))
     except (TypeError, ValueError):
         return DEFAULT_LIVE_CANDLE_CLOSE_GRACE_SECONDS
+
+
+def _route_has_pinned_decision_cadence(route: dict[str, Any]) -> bool:
+    bundle = route.get("active_bundle") if isinstance(route.get("active_bundle"), dict) else {}
+    execution_setup = bundle.get("execution_setup") if isinstance(bundle.get("execution_setup"), dict) else {}
+    if isinstance(execution_setup.get("decision_cadence"), dict):
+        return True
+    risk_limits = route.get("risk_limits") if isinstance(route.get("risk_limits"), dict) else {}
+    pause_state = risk_limits.get("pause_rule_state") if isinstance(risk_limits.get("pause_rule_state"), dict) else {}
+    cadence_state = pause_state.get("decision_cadence") if isinstance(pause_state.get("decision_cadence"), dict) else {}
+    return isinstance(cadence_state.get("contract"), dict)
 
 
 def _utc(value: datetime) -> datetime:

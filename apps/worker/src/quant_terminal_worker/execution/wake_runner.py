@@ -6,7 +6,16 @@ from typing import Any, Callable
 
 from quant_terminal_worker.execution.atr_source import ATRSourceError, resolve_atr_policy
 from quant_terminal_worker.execution.bundle_loader import load_execution_bundle
-from quant_terminal_worker.execution.canonical_signal_admission import load_latest_canonical_entry_signal
+from quant_terminal_worker.execution.canonical_signal_admission import (
+    load_latest_canonical_entry_signal,
+    load_pending_canonical_entry_signals,
+)
+from quant_terminal_worker.execution.decision_cadence import (
+    decision_cursor,
+    ensure_decision_cadence_state,
+    persist_decision_cursor,
+    resolve_decision_cadence_contract,
+)
 from quant_terminal_worker.execution.live_signal_scan import scan_latest_live_signal
 
 
@@ -111,6 +120,36 @@ def run_route_wake(
     positions = _active_positions(snapshot)
     adapter_results = []
     working_entry_orders = _working_entry_orders(snapshot)
+    cadence_contract = resolve_decision_cadence_contract(route=route, execution_setup=runtime["execution_setup"])
+    pinned_cadence = isinstance(runtime["execution_setup"].get("decision_cadence"), dict)
+    pending_admission = None
+    cadence_diagnostics: dict[str, Any] = {}
+    if pinned_cadence and route.get("account_mode") == "live":
+        route = ensure_decision_cadence_state(repository=repository, route=route, contract=cadence_contract)
+        if allow_entry_scan:
+            try:
+                pending_admission = load_pending_canonical_entry_signals(
+                    route=route,
+                    bundle=bundle,
+                    repository=repository,
+                    workspace_root=workspace,
+                    after_timestamp=decision_cursor(route, contract=cadence_contract),
+                )
+            except ValueError as exc:
+                cadence_diagnostics["decision_cadence_error"] = str(exc)
+            if pending_admission is not None:
+                route, expired = _consume_canonical_opportunities(
+                    repository=repository,
+                    route=route,
+                    bundle=bundle,
+                    runtime=runtime,
+                    snapshot=snapshot,
+                    signals=pending_admission["signals"],
+                    cadence_contract=cadence_contract,
+                    now=started_at,
+                    mode="expired_only",
+                )
+                cadence_diagnostics.update(expired)
     if positions:
         fresh_working_entry_orders = [
             order
@@ -161,6 +200,19 @@ def run_route_wake(
             workspace_root=workspace,
             market_data_repository=market_data_repository,
         )
+        route, consumed = _consume_canonical_opportunities(
+            repository=repository,
+            route=route,
+            bundle=bundle,
+            runtime=runtime,
+            snapshot=snapshot,
+            signals=(pending_admission or {}).get("signals") or [],
+            cadence_contract=cadence_contract,
+            now=started_at,
+            mode="blocked",
+            blocker="position_open",
+        )
+        cadence_diagnostics.update(consumed)
         position_intents = _normalize_strategy_order_intents(
             wake_id=wake_id,
             route=route,
@@ -181,7 +233,7 @@ def run_route_wake(
                 "branch": "position_management",
                 "blockers": [],
                 "exchange_snapshot": snapshot,
-                "signal_scan_result": {"status": "skipped_position_open"},
+                "signal_scan_result": {"status": "skipped_position_open", **cadence_diagnostics},
                 "strategy_decision": decision,
                 "order_intents": position_intents,
                 "adapter_results": adapter_results,
@@ -196,6 +248,19 @@ def run_route_wake(
         if _order_age_minutes(order) < entry_order_ttl_minutes
     ]
     if fresh_orders:
+        route, consumed = _consume_canonical_opportunities(
+            repository=repository,
+            route=route,
+            bundle=bundle,
+            runtime=runtime,
+            snapshot=snapshot,
+            signals=(pending_admission or {}).get("signals") or [],
+            cadence_contract=cadence_contract,
+            now=started_at,
+            mode="blocked",
+            blocker="entry_order_open",
+        )
+        cadence_diagnostics.update(consumed)
         return _record_wake(
             repository,
             {
@@ -209,6 +274,7 @@ def run_route_wake(
                 "signal_scan_result": {
                     "status": "fresh_entry_order_exists",
                     "order_count": len(fresh_orders),
+                    **cadence_diagnostics,
                 },
                 "strategy_decision": {},
                 "order_intents": [],
@@ -244,6 +310,19 @@ def run_route_wake(
     )
 
     if working_entry_orders:
+        route, consumed = _consume_canonical_opportunities(
+            repository=repository,
+            route=route,
+            bundle=bundle,
+            runtime=runtime,
+            snapshot=snapshot,
+            signals=(pending_admission or {}).get("signals") or [],
+            cadence_contract=cadence_contract,
+            now=started_at,
+            mode="blocked",
+            blocker="entry_order_cleanup",
+        )
+        cadence_diagnostics.update(consumed)
         return _record_wake(
             repository,
             {
@@ -257,6 +336,7 @@ def run_route_wake(
                 "signal_scan_result": {
                     "status": "no_position_after_cleanup",
                     "cancelled_order_count": len(adapter_results),
+                    **cadence_diagnostics,
                 },
                 "strategy_decision": {},
                 "order_intents": [],
@@ -268,6 +348,19 @@ def run_route_wake(
 
     active_pause = _active_pause_rule(route=route, execution_setup=runtime["execution_setup"], now=started_at)
     if active_pause is not None:
+        route, consumed = _consume_canonical_opportunities(
+            repository=repository,
+            route=route,
+            bundle=bundle,
+            runtime=runtime,
+            snapshot=snapshot,
+            signals=(pending_admission or {}).get("signals") or [],
+            cadence_contract=cadence_contract,
+            now=started_at,
+            mode="blocked",
+            blocker=str(active_pause.get("reason") or "pause_rule"),
+        )
+        cadence_diagnostics.update(consumed)
         return _record_wake(
             repository,
             {
@@ -278,7 +371,7 @@ def run_route_wake(
                 "branch": "idle",
                 "blockers": [],
                 "exchange_snapshot": snapshot,
-                "signal_scan_result": active_pause,
+                "signal_scan_result": {**active_pause, **cadence_diagnostics},
                 "strategy_decision": {},
                 "order_intents": [],
                 "adapter_results": adapter_results,
@@ -307,16 +400,37 @@ def run_route_wake(
             },
         )
 
+    prepared_decision = None
     try:
         if route.get("account_mode") == "live":
-            admission = load_latest_canonical_entry_signal(
-                route=route,
-                bundle=bundle,
-                repository=repository,
-                workspace_root=workspace,
-            )
-            signal = admission["signal"]
-            signal_scan_result = admission["scan_result"]
+            if pinned_cadence:
+                admission = pending_admission or load_pending_canonical_entry_signals(
+                    route=route,
+                    bundle=bundle,
+                    repository=repository,
+                    workspace_root=workspace,
+                    after_timestamp=decision_cursor(route, contract=cadence_contract),
+                )
+                route, signal, prepared_decision, scan = _select_next_canonical_opportunity(
+                    repository=repository,
+                    route=route,
+                    bundle=bundle,
+                    runtime=runtime,
+                    snapshot=snapshot,
+                    admission=admission,
+                    cadence_contract=cadence_contract,
+                    now=started_at,
+                )
+                signal_scan_result = {**admission["scan_result"], **cadence_diagnostics, **scan}
+            else:
+                admission = load_latest_canonical_entry_signal(
+                    route=route,
+                    bundle=bundle,
+                    repository=repository,
+                    workspace_root=workspace,
+                )
+                signal = admission["signal"]
+                signal_scan_result = admission["scan_result"]
         else:
             scanner = live_signal_scanner or scan_latest_live_signal
             signal = scanner(route=route, repository=repository, workspace_root=workspace)
@@ -364,6 +478,15 @@ def run_route_wake(
         route.get("account_mode") == "live"
         and _processed_entry_signal_timestamp(repository=repository, route_id=route_id) >= _signal_timestamp(signal)
     ):
+        if pinned_cadence:
+            route = persist_decision_cursor(
+                repository=repository,
+                route=route,
+                contract=cadence_contract,
+                decision_timestamp=signal["timestamp"],
+                outcome="duplicate_canonical_signal",
+                signal_id=signal["signal_id"],
+            )
         return _record_wake(
             repository,
             {
@@ -386,7 +509,7 @@ def run_route_wake(
             },
         )
 
-    decision = _run_entry_decision(runtime=runtime, route=route, signal=signal, snapshot=snapshot)
+    decision = prepared_decision or _run_entry_decision(runtime=runtime, route=route, signal=signal, snapshot=snapshot)
     _record_live_signal_observation(
         repository=repository,
         route=route,
@@ -395,6 +518,15 @@ def run_route_wake(
         decision=decision,
         signal_scan_result=signal_scan_result,
     )
+    if pinned_cadence:
+        route = persist_decision_cursor(
+            repository=repository,
+            route=route,
+            contract=cadence_contract,
+            decision_timestamp=signal["timestamp"],
+            outcome="entry_decision" if _decision_requests_entry(decision) else "strategy_skip",
+            signal_id=signal["signal_id"],
+        )
     order_intents = _normalize_strategy_order_intents(
         wake_id=wake_id,
         route=route,
@@ -1045,6 +1177,144 @@ def _record_live_signal_observation(
             "observed_at": datetime.now(UTC),
         }
     )
+
+
+def _consume_canonical_opportunities(
+    *,
+    repository: Any,
+    route: dict[str, Any],
+    bundle: dict[str, Any],
+    runtime: dict[str, Any],
+    snapshot: dict[str, Any],
+    signals: list[dict[str, Any]],
+    cadence_contract: dict[str, Any],
+    now: datetime,
+    mode: str,
+    blocker: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    consumed = blocked = expired = strategy_skips = 0
+    last_timestamp = None
+    grace_seconds = int(cadence_contract["late_arrival_grace_seconds"])
+    for signal in signals:
+        signal_ts = _signal_timestamp(signal)
+        if signal_ts <= decision_cursor(route, contract=cadence_contract):
+            continue
+        is_expired = (now - signal_ts).total_seconds() > grace_seconds
+        if mode == "expired_only" and not is_expired:
+            break
+        if mode == "blocked" and is_expired:
+            continue
+        decision = _run_entry_decision(runtime=runtime, route=route, signal=signal, snapshot=snapshot)
+        is_entry = _decision_requests_entry(decision)
+        if is_expired and is_entry:
+            outcome = "expired_opportunity"
+            execution_blocker = "late_arrival_grace_expired"
+            expired += 1
+        elif is_entry and mode == "blocked":
+            outcome = f"blocked_{blocker}"
+            execution_blocker = blocker
+            blocked += 1
+        else:
+            outcome = "strategy_skip"
+            execution_blocker = None
+            strategy_skips += 1
+        _record_live_signal_observation(
+            repository=repository,
+            route=route,
+            bundle=bundle,
+            signal=signal,
+            decision={**decision, "execution_outcome": outcome, "execution_blocker": execution_blocker},
+            signal_scan_result={
+                "status": "canonical_opportunity_observed",
+                "source": "canonical_signal_pool",
+                "signal_id": signal["signal_id"],
+                "signal_timestamp": _iso_timestamp(signal["timestamp"]),
+                "decision_cadence_outcome": outcome,
+            },
+        )
+        route = persist_decision_cursor(
+            repository=repository,
+            route=route,
+            contract=cadence_contract,
+            decision_timestamp=signal["timestamp"],
+            outcome=outcome,
+            signal_id=signal["signal_id"],
+        )
+        consumed += 1
+        last_timestamp = _iso_timestamp(signal["timestamp"])
+    return route, {
+        "decision_cadence_consumed": consumed,
+        "decision_cadence_blocked_opportunities": blocked,
+        "decision_cadence_expired_opportunities": expired,
+        "decision_cadence_strategy_skips": strategy_skips,
+        "decision_cadence_last_timestamp": last_timestamp,
+    }
+
+
+def _select_next_canonical_opportunity(
+    *,
+    repository: Any,
+    route: dict[str, Any],
+    bundle: dict[str, Any],
+    runtime: dict[str, Any],
+    snapshot: dict[str, Any],
+    admission: dict[str, Any],
+    cadence_contract: dict[str, Any],
+    now: datetime,
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None, dict[str, Any]]:
+    strategy_skips = 0
+    for signal in admission["signals"]:
+        if _signal_timestamp(signal) <= decision_cursor(route, contract=cadence_contract):
+            continue
+        decision = _run_entry_decision(runtime=runtime, route=route, signal=signal, snapshot=snapshot)
+        if _decision_requests_entry(decision):
+            signal_ts = _signal_timestamp(signal)
+            freshness_seconds = max(0, int((now - signal_ts).total_seconds()))
+            return route, signal, decision, {
+                "status": "fresh_signal",
+                "signal_id": signal["signal_id"],
+                "signal_timestamp": _iso_timestamp(signal_ts),
+                "freshness_seconds": freshness_seconds,
+                "freshness_class": "fresh" if freshness_seconds <= int(cadence_contract["wake_grace_seconds"]) else "late",
+                "late_arrival_grace_seconds": int(cadence_contract["late_arrival_grace_seconds"]),
+                "timestamp_match": "exact_utc",
+                "decision_cadence_strategy_skips": strategy_skips,
+            }
+        _record_live_signal_observation(
+            repository=repository,
+            route=route,
+            bundle=bundle,
+            signal=signal,
+            decision={**decision, "execution_outcome": "strategy_skip"},
+            signal_scan_result={
+                "status": "canonical_strategy_skip",
+                "source": "canonical_signal_pool",
+                "signal_id": signal["signal_id"],
+                "signal_timestamp": _iso_timestamp(signal["timestamp"]),
+                "decision_cadence_outcome": "strategy_skip",
+            },
+        )
+        route = persist_decision_cursor(
+            repository=repository,
+            route=route,
+            contract=cadence_contract,
+            decision_timestamp=signal["timestamp"],
+            outcome="strategy_skip",
+            signal_id=signal["signal_id"],
+        )
+        strategy_skips += 1
+    return route, None, None, {
+        "status": "no_fresh_canonical_signal",
+        "decision_cadence_strategy_skips": strategy_skips,
+    }
+
+
+def _decision_requests_entry(decision: dict[str, Any]) -> bool:
+    return _canonical_action(decision.get("action") or decision.get("trade_action")) in {
+        "ENTER",
+        "ENTER_LONG",
+        "ENTER_SHORT",
+    }
 
 
 def _error_wake(

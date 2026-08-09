@@ -213,6 +213,97 @@ def test_wake_routes_open_position_to_management_branch(tmp_path):
     assert wake["signal_scan_result"]["status"] == "skipped_position_open"
 
 
+def test_pinned_cadence_records_position_blocked_opportunity_once(tmp_path):
+    signal_ts = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=5)
+    signal = {**_signal("blocked-sig"), "timestamp": signal_ts.isoformat().replace("+00:00", "Z")}
+    bundle = _bundle(
+        tmp_path,
+        strategy_source=(
+            "def decide(context):\n"
+            "    return {'action': 'ENTER', 'direction': 'LONG', 'reason_code': 'entry'}\n"
+            "def manage_position(context):\n"
+            "    return {'action': 'HOLD', 'reason_code': 'managed'}\n"
+        ),
+        setup={
+            "setup": {"entry_model": "market", "tp_pct": 2.0, "sl_pct": 1.0},
+            "decision_cadence": _cadence(signal_ts - timedelta(seconds=1)),
+        },
+    )
+    repository = FakeRepository(
+        route=_route(bundle),
+        bundle=bundle,
+        signals=[signal],
+        owner_state={"owner_strategy_id": "aave-strategy"},
+        latest_confirmed_candle_ts=signal_ts,
+    )
+    adapter = FakeAdapter(positions=[{"instId": "AAVE-USDT-SWAP", "pos": "1", "posSide": "long"}])
+
+    first = run_route_wake(route_id="aave-live", repository=repository, adapter=adapter)
+    second = run_route_wake(route_id="aave-live", repository=repository, adapter=adapter)
+
+    state = repository.route["risk_limits"]["pause_rule_state"]["decision_cadence"]
+    assert first["signal_scan_result"]["decision_cadence_blocked_opportunities"] == 1
+    assert second["signal_scan_result"]["decision_cadence_consumed"] == 0
+    assert state["last_outcome"] == "blocked_position_open"
+    assert len(repository.live_signal_observations) == 1
+
+
+def test_pinned_cadence_records_pause_blocked_opportunity(tmp_path):
+    signal_ts = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=5)
+    signal = {**_signal("paused-sig"), "timestamp": signal_ts.isoformat().replace("+00:00", "Z")}
+    bundle = _bundle(
+        tmp_path,
+        setup={
+            "setup": {"entry_model": "market", "tp_pct": 2.0, "sl_pct": 1.0},
+            "pause_rules": [{"type": "consecutive_wins", "consecutive_count": 2, "cooldown_hours": 6}],
+            "decision_cadence": _cadence(signal_ts - timedelta(seconds=1)),
+        },
+    )
+    route = {
+        **_route(bundle),
+        "risk_limits": {
+            "pause_rule_state": {
+                "consecutive_wins": {
+                    "consecutive_wins": 2,
+                    "pause_until": (datetime.now(UTC) + timedelta(hours=6)).isoformat().replace("+00:00", "Z"),
+                }
+            }
+        },
+    }
+    repository = FakeRepository(route=route, bundle=bundle, signals=[signal], latest_confirmed_candle_ts=signal_ts)
+
+    wake = run_route_wake(route_id="aave-live", repository=repository, adapter=FakeAdapter())
+
+    state = repository.route["risk_limits"]["pause_rule_state"]["decision_cadence"]
+    assert wake["signal_scan_result"]["decision_cadence_blocked_opportunities"] == 1
+    assert state["last_outcome"] == "blocked_pause_rule_consecutive_wins"
+
+
+def test_pinned_cadence_audits_expired_opportunity_without_entry(tmp_path):
+    signal_ts = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=15)
+    signal = {**_signal("expired-sig"), "timestamp": signal_ts.isoformat().replace("+00:00", "Z")}
+    bundle = _bundle(
+        tmp_path,
+        setup={
+            "setup": {"entry_model": "market", "tp_pct": 2.0, "sl_pct": 1.0},
+            "decision_cadence": _cadence(signal_ts - timedelta(seconds=1)),
+        },
+    )
+    repository = FakeRepository(
+        route=_route(bundle),
+        bundle=bundle,
+        signals=[signal],
+        latest_confirmed_candle_ts=datetime.now(UTC),
+    )
+
+    wake = run_route_wake(route_id="aave-live", repository=repository, adapter=FakeAdapter())
+
+    state = repository.route["risk_limits"]["pause_rule_state"]["decision_cadence"]
+    assert wake["order_intents"] == []
+    assert wake["signal_scan_result"]["decision_cadence_expired_opportunities"] == 1
+    assert state["last_outcome"] == "expired_opportunity"
+
+
 def test_wake_completes_manual_position_to_full_target_without_pyramiding(tmp_path):
     bundle = _bundle(
         tmp_path,
@@ -2367,4 +2458,18 @@ def _signal(signal_id):
         "data_refs": [],
         "payload_schema": "signal_packet.v2",
         "payload": {},
+    }
+
+
+def _cadence(cursor_seed: datetime) -> dict:
+    return {
+        "schema_version": "execution_decision_cadence.v1",
+        "canonical_timeframe": "5m",
+        "decision_interval_minutes": 5,
+        "wake_grace_seconds": 15,
+        "late_arrival_grace_seconds": 600,
+        "timestamp_match": "exact_utc",
+        "cursor_seed_timestamp": cursor_seed.isoformat().replace("+00:00", "Z"),
+        "blocked_opportunities_advance_cursor": True,
+        "expired_opportunities_advance_cursor": True,
     }
