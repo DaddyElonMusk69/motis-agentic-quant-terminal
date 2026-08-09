@@ -87,6 +87,46 @@ def test_derivatives_basis_participation_regime_training_and_live_share_packet_b
     assert packets == [live_packet]
 
 
+def test_derivatives_basis_participation_regime_activation_gate_suppresses_persistent_state(tmp_path: Path) -> None:
+    candles, oi, metrics, premium, funding = _fixture_rows(mode="CONTINUATION_UP", count=520)
+    latest_ts = candles[-1].timestamp
+    without_gate = {**_test_parameters(), "dedupe_window_minutes": 0, "activation_lookback_bars": 0}
+    with_gate = {**_test_parameters(), "dedupe_window_minutes": 0, "activation_lookback_bars": 24}
+
+    ungated_packets, ungated_count = generate_derivatives_basis_participation_regime_packets(
+        workspace_root=tmp_path,
+        asset="SOL",
+        instrument="SOL-USDT-SWAP",
+        raw_5m=candles,
+        raw_oi=oi,
+        raw_metrics=metrics,
+        raw_premium=premium,
+        funding_features=funding,
+        start=latest_ts,
+        end=latest_ts,
+        parameters=without_gate,
+    )
+    gated_packets, gated_count = generate_derivatives_basis_participation_regime_packets(
+        workspace_root=tmp_path,
+        asset="SOL",
+        instrument="SOL-USDT-SWAP",
+        raw_5m=candles,
+        raw_oi=oi,
+        raw_metrics=metrics,
+        raw_premium=premium,
+        funding_features=funding,
+        start=latest_ts,
+        end=latest_ts,
+        parameters=with_gate,
+    )
+
+    assert ungated_count == 1
+    assert ungated_packets[0]["evidence"]["selected_leaf"] == "healthy_continuation"
+    assert ungated_packets[0]["evidence"]["observed_regime_bias"] == "UP"
+    assert gated_count == 0
+    assert gated_packets == []
+
+
 def test_derivatives_basis_participation_regime_strategy_maps_bias_to_direction(tmp_path: Path) -> None:
     from quant_terminal_strategies import derivatives_basis_participation_regime_v1_base as strategy
 
@@ -219,6 +259,7 @@ def _test_parameters() -> dict[str, Any]:
         "min_taker_imbalance_z": 0.02,
         "taker_buy_ratio_threshold": 1.005,
         "taker_sell_ratio_threshold": 0.995,
+        "activation_lookback_bars": 0,
         "context_bars": 48,
         "context_timeframes": ["1h", "4h", "12h"],
     }

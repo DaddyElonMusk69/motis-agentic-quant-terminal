@@ -1,259 +1,4 @@
 {
-  "derivatives_basis_participation_regime_v1": {
-    "code_ref": {
-      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/derivatives_basis_participation_regime_v1_base.py",
-      "path": "apps/worker/src/quant_terminal_worker/signal_engines/derivatives_basis_participation_regime_v1.py"
-    },
-    "configuration_schema": {
-      "default_parameters": {
-        "context_bars": 72,
-        "context_timeframes": [
-          "1h",
-          "4h",
-          "12h"
-        ],
-        "crowded_global_long_ratio": "1.15",
-        "crowded_global_short_ratio": "0.87",
-        "dedupe_window_minutes": 120,
-        "extreme_funding_zscore": "1.85",
-        "extreme_premium_zscore": "1.85",
-        "healthy_global_ratio_high": "1.28",
-        "healthy_global_ratio_low": "0.78",
-        "max_fade_oi_change_4h_pct": "0.08",
-        "max_healthy_funding_zscore": "1.75",
-        "max_healthy_premium_zscore": "1.75",
-        "min_fade_reversal_1h_pct": "0.04",
-        "min_oi_change_4h_pct": "0.02",
-        "min_short_return_1h_pct": "0.03",
-        "min_stats_bars": 160,
-        "min_stress_oi_change_4h_pct": "0.08",
-        "min_stress_price_return_4h_pct": "0.45",
-        "min_taker_imbalance_z": "0.03",
-        "min_trend_return_4h_pct": "0.20",
-        "min_volume_ratio": "0.90",
-        "oi_change_window_bars": 48,
-        "range_lookback_bars": 96,
-        "range_window_bars": 96,
-        "stats_lookback_bars": 576,
-        "taker_buy_ratio_threshold": "1.005",
-        "taker_sell_ratio_threshold": "0.995"
-      },
-      "fixed_parameters": {
-        "dedupe_window_minutes": 120
-      }
-    },
-    "description": "Broader crypto-perp derivatives regime engine using price-volume momentum, open-interest participation, funding/premium basis state, taker flow, and positioning. Emits neutral continuation, crowded-fade, and leverage-stress regime packets for 36-48h strategy development.",
-    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.derivatives_basis_participation_regime_v1:scan_live_signal",
-    "name": "Derivatives Basis Participation Regime v1",
-    "output_envelope_version": "signal_packet.v2",
-    "required_data": [
-      {
-        "data_type": "candles",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 20000,
-        "origin": "raw",
-        "timeframe": "5m"
-      },
-      {
-        "data_type": "open_interest",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 20000,
-        "origin": "raw",
-        "timeframe": "5m"
-      },
-      {
-        "data_type": "futures_metrics",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 20000,
-        "origin": "raw",
-        "timeframe": "5m"
-      },
-      {
-        "data_type": "premium_index",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 20000,
-        "origin": "raw",
-        "timeframe": "5m"
-      },
-      {
-        "data_type": "funding_features",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 20000,
-        "origin": "derived",
-        "timeframe": "5m"
-      }
-    ],
-    "runtime_entrypoint": "quant_terminal_worker.signal_engines.derivatives_basis_participation_regime_v1:generate_training_signals",
-    "signal_engine_id": "derivatives_basis_participation_regime_v1",
-    "version": "0.1"
-  },
-  "leverage_reset_reacceleration_v1": {
-    "code_ref": {
-      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/leverage_reset_reacceleration_v1_base.py",
-      "path": "apps/worker/src/quant_terminal_worker/signal_engines/leverage_reset_reacceleration_v1.py"
-    },
-    "configuration_schema": {
-      "default_parameters": {
-        "context_bars": 72,
-        "context_timeframes": [
-          "1h",
-          "4h",
-          "12h"
-        ],
-        "dedupe_window_minutes": 120,
-        "max_abs_funding_zscore": "2.10",
-        "max_abs_premium_zscore": "2.10",
-        "max_reset_age_bars": 72,
-        "min_flush_candle_range_pct": "0.25",
-        "min_flush_extension_pct": "0.05",
-        "min_oi_rebuild_1h_pct": "0.005",
-        "min_reclaim_from_extreme_pct": "0.08",
-        "min_reset_age_bars": 1,
-        "min_reset_oi_drop_1h_pct": "0.02",
-        "min_reset_volume_ratio": "1.00",
-        "min_stats_bars": 200,
-        "min_taker_imbalance_z": "0.05",
-        "min_volume_ratio": "0.95",
-        "oi_change_window_bars": 48,
-        "post_reset_global_ratio_high": "1.35",
-        "post_reset_global_ratio_low": "0.70",
-        "range_lookback_bars": 96,
-        "range_window_bars": 96,
-        "reset_lookback_bars": 72,
-        "stats_lookback_bars": 576,
-        "taker_buy_ratio_threshold": "1.01",
-        "taker_sell_ratio_threshold": "0.99"
-      },
-      "fixed_parameters": {
-        "dedupe_window_minutes": 120
-      }
-    },
-    "description": "General leverage reset reacceleration engine: detects post-flush leverage clearing followed by clean OI rebuild, volume/taker reacceleration, and normalized premium/funding context. Designed for ETH/SOL style post-liquidation continuation or reversal windows with bounded 5m plus 1h/4h/12h context.",
-    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.leverage_reset_reacceleration_v1:scan_live_signal",
-    "name": "Leverage Reset Reacceleration v1",
-    "output_envelope_version": "signal_packet.v2",
-    "required_data": [
-      {
-        "data_type": "candles",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 20000,
-        "origin": "raw",
-        "timeframe": "5m"
-      },
-      {
-        "data_type": "open_interest",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 20000,
-        "origin": "raw",
-        "timeframe": "5m"
-      },
-      {
-        "data_type": "futures_metrics",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 20000,
-        "origin": "raw",
-        "timeframe": "5m"
-      },
-      {
-        "data_type": "premium_index",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 20000,
-        "origin": "raw",
-        "timeframe": "5m"
-      },
-      {
-        "data_type": "funding_features",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 20000,
-        "origin": "derived",
-        "timeframe": "5m"
-      }
-    ],
-    "runtime_entrypoint": "quant_terminal_worker.signal_engines.leverage_reset_reacceleration_v1:generate_training_signals",
-    "signal_engine_id": "leverage_reset_reacceleration_v1",
-    "version": "0.1"
-  },
-  "derivatives_participation_impulse_v1": {
-    "code_ref": {
-      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/derivatives_participation_impulse_v1_base.py",
-      "path": "apps/worker/src/quant_terminal_worker/signal_engines/derivatives_participation_impulse_v1.py"
-    },
-    "configuration_schema": {
-      "default_parameters": {
-        "breakout_threshold_pct": "0.04",
-        "context_bars": 48,
-        "context_timeframes": [
-          "1h",
-          "4h"
-        ],
-        "dedupe_window_minutes": 120,
-        "max_abs_funding_zscore": "2.25",
-        "max_abs_premium_zscore": "2.25",
-        "min_oi_change_1h_pct": "0.02",
-        "min_oi_z_threshold": "0.65",
-        "min_stats_bars": 200,
-        "min_taker_imbalance_z": "0.35",
-        "min_trend_return_4h_pct": "0.25",
-        "min_volume_ratio": "1.05",
-        "neutral_global_ratio_high": "1.08",
-        "neutral_global_ratio_low": "0.92",
-        "oi_change_window_bars": 48,
-        "range_lookback_bars": 96,
-        "range_percentile_threshold": "0.55",
-        "range_window_bars": 96,
-        "stats_lookback_bars": 576,
-        "taker_buy_ratio_threshold": "1.03",
-        "taker_sell_ratio_threshold": "0.97"
-      },
-      "fixed_parameters": {
-        "dedupe_window_minutes": 120
-      }
-    },
-    "description": "General derivatives participation impulse engine: detects fresh leveraged participation entering a structural resolution or continuation move using 5m candles, volume, open interest, Binance futures positioning metrics, premium, and funding context. Emits neutral evidence packets with bounded 5m and higher-timeframe context for downstream strategy selection.",
-    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.derivatives_participation_impulse_v1:scan_live_signal",
-    "name": "Derivatives Participation Impulse v1",
-    "output_envelope_version": "signal_packet.v2",
-    "required_data": [
-      {
-        "data_type": "candles",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 20000,
-        "origin": "raw",
-        "timeframe": "5m"
-      },
-      {
-        "data_type": "open_interest",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 20000,
-        "origin": "raw",
-        "timeframe": "5m"
-      },
-      {
-        "data_type": "futures_metrics",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 20000,
-        "origin": "raw",
-        "timeframe": "5m"
-      },
-      {
-        "data_type": "premium_index",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 20000,
-        "origin": "raw",
-        "timeframe": "5m"
-      },
-      {
-        "data_type": "funding_features",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 20000,
-        "origin": "derived",
-        "timeframe": "5m"
-      }
-    ],
-    "runtime_entrypoint": "quant_terminal_worker.signal_engines.derivatives_participation_impulse_v1:generate_training_signals",
-    "signal_engine_id": "derivatives_participation_impulse_v1",
-    "version": "0.1"
-  },
   "btc_derivatives_crowding_failure_v1": {
     "code_ref": {
       "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/btc_derivatives_crowding_failure_v1_base.py",
@@ -376,94 +121,45 @@
     "signal_engine_id": "compression_participation_release_4h_v1",
     "version": "0.1"
   },
-  "oi_compression_v1": {
+  "derivatives_participation_impulse_v1": {
     "code_ref": {
-      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/oi_compression_v1_base.py",
-      "path": "apps/worker/src/quant_terminal_worker/signal_engines/oi_compression_v1.py"
+      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/derivatives_participation_impulse_v1_base.py",
+      "path": "apps/worker/src/quant_terminal_worker/signal_engines/derivatives_participation_impulse_v1.py"
     },
     "configuration_schema": {
       "default_parameters": {
-        "context_bars": 96,
+        "breakout_threshold_pct": "0.04",
+        "context_bars": 48,
         "context_timeframes": [
-          "2h",
-          "8h",
-          "1d"
+          "1h",
+          "4h"
         ],
         "dedupe_window_minutes": 120,
+        "max_abs_funding_zscore": "2.25",
+        "max_abs_premium_zscore": "2.25",
+        "min_oi_change_1h_pct": "0.02",
+        "min_oi_z_threshold": "0.65",
         "min_stats_bars": 200,
-        "oi_change_window_bars": 24,
-        "oi_z_threshold": "1.0",
-        "range_percentile_threshold": "0.50",
-        "range_window_bars": 24,
-        "stats_lookback_bars": 576
-      }
-    },
-    "description": "Open-interest expansion inside compressed 5m price range, with point-in-time-safe OI and forming HTF context.",
-    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.oi_compression_v1:scan_live_signal",
-    "name": "OI Compression v1",
-    "output_envelope_version": "signal_packet.v2",
-    "required_data": [
-      {
-        "data_type": "candles",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 20000,
-        "origin": "raw",
-        "timeframe": "5m"
+        "min_taker_imbalance_z": "0.35",
+        "min_trend_return_4h_pct": "0.25",
+        "min_volume_ratio": "1.05",
+        "neutral_global_ratio_high": "1.08",
+        "neutral_global_ratio_low": "0.92",
+        "oi_change_window_bars": 48,
+        "range_lookback_bars": 96,
+        "range_percentile_threshold": "0.55",
+        "range_window_bars": 96,
+        "stats_lookback_bars": 576,
+        "taker_buy_ratio_threshold": "1.03",
+        "taker_sell_ratio_threshold": "0.97"
       },
-      {
-        "data_type": "open_interest",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 20000,
-        "origin": "raw",
-        "timeframe": "5m"
-      }
-    ],
-    "runtime_entrypoint": "quant_terminal_worker.signal_engines.oi_compression_v1:generate_training_signals",
-    "signal_engine_id": "oi_compression_v1",
-    "version": "0.1"
-  },
-  "oi_flush_exhaustion_v1": {
-    "code_ref": {
-      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/oi_flush_exhaustion_v1_base.py",
-      "path": "apps/worker/src/quant_terminal_worker/signal_engines/oi_flush_exhaustion_v1.py"
-    },
-    "configuration_schema": {
-      "default_parameters": {
-        "context_bars": 96,
-        "context_timeframes": [
-          "2h",
-          "8h",
-          "1d"
-        ],
-        "dedupe_window_minutes": 120,
-        "ema_columns": [
-          "ema_36",
-          "ema_43",
-          "ema_144",
-          "ema_169",
-          "ema_576",
-          "ema_676"
-        ],
-        "ema_context_bars": 96,
-        "ema_mode": "precomputed_ema_context",
-        "max_oi_change_30m_pct": "-0.15",
-        "min_abs_price_return_30m_pct": "0.35",
-        "min_rejection_wick_pct": "20.0",
-        "min_stats_bars": 200,
-        "min_volume_ratio": "1.1",
-        "oi_aggregate_context_bars": 24,
-        "oi_change_window_bars": 6,
-        "oi_context_bars": 96,
-        "oi_drop_z_threshold": "-1.0",
-        "price_move_window_bars": 6,
-        "range_lookback_bars": 48,
-        "range_window_bars": 48,
-        "stats_lookback_bars": 576
+      "fixed_parameters": {
+        "dedupe_window_minutes": 120
       }
     },
-    "description": "Open-interest flush exhaustion engine: detects sharp price moves with unusual OI contraction, elevated volume, rejection wick evidence, rich OI features, and EMA context.",
-    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.oi_flush_exhaustion_v1:scan_live_signal",
-    "name": "OI Flush Exhaustion v1",
+    "description": "General derivatives participation impulse engine: detects fresh leveraged participation entering a structural resolution or continuation move using 5m candles, volume, open interest, Binance futures positioning metrics, premium, and funding context. Emits neutral evidence packets with bounded 5m and higher-timeframe context for downstream strategy selection.",
+    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.derivatives_participation_impulse_v1:scan_live_signal",
+    "name": "Derivatives Participation Impulse v1",
     "output_envelope_version": "signal_packet.v2",
     "required_data": [
       {
@@ -481,289 +177,75 @@
         "timeframe": "5m"
       },
       {
-        "data_type": "candles",
-        "lookback_bars": 96,
-        "origin": "derived",
-        "required_columns": [
-          "ema_36",
-          "ema_43",
-          "ema_144",
-          "ema_169",
-          "ema_576",
-          "ema_676"
-        ],
-        "source": {
-          "data_type": "candles",
-          "origin": "raw",
-          "timeframe": "5m"
-        },
-        "timeframe": "5m"
-      },
-      {
-        "data_type": "candles",
-        "lookback_bars": 96,
-        "origin": "derived",
-        "required_columns": [
-          "ema_36",
-          "ema_43",
-          "ema_144",
-          "ema_169",
-          "ema_576",
-          "ema_676"
-        ],
-        "source": {
-          "data_type": "candles",
-          "origin": "raw",
-          "timeframe": "5m"
-        },
-        "timeframe": "2h"
-      },
-      {
-        "data_type": "candles",
-        "lookback_bars": 96,
-        "origin": "derived",
-        "required_columns": [
-          "ema_36",
-          "ema_43",
-          "ema_144",
-          "ema_169",
-          "ema_576",
-          "ema_676"
-        ],
-        "source": {
-          "data_type": "candles",
-          "origin": "raw",
-          "timeframe": "5m"
-        },
-        "timeframe": "8h"
-      },
-      {
-        "data_type": "candles",
-        "lookback_bars": 96,
-        "origin": "derived",
-        "required_columns": [
-          "ema_36",
-          "ema_43",
-          "ema_144",
-          "ema_169",
-          "ema_576",
-          "ema_676"
-        ],
-        "source": {
-          "data_type": "candles",
-          "origin": "raw",
-          "timeframe": "5m"
-        },
-        "timeframe": "1d"
-      }
-    ],
-    "runtime_entrypoint": "quant_terminal_worker.signal_engines.oi_flush_exhaustion_v1:generate_training_signals",
-    "signal_engine_id": "oi_flush_exhaustion_v1",
-    "version": "0.1"
-  },
-  "oi_trap_reversal_v1": {
-    "code_ref": {
-      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/oi_trap_reversal_v1_base.py",
-      "path": "apps/worker/src/quant_terminal_worker/signal_engines/oi_trap_reversal_v1.py"
-    },
-    "configuration_schema": {
-      "default_parameters": {
-        "breakout_threshold_pct": "0.05",
-        "context_bars": 96,
-        "context_timeframes": [
-          "2h",
-          "8h",
-          "1d"
-        ],
-        "dedupe_window_minutes": 120,
-        "min_oi_change_1h_pct": "-0.25",
-        "min_rejection_wick_pct": "15.0",
-        "min_stats_bars": 200,
-        "min_volume_ratio": "1.1",
-        "oi_change_window_bars": 6,
-        "oi_z_threshold": "0.6",
-        "range_lookback_bars": 48,
-        "range_window_bars": 48,
-        "stats_lookback_bars": 576
-      }
-    },
-    "description": "Open-interest trap reversal engine: detects failed range breakouts with unusual OI expansion, elevated volume, and rejection wick evidence.",
-    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.oi_trap_reversal_v1:scan_live_signal",
-    "name": "OI Trap Reversal v1",
-    "output_envelope_version": "signal_packet.v2",
-    "required_data": [
-      {
-        "data_type": "candles",
+        "data_type": "futures_metrics",
         "freshness_tolerance_seconds": 300,
         "lookback_bars": 20000,
         "origin": "raw",
         "timeframe": "5m"
       },
       {
-        "data_type": "open_interest",
-        "freshness_tolerance_seconds": 300,
-        "lookback_bars": 20000,
-        "origin": "raw",
-        "timeframe": "5m"
-      }
-    ],
-    "runtime_entrypoint": "quant_terminal_worker.signal_engines.oi_trap_reversal_v1:generate_training_signals",
-    "signal_engine_id": "oi_trap_reversal_v1",
-    "version": "0.1"
-  },
-  "vegas_5m_cluster_v5": {
-    "code_ref": {
-      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/vegas_ema_5m_hft_v5_base.py",
-      "path": "apps/worker/src/quant_terminal_worker/signal_engines/vegas_5m_cluster_v5.py"
-    },
-    "configuration_schema": {
-      "default_parameters": {
-        "context_bars": 80,
-        "context_mode": "candles_only_integrated_forming",
-        "context_timeframes": [
-          "2h",
-          "8h",
-          "1d"
-        ],
-        "dedupe_window_minutes": 120,
-        "ema_columns": [
-          "ema_36",
-          "ema_43",
-          "ema_144",
-          "ema_169",
-          "ema_576",
-          "ema_676"
-        ],
-        "ema_mode": "precomputed_5m_ema_cluster",
-        "proximity_threshold": "0.002",
-        "vote_threshold": 3
-      }
-    },
-    "description": "5m Vegas EMA rail cluster engine with point-in-time-safe 2h/8h/1d context and candles-only integrated forming HTF chart rows.",
-    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.vegas_5m_cluster_v5:scan_live_signal",
-    "name": "Vegas 5m Cluster v5",
-    "output_envelope_version": "signal_packet.v2",
-    "required_data": [
-      {
-        "data_type": "candles",
+        "data_type": "premium_index",
         "freshness_tolerance_seconds": 300,
         "lookback_bars": 20000,
         "origin": "raw",
         "timeframe": "5m"
       },
       {
-        "data_type": "candles",
-        "lookback_bars": 80,
+        "data_type": "funding_features",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
         "origin": "derived",
-        "required_columns": [
-          "ema_36",
-          "ema_43",
-          "ema_144",
-          "ema_169",
-          "ema_576",
-          "ema_676"
-        ],
-        "source": {
-          "data_type": "candles",
-          "origin": "raw",
-          "timeframe": "5m"
-        },
         "timeframe": "5m"
-      },
-      {
-        "data_type": "candles",
-        "lookback_bars": 80,
-        "origin": "derived",
-        "required_columns": [
-          "ema_36",
-          "ema_43",
-          "ema_144",
-          "ema_169",
-          "ema_576",
-          "ema_676"
-        ],
-        "source": {
-          "data_type": "candles",
-          "origin": "raw",
-          "timeframe": "5m"
-        },
-        "timeframe": "2h"
-      },
-      {
-        "data_type": "candles",
-        "lookback_bars": 80,
-        "origin": "derived",
-        "required_columns": [
-          "ema_36",
-          "ema_43",
-          "ema_144",
-          "ema_169",
-          "ema_576",
-          "ema_676"
-        ],
-        "source": {
-          "data_type": "candles",
-          "origin": "raw",
-          "timeframe": "5m"
-        },
-        "timeframe": "8h"
-      },
-      {
-        "data_type": "candles",
-        "lookback_bars": 80,
-        "origin": "derived",
-        "required_columns": [
-          "ema_36",
-          "ema_43",
-          "ema_144",
-          "ema_169",
-          "ema_576",
-          "ema_676"
-        ],
-        "source": {
-          "data_type": "candles",
-          "origin": "raw",
-          "timeframe": "5m"
-        },
-        "timeframe": "1d"
       }
     ],
-    "runtime_entrypoint": "quant_terminal_worker.signal_engines.vegas_5m_cluster_v5:generate_training_signals",
-    "signal_engine_id": "vegas_5m_cluster_v5",
+    "runtime_entrypoint": "quant_terminal_worker.signal_engines.derivatives_participation_impulse_v1:generate_training_signals",
+    "signal_engine_id": "derivatives_participation_impulse_v1",
     "version": "0.1"
   },
-  "vegas_5m_cluster_v6": {
+  "leverage_reset_reacceleration_v1": {
     "code_ref": {
-      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/vegas_ema_5m_hft_v6_base.py",
-      "path": "apps/worker/src/quant_terminal_worker/signal_engines/vegas_5m_cluster_v6.py"
+      "base_strategy_path": "packages/strategy_modules/src/quant_terminal_strategies/leverage_reset_reacceleration_v1_base.py",
+      "path": "apps/worker/src/quant_terminal_worker/signal_engines/leverage_reset_reacceleration_v1.py"
     },
     "configuration_schema": {
       "default_parameters": {
-        "bollinger_context_bars": 20,
-        "context_bars": 80,
-        "context_mode": "candles_integrated_forming_bollinger_oi_and_stage1a_context_v2",
+        "context_bars": 72,
         "context_timeframes": [
-          "2h",
-          "8h",
+          "1h",
+          "4h",
           "12h"
         ],
         "dedupe_window_minutes": 120,
-        "ema_columns": [
-          "ema_36",
-          "ema_43",
-          "ema_144",
-          "ema_169",
-          "ema_576",
-          "ema_676"
-        ],
-        "ema_mode": "precomputed_5m_ema_cluster",
-        "proximity_threshold": "0.002",
-        "vote_threshold": 3
+        "max_abs_funding_zscore": "2.10",
+        "max_abs_premium_zscore": "2.10",
+        "max_reset_age_bars": 72,
+        "min_flush_candle_range_pct": "0.25",
+        "min_flush_extension_pct": "0.05",
+        "min_oi_rebuild_1h_pct": "0.005",
+        "min_reclaim_from_extreme_pct": "0.08",
+        "min_reset_age_bars": 1,
+        "min_reset_oi_drop_1h_pct": "0.02",
+        "min_reset_volume_ratio": "1.00",
+        "min_stats_bars": 200,
+        "min_taker_imbalance_z": "0.05",
+        "min_volume_ratio": "0.95",
+        "oi_change_window_bars": 48,
+        "post_reset_global_ratio_high": "1.35",
+        "post_reset_global_ratio_low": "0.70",
+        "range_lookback_bars": 96,
+        "range_window_bars": 96,
+        "reset_lookback_bars": 72,
+        "stats_lookback_bars": 576,
+        "taker_buy_ratio_threshold": "1.01",
+        "taker_sell_ratio_threshold": "0.99"
+      },
+      "fixed_parameters": {
+        "dedupe_window_minutes": 120
       }
     },
-    "description": "Confirmed-close 5m Vegas EMA rail cluster engine with bounded point-in-time-safe 5m/2h/8h/12h/1d Stage 1A context, forming higher-timeframe candles, 1d Bollinger, and 15m open-interest regime evidence.",
-    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.vegas_5m_cluster_v6:scan_live_signal",
-    "name": "Vegas 5m Cluster v6",
+    "description": "General leverage reset reacceleration engine: detects post-flush leverage clearing followed by clean OI rebuild, volume/taker reacceleration, and normalized premium/funding context. Designed for ETH/SOL style post-liquidation continuation or reversal windows with bounded 5m plus 1h/4h/12h context.",
+    "live_scanner_entrypoint": "quant_terminal_worker.signal_engines.leverage_reset_reacceleration_v1:scan_live_signal",
+    "name": "Leverage Reset Reacceleration v1",
     "output_envelope_version": "signal_packet.v2",
     "required_data": [
       {
@@ -775,156 +257,36 @@
       },
       {
         "data_type": "open_interest",
-        "freshness_tolerance_seconds": 900,
+        "freshness_tolerance_seconds": 300,
         "lookback_bars": 20000,
         "origin": "raw",
         "timeframe": "5m"
       },
       {
-        "data_type": "candles",
-        "lookback_bars": 80,
-        "origin": "derived",
-        "required_columns": [
-          "ema_36",
-          "ema_43",
-          "ema_144",
-          "ema_169",
-          "ema_576",
-          "ema_676"
-        ],
-        "source": {
-          "data_type": "candles",
-          "origin": "raw",
-          "timeframe": "5m"
-        },
+        "data_type": "futures_metrics",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
         "timeframe": "5m"
       },
       {
-        "data_type": "candles",
-        "lookback_bars": 80,
-        "origin": "derived",
-        "required_columns": [
-          "ema_36",
-          "ema_43",
-          "ema_144",
-          "ema_169",
-          "ema_576",
-          "ema_676"
-        ],
-        "source": {
-          "data_type": "candles",
-          "origin": "raw",
-          "timeframe": "5m"
-        },
-        "timeframe": "2h"
+        "data_type": "premium_index",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
+        "origin": "raw",
+        "timeframe": "5m"
       },
       {
-        "data_type": "candles",
-        "lookback_bars": 80,
+        "data_type": "funding_features",
+        "freshness_tolerance_seconds": 300,
+        "lookback_bars": 20000,
         "origin": "derived",
-        "required_columns": [
-          "ema_36",
-          "ema_43",
-          "ema_144",
-          "ema_169",
-          "ema_576",
-          "ema_676"
-        ],
-        "source": {
-          "data_type": "candles",
-          "origin": "raw",
-          "timeframe": "5m"
-        },
-        "timeframe": "8h"
-      },
-      {
-        "data_type": "candles",
-        "lookback_bars": 80,
-        "origin": "derived",
-        "required_columns": [
-          "ema_36",
-          "ema_43",
-          "ema_144",
-          "ema_169",
-          "ema_576",
-          "ema_676"
-        ],
-        "source": {
-          "data_type": "candles",
-          "origin": "raw",
-          "timeframe": "5m"
-        },
-        "timeframe": "12h"
-      },
-      {
-        "data_type": "candles",
-        "lookback_bars": 40,
-        "origin": "derived",
-        "source": {
-          "data_type": "candles",
-          "origin": "raw",
-          "timeframe": "5m"
-        },
-        "timeframe": "1d"
-      },
-      {
-        "data_type": "feature_bollinger",
-        "lookback_bars": 40,
-        "origin": "derived",
-        "required_columns": [
-          "bb_mid_20",
-          "bb_upper_20_2",
-          "bb_lower_20_2",
-          "bb_position_pct",
-          "bb_bandwidth_pct",
-          "bb_zscore"
-        ],
-        "source": {
-          "data_type": "candles",
-          "origin": "derived",
-          "timeframe": "1d"
-        },
-        "timeframe": "1d"
-      },
-      {
-        "data_type": "feature_open_interest_regime",
-        "lookback_bars": 1,
-        "origin": "derived",
-        "required_columns": [
-          "oi_return_pct_2h",
-          "oi_return_pct_8h",
-          "oi_return_pct_24h",
-          "oi_change_2h_zscore_7d",
-          "general_long_short_ratio",
-          "taker_long_short_ratio_avg_2h",
-          "available_at",
-          "complete",
-          "source_window_start_ts",
-          "source_window_end_ts",
-          "source_row_count"
-        ],
-        "source": {
-          "data_type": "open_interest",
-          "origin": "derived",
-          "timeframe": "15m"
-        },
-        "timeframe": "15m"
-      },
-      {
-        "data_type": "open_interest",
-        "lookback_bars": 1000,
-        "origin": "derived",
-        "source": {
-          "data_type": "open_interest",
-          "origin": "raw",
-          "timeframe": "5m"
-        },
-        "timeframe": "15m"
+        "timeframe": "5m"
       }
     ],
-    "runtime_entrypoint": "quant_terminal_worker.signal_engines.vegas_5m_cluster_v6:generate_training_signals",
-    "signal_engine_id": "vegas_5m_cluster_v6",
-    "version": "0.2"
+    "runtime_entrypoint": "quant_terminal_worker.signal_engines.leverage_reset_reacceleration_v1:generate_training_signals",
+    "signal_engine_id": "leverage_reset_reacceleration_v1",
+    "version": "0.1"
   },
   "vegas_ema": {
     "code_ref": {

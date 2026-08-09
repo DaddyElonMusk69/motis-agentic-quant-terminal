@@ -78,6 +78,7 @@ DEFAULT_MAX_FADE_OI_CHANGE_4H_PCT = 0.08
 DEFAULT_MIN_FADE_REVERSAL_1H_PCT = 0.04
 DEFAULT_MIN_STRESS_PRICE_RETURN_4H_PCT = 0.45
 DEFAULT_MIN_STRESS_OI_CHANGE_4H_PCT = 0.08
+DEFAULT_ACTIVATION_LOOKBACK_BARS = 24
 DEFAULT_DEDUPE_WINDOW_MINUTES = 120
 DEFAULT_CONTEXT_BARS = 72
 DEFAULT_CONTEXT_TIMEFRAMES = ("1h", "4h", "12h")
@@ -341,6 +342,31 @@ def _event_features(
     parameters: dict[str, Any],
     feature_cache: dict[str, list[float | None]],
 ) -> dict[str, Any] | None:
+    current = _regime_features_at(rows=rows, index=index, parameters=parameters, feature_cache=feature_cache)
+    if current is None:
+        return None
+    activation_lookback = int(parameters["activation_lookback_bars"])
+    if activation_lookback > 0:
+        start_index = max(0, index - activation_lookback)
+        for prior_index in range(start_index, index):
+            prior = _regime_features_at(rows=rows, index=prior_index, parameters=parameters, feature_cache=feature_cache)
+            if prior is None:
+                continue
+            if (
+                prior.get("selected_leaf") == current.get("selected_leaf")
+                and prior.get("observed_regime_bias") == current.get("observed_regime_bias")
+            ):
+                return None
+    return current
+
+
+def _regime_features_at(
+    *,
+    rows: list[dict[str, Any]],
+    index: int,
+    parameters: dict[str, Any],
+    feature_cache: dict[str, list[float | None]],
+) -> dict[str, Any] | None:
     if index < max(int(parameters["min_stats_bars"]), 144):
         return None
     row = rows[index]
@@ -467,6 +493,7 @@ def _with_defaults(parameters: dict[str, Any] | None) -> dict[str, Any]:
     merged.setdefault("min_fade_reversal_1h_pct", DEFAULT_MIN_FADE_REVERSAL_1H_PCT)
     merged.setdefault("min_stress_price_return_4h_pct", DEFAULT_MIN_STRESS_PRICE_RETURN_4H_PCT)
     merged.setdefault("min_stress_oi_change_4h_pct", DEFAULT_MIN_STRESS_OI_CHANGE_4H_PCT)
+    merged.setdefault("activation_lookback_bars", DEFAULT_ACTIVATION_LOOKBACK_BARS)
     merged.setdefault("dedupe_window_minutes", DEFAULT_DEDUPE_WINDOW_MINUTES)
     merged.setdefault("context_bars", DEFAULT_CONTEXT_BARS)
     merged.setdefault("context_timeframes", list(DEFAULT_CONTEXT_TIMEFRAMES))
